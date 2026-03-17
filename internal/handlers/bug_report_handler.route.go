@@ -1,0 +1,243 @@
+package handlers
+
+import (
+	"archive/zip"
+	"bytes"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/jmoiron/sqlx"
+
+	"emly-api-go/internal/models"
+)
+
+func GetAllBugReports(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var reports []models.BugReport
+		if err := db.SelectContext(r.Context(), &reports, "SELECT * FROM emly_bugreports.bug_reports"); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(reports)
+	}
+}
+
+func GetBugReportByID(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "missing id parameter"})
+			return
+		}
+
+		var report models.BugReport
+		err := db.GetContext(r.Context(), &report, "SELECT * FROM emly_bugreports.bug_reports WHERE id = ?", id)
+		if errors.Is(err, sql.ErrNoRows) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "bug report not found"})
+			return
+		}
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(report)
+	}
+}
+
+func GetReportsCount(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var count int
+		if err := db.GetContext(r.Context(), &count, "SELECT COUNT(*) FROM emly_bugreports.bug_reports"); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]int{"count": count})
+	}
+}
+
+func GetReportFilesByReportID(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "missing id parameter"})
+			return
+		}
+
+		var files []models.BugReportFile
+		if err := db.SelectContext(r.Context(), &files, "SELECT * FROM emly_bugreports.bug_report_files WHERE report_id = ?", id); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(files)
+	}
+}
+
+func GetBugReportZipById(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "missing id parameter"})
+			return
+		}
+
+		var report models.BugReport
+		err := db.GetContext(r.Context(), &report, "SELECT * FROM emly_bugreports.bug_reports WHERE id = ?", id)
+		if errors.Is(err, sql.ErrNoRows) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "bug report not found"})
+			return
+		}
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		var files []models.BugReportFile
+		if err := db.SelectContext(r.Context(), &files, "SELECT * FROM emly_bugreports.bug_report_files WHERE report_id = ?", id); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		reportText := fmt.Sprintf(
+			"Bug Report #%d\n========================\n\nName: %s\nEmail: %s\nHostname: %s\nOS User: %s\nHWID: %s\nIP: %s\nStatus: %s\nCreated: %s\nUpdated: %s\n\nDescription:\n------------\n%s\n",
+			report.ID,
+			report.Name,
+			report.Email,
+			report.Hostname,
+			report.OsUser,
+			report.HWID,
+			report.SubmitterIP,
+			report.Status,
+			report.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+			report.UpdatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+			report.Description,
+		)
+		if len(report.SystemInfo) > 0 && string(report.SystemInfo) != "null" {
+			pretty, err := json.MarshalIndent(report.SystemInfo, "", "  ")
+			if err == nil {
+				reportText += fmt.Sprintf("\nSystem Info:\n------------\n%s\n", string(pretty))
+			}
+		}
+
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+
+		rf, err := zw.Create("report.txt")
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		if _, err = rf.Write([]byte(reportText)); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		for _, file := range files {
+			ff, err := zw.Create(fmt.Sprintf("%s/%s", file.FileRole, file.Filename))
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			if _, err = ff.Write(file.Data); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+		}
+
+		if err := zw.Close(); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report-%d.zip\"", report.ID))
+		w.Write(buf.Bytes())
+	}
+}
+
+func GetReportFileByFileID(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reportId := chi.URLParam(r, "id")
+		if reportId == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "missing report id parameter"})
+			return
+		}
+		fileId := chi.URLParam(r, "file_id")
+		if fileId == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "missing file id parameter"})
+			return
+		}
+		var file models.BugReportFile
+		err := db.GetContext(r.Context(), &file, "SELECT filename, mime_type, data FROM emly_bugreports.bug_report_files WHERE report_id = ? AND id = ?", reportId, fileId)
+		if errors.Is(err, sql.ErrNoRows) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "file not found"})
+			return
+		}
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		mimeType := file.MimeType
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", mimeType)
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+file.Filename+"\"")
+		_, err = w.Write(file.Data)
+		if err != nil {
+			return
+		}
+	}
+}
