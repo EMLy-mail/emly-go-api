@@ -6,9 +6,10 @@ import (
 )
 
 type Config struct {
-	Port    string
-	DSN     string
-	APIKeys []string
+	Port     string
+	DSN      string
+	APIKey   string
+	AdminKey string
 }
 
 func Load() *Config {
@@ -17,18 +18,30 @@ func Load() *Config {
 		port = "8080"
 	}
 
-	raw := os.Getenv("API_KEYS")
-	var keys []string
+	raw := os.Getenv("API_KEY")
+	var apiKey string
 	for _, k := range strings.Split(raw, ",") {
 		k = strings.TrimSpace(k)
 		if k != "" {
-			keys = append(keys, k)
+			apiKey = k
+			break
+		}
+	}
+
+	raw = os.Getenv("ADMIN_KEY")
+	var adminKey string
+	for _, k := range strings.Split(raw, ",") {
+		k = strings.TrimSpace(k)
+		if k != "" {
+			adminKey = k
+			break
 		}
 	}
 
 	return &Config{
-		Port:    port,
-		DSN:     os.Getenv("DB_DSN"),
-		APIKeys: keys,
+		Port:     port,
+		DSN:      os.Getenv("DB_DSN"),
+		APIKey:   apiKey,
+		AdminKey: adminKey,
 	}
 }
