@@ -33,7 +33,7 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "invalid multipart form: " + err.Error()})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid multipart form: " + err.Error()})
 			return
 		}
 
@@ -48,7 +48,7 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 		if name == "" || email == "" || description == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "name, email and description are required"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "name, email and description are required"})
 			return
 		}
 
@@ -68,13 +68,13 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("[BUGREPORT] Received from name=%s hwid=%s ip=%s", name, hwid, submitterIP)
 
 		result, err := db.ExecContext(r.Context(),
-			"INSERT INTO emly_bugreports.bug_reports (name, email, description, hwid, hostname, os_user, submitter_ip, system_info, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			"INSERT INTO emly_bugreports_dev.bug_reports (name, email, description, hwid, hostname, os_user, submitter_ip, system_info, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			name, email, description, hwid, hostname, osUser, submitterIP, systemInfo, models.BugReportStatusNew,
 		)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
@@ -82,7 +82,7 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
@@ -98,7 +98,7 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": "reading file " + fr.field + ": " + err.Error()})
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "reading file " + fr.field + ": " + err.Error()})
 				return
 			}
 
@@ -114,13 +114,13 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 			log.Printf("[BUGREPORT] File uploaded: role=%s size=%d bytes", fr.role, len(data))
 
 			_, err = db.ExecContext(r.Context(),
-				"INSERT INTO emly_bugreports.bug_report_files (report_id, file_role, filename, mime_type, file_size, data) VALUES (?, ?, ?, ?, ?, ?)",
+				"INSERT INTO emly_bugreports_dev.bug_report_files (report_id, file_role, filename, mime_type, file_size, data) VALUES (?, ?, ?, ?, ?, ?)",
 				reportID, fr.role, filename, mimeType, len(data), data,
 			)
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
 			}
 		}
@@ -129,7 +129,7 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":   true,
 			"report_id": reportID,
 			"message":   "Bug report submitted successfully",
@@ -140,15 +140,15 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 func GetAllBugReports(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var reports []models.BugReport
-		if err := db.SelectContext(r.Context(), &reports, "SELECT * FROM emly_bugreports.bug_reports"); err != nil {
+		if err := db.SelectContext(r.Context(), &reports, "SELECT * FROM emly_bugreports_dev.bug_reports"); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(reports)
+		_ = json.NewEncoder(w).Encode(reports)
 	}
 }
 
@@ -158,42 +158,42 @@ func GetBugReportByID(db *sqlx.DB) http.HandlerFunc {
 		if id == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "missing id parameter"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing id parameter"})
 			return
 		}
 
 		var report models.BugReport
-		err := db.GetContext(r.Context(), &report, "SELECT * FROM emly_bugreports.bug_reports WHERE id = ?", id)
+		err := db.GetContext(r.Context(), &report, "SELECT * FROM emly_bugreports_dev.bug_reports WHERE id = ?", id)
 		if errors.Is(err, sql.ErrNoRows) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "bug report not found"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "bug report not found"})
 			return
 		}
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(report)
+		_ = json.NewEncoder(w).Encode(report)
 	}
 }
 
 func GetReportsCount(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var count int
-		if err := db.GetContext(r.Context(), &count, "SELECT COUNT(*) FROM emly_bugreports.bug_reports"); err != nil {
+		if err := db.GetContext(r.Context(), &count, "SELECT COUNT(*) FROM emly_bugreports_dev.bug_reports"); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]int{"count": count})
+		_ = json.NewEncoder(w).Encode(map[string]int{"count": count})
 	}
 }
 
@@ -203,20 +203,20 @@ func GetReportFilesByReportID(db *sqlx.DB) http.HandlerFunc {
 		if id == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "missing id parameter"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing id parameter"})
 			return
 		}
 
 		var files []models.BugReportFile
-		if err := db.SelectContext(r.Context(), &files, "SELECT * FROM emly_bugreports.bug_report_files WHERE report_id = ?", id); err != nil {
+		if err := db.SelectContext(r.Context(), &files, "SELECT * FROM emly_bugreports_dev.bug_report_files WHERE report_id = ?", id); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(files)
+		_ = json.NewEncoder(w).Encode(files)
 	}
 }
 
@@ -226,30 +226,30 @@ func GetBugReportZipById(db *sqlx.DB) http.HandlerFunc {
 		if id == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "missing id parameter"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing id parameter"})
 			return
 		}
 
 		var report models.BugReport
-		err := db.GetContext(r.Context(), &report, "SELECT * FROM emly_bugreports.bug_reports WHERE id = ?", id)
+		err := db.GetContext(r.Context(), &report, "SELECT * FROM emly_bugreports_dev.bug_reports WHERE id = ?", id)
 		if errors.Is(err, sql.ErrNoRows) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "bug report not found"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "bug report not found"})
 			return
 		}
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
 		var files []models.BugReportFile
-		if err := db.SelectContext(r.Context(), &files, "SELECT * FROM emly_bugreports.bug_report_files WHERE report_id = ?", id); err != nil {
+		if err := db.SelectContext(r.Context(), &files, "SELECT * FROM emly_bugreports_dev.bug_report_files WHERE report_id = ?", id); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
@@ -281,13 +281,13 @@ func GetBugReportZipById(db *sqlx.DB) http.HandlerFunc {
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 		if _, err = rf.Write([]byte(reportText)); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
@@ -296,13 +296,13 @@ func GetBugReportZipById(db *sqlx.DB) http.HandlerFunc {
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
 			}
 			if _, err = ff.Write(file.Data); err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
 			}
 		}
@@ -310,7 +310,7 @@ func GetBugReportZipById(db *sqlx.DB) http.HandlerFunc {
 		if err := zw.Close(); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
@@ -326,28 +326,28 @@ func GetReportFileByFileID(db *sqlx.DB) http.HandlerFunc {
 		if reportId == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "missing report id parameter"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing report id parameter"})
 			return
 		}
 		fileId := chi.URLParam(r, "file_id")
 		if fileId == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "missing file id parameter"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing file id parameter"})
 			return
 		}
 		var file models.BugReportFile
-		err := db.GetContext(r.Context(), &file, "SELECT filename, mime_type, data FROM emly_bugreports.bug_report_files WHERE report_id = ? AND id = ?", reportId, fileId)
+		err := db.GetContext(r.Context(), &file, "SELECT filename, mime_type, data FROM emly_bugreports_dev.bug_report_files WHERE report_id = ? AND id = ?", reportId, fileId)
 		if errors.Is(err, sql.ErrNoRows) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "file not found"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "file not found"})
 			return
 		}
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
@@ -361,5 +361,72 @@ func GetReportFileByFileID(db *sqlx.DB) http.HandlerFunc {
 		if err != nil {
 			return
 		}
+	}
+}
+
+func GetReportStatusByID(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reportId := chi.URLParam(r, "id")
+		if reportId == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing report id parameter"})
+			return
+		}
+		var reportStatus models.BugReportStatus
+		if err := db.GetContext(r.Context(), &reportStatus, "SELECT status FROM emly_bugreports_dev.bug_reports WHERE id = ?", reportId); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": string(reportStatus)})
+	}
+}
+
+func PatchReportStatus(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reportId := chi.URLParam(r, "id")
+		if reportId == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing report id parameter"})
+			return
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "unable to read request body: " + err.Error()})
+			return
+		}
+		reportStatus := models.BugReportStatus(body)
+
+		result, err := db.ExecContext(r.Context(), "UPDATE emly_bugreports_dev.bug_reports SET status = ? WHERE id = ?", reportStatus, reportId)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		if rowsAffected == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "bug report not found"})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": "status updated successfully"})
 	}
 }

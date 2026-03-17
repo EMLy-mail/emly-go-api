@@ -86,9 +86,11 @@ func main() {
 
 					r.Get("/", handlers.GetAllBugReports(db))
 					r.Get("/{id}", handlers.GetBugReportByID(db))
+					r.Get("/{id}/status", handlers.GetReportStatusByID(db))
 					r.Get("/{id}/files", handlers.GetReportFilesByReportID(db))
 					r.Get("/{id}/files/{file_id}", handlers.GetReportFileByFileID(db))
-					r.Get("/{id}/zip", handlers.GetBugReportZipById(db))
+					r.Get("/{id}/download", handlers.GetBugReportZipById(db))
+					r.Patch("/{id}/status", handlers.PatchReportStatus(db))
 				})
 			})
 		})
