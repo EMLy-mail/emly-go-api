@@ -7,13 +7,135 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 
 	"emly-api-go/internal/models"
 )
+
+var fileRoles = []struct {
+	field       string
+	role        models.FileRole
+	defaultMime string
+}{
+	{"attachment", models.FileRoleAttachment, "application/octet-stream"},
+	{"screenshot", models.FileRoleScreenshot, "image/png"},
+	{"log", models.FileRoleLog, "text/plain"},
+}
+
+func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid multipart form: " + err.Error()})
+			return
+		}
+
+		name := r.FormValue("name")
+		email := r.FormValue("email")
+		description := r.FormValue("description")
+		hwid := r.FormValue("hwid")
+		hostname := r.FormValue("hostname")
+		osUser := r.FormValue("os_user")
+		systemInfoStr := r.FormValue("system_info")
+
+		if name == "" || email == "" || description == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "name, email and description are required"})
+			return
+		}
+
+		submitterIP := strings.TrimSpace(strings.SplitN(r.Header.Get("X-Forwarded-For"), ",", 2)[0])
+		if submitterIP == "" {
+			submitterIP = r.Header.Get("X-Real-IP")
+		}
+		if submitterIP == "" {
+			submitterIP = "unknown"
+		}
+
+		var systemInfo json.RawMessage
+		if systemInfoStr != "" && json.Valid([]byte(systemInfoStr)) {
+			systemInfo = json.RawMessage(systemInfoStr)
+		}
+
+		log.Printf("[BUGREPORT] Received from name=%s hwid=%s ip=%s", name, hwid, submitterIP)
+
+		result, err := db.ExecContext(r.Context(),
+			"INSERT INTO emly_bugreports.bug_reports (name, email, description, hwid, hostname, os_user, submitter_ip, system_info, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			name, email, description, hwid, hostname, osUser, submitterIP, systemInfo, models.BugReportStatusNew,
+		)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		reportID, err := result.LastInsertId()
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		for _, fr := range fileRoles {
+			file, header, err := r.FormFile(fr.field)
+			if err != nil {
+				// no file uploaded for this role — skip
+				continue
+			}
+			defer file.Close()
+
+			data, err := io.ReadAll(file)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": "reading file " + fr.field + ": " + err.Error()})
+				return
+			}
+
+			mimeType := header.Header.Get("Content-Type")
+			if mimeType == "" {
+				mimeType = fr.defaultMime
+			}
+			filename := header.Filename
+			if filename == "" {
+				filename = fr.field + ".bin"
+			}
+
+			log.Printf("[BUGREPORT] File uploaded: role=%s size=%d bytes", fr.role, len(data))
+
+			_, err = db.ExecContext(r.Context(),
+				"INSERT INTO emly_bugreports.bug_report_files (report_id, file_role, filename, mime_type, file_size, data) VALUES (?, ?, ?, ?, ?, ?)",
+				reportID, fr.role, filename, mimeType, len(data), data,
+			)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+		}
+
+		log.Printf("[BUGREPORT] Created successfully with id=%d", reportID)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   true,
+			"report_id": reportID,
+			"message":   "Bug report submitted successfully",
+		})
+	}
+}
 
 func GetAllBugReports(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

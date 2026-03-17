@@ -1,6 +1,7 @@
 package main
 
 import (
+	apimw "emly-api-go/internal/middleware"
 	"fmt"
 	"log"
 	"net/http"
@@ -15,7 +16,6 @@ import (
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/database"
 	"emly-api-go/internal/handlers"
-	apimw "emly-api-go/internal/middleware"
 )
 
 func main() {
@@ -52,7 +52,7 @@ func main() {
 		w.Write([]byte("emly-api-go"))
 	})
 
-	r.Route("/api/v1", func(r chi.Router) {
+	r.Route("/v1", func(r chi.Router) {
 		r.Use(func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("X-Server", "emly-api-go")
@@ -63,30 +63,33 @@ func main() {
 		// Health – public, no API key required
 		r.Get("/health", handlers.Health(db))
 
-		// ROUTE: Bug Reports - Protected via API Key
-		r.Route("/bug-reports", func(r chi.Router) {
-			r.Group(func(r chi.Router) {
-				r.Use(apimw.APIKeyAuth(db))
+		r.Route("/api", func(r chi.Router) {
+			// ROUTE: Bug Reports - Protected via API Key
+			r.Route("/bug-reports", func(r chi.Router) {
+				r.Group(func(r chi.Router) {
+					r.Use(apimw.APIKeyAuth(db))
 
-				// Tighter rate-limit on protected group: 30 req / min per IP
-				r.Use(httprate.LimitByIP(30, time.Minute))
+					// Tighter rate-limit on protected group: 30 req / min per IP
+					r.Use(httprate.LimitByIP(30, time.Minute))
 
-				r.Get("/count", handlers.GetReportsCount(db))
-			})
+					r.Get("/count", handlers.GetReportsCount(db))
+					r.Post("/", handlers.CreateBugReport(db))
+				})
 
-			r.Group(func(r chi.Router) {
-				// More strict auth due to sensitive info
-				r.Use(apimw.APIKeyAuth(db))
-				r.Use(apimw.AdminKeyAuth(db))
+				r.Group(func(r chi.Router) {
+					// More strict auth due to sensitive info
+					r.Use(apimw.APIKeyAuth(db))
+					r.Use(apimw.AdminKeyAuth(db))
 
-				// Tighter rate-limit on protected group: 30 req / min per IP
-				r.Use(httprate.LimitByIP(30, time.Minute))
+					// Tighter rate-limit on protected group: 30 req / min per IP
+					r.Use(httprate.LimitByIP(30, time.Minute))
 
-				r.Get("/", handlers.GetAllBugReports(db))
-				r.Get("/{id}", handlers.GetBugReportByID(db))
-				r.Get("/{id}/files", handlers.GetReportFilesByReportID(db))
-				r.Get("/{id}/files/{file_id}", handlers.GetReportFileByFileID(db))
-				r.Get("/{id}/zip", handlers.GetBugReportZipById(db))
+					r.Get("/", handlers.GetAllBugReports(db))
+					r.Get("/{id}", handlers.GetBugReportByID(db))
+					r.Get("/{id}/files", handlers.GetReportFilesByReportID(db))
+					r.Get("/{id}/files/{file_id}", handlers.GetReportFileByFileID(db))
+					r.Get("/{id}/zip", handlers.GetBugReportZipById(db))
+				})
 			})
 		})
 
