@@ -9,6 +9,7 @@ import (
 type Config struct {
 	Port            string
 	DSN             string
+	Database        string
 	APIKey          string
 	AdminKey        string
 	MaxOpenConns    int
@@ -55,9 +56,19 @@ func Load() *Config {
 		connMaxLifetime = 5
 	}
 
+	dbName := os.Getenv("DATABASE_NAME")
+	if dbName == "" {
+		panic("DATABASE_NAME environment variable is required")
+	}
+
+	if os.Getenv("DB_DSN") == "" {
+		panic("DB_DSN environment variable is required")
+	}
+
 	return &Config{
 		Port:            port,
 		DSN:             os.Getenv("DB_DSN"),
+		Database:        dbName,
 		APIKey:          apiKey,
 		AdminKey:        adminKey,
 		MaxOpenConns:    maxOpenConns,

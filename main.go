@@ -15,6 +15,7 @@ import (
 
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/database"
+	"emly-api-go/internal/database/schema"
 	"emly-api-go/internal/handlers"
 )
 
@@ -34,6 +35,11 @@ func main() {
 			log.Fatalf("closing database failed: %v", err)
 		}
 	}(db)
+
+	// Run conditional schema migrations
+	if err := schema.Migrate(db, cfg.Database); err != nil {
+		log.Fatalf("schema migration failed: %v", err)
+	}
 
 	r := chi.NewRouter()
 
@@ -56,6 +62,7 @@ func main() {
 		r.Use(func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("X-Server", "emly-api-go")
+				w.Header().Set("X-Powered-By", "Pure Protogen sillyness :3")
 				next.ServeHTTP(w, r)
 			})
 		})

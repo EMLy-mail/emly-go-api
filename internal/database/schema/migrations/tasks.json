@@ -1,0 +1,23 @@
+{
+  "tasks": [
+    {
+      "id": "1_bug_reports",
+      "sql_file": "1_bug_reports.sql",
+      "description": "Add hostname, os_user columns and their indexes to bug_reports.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "bug_reports", "column": "hostname" },
+        { "type": "column_not_exists", "table": "bug_reports", "column": "os_user" },
+        { "type": "index_not_exists",  "table": "bug_reports", "index": "idx_hostname" },
+        { "type": "index_not_exists",  "table": "bug_reports", "index": "idx_os_user" }
+      ]
+    },
+    {
+      "id": "2_users",
+      "sql_file": "2_users.sql",
+      "description": "Add enabled column to user table.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "user", "column": "enabled" }
+      ]
+    }
+  ]
+}
