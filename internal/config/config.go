@@ -2,14 +2,18 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 )
 
 type Config struct {
-	Port     string
-	DSN      string
-	APIKey   string
-	AdminKey string
+	Port            string
+	DSN             string
+	APIKey          string
+	AdminKey        string
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime int
 }
 
 func Load() *Config {
@@ -38,10 +42,26 @@ func Load() *Config {
 		}
 	}
 
+	maxOpenConns, err := strconv.Atoi(os.Getenv("DB_MAX_OPEN_CONNS"))
+	if err != nil {
+		maxOpenConns = 30
+	}
+	maxIdleConns, err := strconv.Atoi(os.Getenv("DB_MAX_IDLE_CONNS"))
+	if err != nil {
+		maxIdleConns = 5
+	}
+	connMaxLifetime, err := strconv.Atoi(os.Getenv("DB_CONN_MAX_LIFETIME"))
+	if err != nil {
+		connMaxLifetime = 5
+	}
+
 	return &Config{
-		Port:     port,
-		DSN:      os.Getenv("DB_DSN"),
-		APIKey:   apiKey,
-		AdminKey: adminKey,
+		Port:            port,
+		DSN:             os.Getenv("DB_DSN"),
+		APIKey:          apiKey,
+		AdminKey:        adminKey,
+		MaxOpenConns:    maxOpenConns,
+		MaxIdleConns:    maxIdleConns,
+		ConnMaxLifetime: connMaxLifetime,
 	}
 }
