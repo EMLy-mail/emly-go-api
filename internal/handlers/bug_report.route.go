@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"text/template"
@@ -92,7 +93,12 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 			if err != nil {
 				continue
 			}
-			defer file.Close()
+			defer func(file multipart.File) {
+				err := file.Close()
+				if err != nil {
+					log.Fatalf("closing uploaded file failed: %v", err)
+				}
+			}(file)
 
 			data, err := io.ReadAll(file)
 			if err != nil {
@@ -272,7 +278,11 @@ func GetBugReportZipById(db *sqlx.DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report-%d.zip\"", report.ID))
-		w.Write(buf.Bytes())
+		_, err = w.Write(buf.Bytes())
+		if err != nil {
+			return
+		}
+
 	}
 }
 
