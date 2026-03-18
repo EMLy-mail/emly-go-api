@@ -1,0 +1,22 @@
+EMLy Bug Report #{{ .ID }}
+========================
+
+Name:     {{ .Name }}
+Email:    {{ .Email }}
+Hostname: {{ .Hostname }}
+OS User:  {{ .OsUser }}
+HWID:     {{ .HWID }}
+IP:       {{ .SubmitterIP }}
+Status:   {{ .Status }}
+Created:  {{ .CreatedAt }}
+Updated:  {{ .UpdatedAt }}
+
+Description:
+------------
+{{ .Description }}
+{{ if .SystemInfo }}
+System Info:
+------------
+{{ .SystemInfo }}
+{{ end }}
+

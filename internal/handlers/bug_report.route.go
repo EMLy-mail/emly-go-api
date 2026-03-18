@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"database/sql"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,11 +12,19 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"text/template"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 
 	"emly-api-go/internal/models"
+)
+
+//go:embed templates/report.txt.tmpl
+var reportTemplateFS embed.FS
+
+var reportTmpl = template.Must(
+	template.ParseFS(reportTemplateFS, "templates/report.txt.tmpl"),
 )
 
 var fileRoles = []struct {
@@ -212,25 +221,23 @@ func GetBugReportZipById(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		reportText := fmt.Sprintf(
-			"Bug Report #%d\n========================\n\nName: %s\nEmail: %s\nHostname: %s\nOS User: %s\nHWID: %s\nIP: %s\nStatus: %s\nCreated: %s\nUpdated: %s\n\nDescription:\n------------\n%s\n",
-			report.ID,
-			report.Name,
-			report.Email,
-			report.Hostname,
-			report.OsUser,
-			report.HWID,
-			report.SubmitterIP,
-			report.Status,
-			report.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
-			report.UpdatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
-			report.Description,
-		)
+		var sysInfoStr string
 		if len(report.SystemInfo) > 0 && string(report.SystemInfo) != "null" {
-			pretty, err := json.MarshalIndent(report.SystemInfo, "", "  ")
-			if err == nil {
-				reportText += fmt.Sprintf("\nSystem Info:\n------------\n%s\n", string(pretty))
+			if pretty, err := json.MarshalIndent(report.SystemInfo, "", "  "); err == nil {
+				sysInfoStr = string(pretty)
 			}
+		}
+
+		tmplData := struct {
+			models.BugReport
+			CreatedAt  string
+			UpdatedAt  string
+			SystemInfo string
+		}{
+			BugReport:  report,
+			CreatedAt:  report.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+			UpdatedAt:  report.UpdatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+			SystemInfo: sysInfoStr,
 		}
 
 		var buf bytes.Buffer
@@ -241,7 +248,7 @@ func GetBugReportZipById(db *sqlx.DB) http.HandlerFunc {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if _, err = rf.Write([]byte(reportText)); err != nil {
+		if err = reportTmpl.Execute(rf, tmplData); err != nil {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
