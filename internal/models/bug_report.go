@@ -14,6 +14,11 @@ const (
 	BugReportStatusClosed   BugReportStatus = "closed"
 )
 
+type BugReportListItem struct {
+	BugReport
+	FileCount int `db:"file_count" json:"file_count"`
+}
+
 type BugReport struct {
 	ID          uint64          `db:"id"           json:"id"`
 	Name        string          `db:"name"         json:"name"`

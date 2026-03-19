@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -139,13 +141,70 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 
 func GetAllBugReports(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var reports []models.BugReport
-		if err := db.SelectContext(r.Context(), &reports, "SELECT * FROM emly_bugreports_dev.bug_reports"); err != nil {
+		page, pageSize := 1, 20
+		if p := r.URL.Query().Get("page"); p != "" {
+			if v, err := strconv.Atoi(p); err == nil && v > 0 {
+				page = v
+			}
+		}
+		if ps := r.URL.Query().Get("page_size"); ps != "" {
+			if v, err := strconv.Atoi(ps); err == nil && v > 0 && v <= 100 {
+				pageSize = v
+			}
+		}
+
+		status := r.URL.Query().Get("status")
+		search := r.URL.Query().Get("search")
+		offset := (page - 1) * pageSize
+
+		var conditions []string
+		var params []interface{}
+
+		if status != "" {
+			conditions = append(conditions, "br.status = ?")
+			params = append(params, status)
+		}
+		if search != "" {
+			like := "%" + search + "%"
+			conditions = append(conditions, "(br.hostname LIKE ? OR br.os_user LIKE ? OR br.name LIKE ? OR br.email LIKE ?)")
+			params = append(params, like, like, like, like)
+		}
+
+		whereClause := ""
+		if len(conditions) > 0 {
+			whereClause = "WHERE " + strings.Join(conditions, " AND ")
+		}
+
+		var total int
+		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM emly_bugreports_dev.bug_reports br " + whereClause)
+		if err := db.GetContext(r.Context(), &total, countQuery, params...); err != nil {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
-		jsonOK(w, reports)
+		mainQuery := fmt.Sprintf(`
+	SELECT br.*, COUNT(bf.id) as file_count
+	FROM emly_bugreports_dev.bug_reports br
+	LEFT JOIN emly_bugreports_dev.bug_report_files bf ON bf.report_id = br.id
+	` + whereClause + `
+	GROUP BY br.id
+	ORDER BY br.created_at DESC
+	LIMIT ? OFFSET ?`)
+
+		listParams := append(params, pageSize, offset)
+		var reports []models.BugReportListItem
+		if err := db.SelectContext(r.Context(), &reports, mainQuery, listParams...); err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		jsonOK(w, map[string]interface{}{
+			"data":        reports,
+			"total":       total,
+			"page":        page,
+			"page_size":   pageSize,
+			"total_pages": int(math.Ceil(float64(total) / float64(pageSize))),
+		})
 	}
 }
 
@@ -158,17 +217,25 @@ func GetBugReportByID(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		var report models.BugReport
-		err := db.GetContext(r.Context(), &report, "SELECT * FROM emly_bugreports_dev.bug_reports WHERE id = ?", id)
-		if errors.Is(err, sql.ErrNoRows) {
+		reportErr := db.GetContext(r.Context(), &report, "SELECT * FROM emly_bugreports_dev.bug_reports WHERE id = ?", id)
+		if errors.Is(reportErr, sql.ErrNoRows) {
 			jsonError(w, http.StatusNotFound, "bug report not found")
 			return
 		}
-		if err != nil {
-			jsonError(w, http.StatusInternalServerError, err.Error())
+		if reportErr != nil {
+			jsonError(w, http.StatusInternalServerError, reportErr.Error())
 			return
 		}
 
-		jsonOK(w, report)
+		type response struct {
+			Report models.BugReport `json:"report"`
+		}
+
+		responseData := response{
+			Report: report,
+		}
+
+		jsonOK(w, responseData)
 	}
 }
 

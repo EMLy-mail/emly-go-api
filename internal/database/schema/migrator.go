@@ -165,8 +165,6 @@ func evaluate(db *sqlx.DB, dbName string, c condition) (bool, error) {
 	}
 }
 
-// ---------- MySQL introspection helpers ----------
-
 func columnExists(db *sqlx.DB, dbName, table, column string) (bool, error) {
 	var count int
 	err := db.Get(&count,

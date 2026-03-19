@@ -28,6 +28,7 @@ func APIKeyAuth(_ *sqlx.DB) func(http.Handler) http.Handler {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+				log.Println("[API-KEY] Failed to authorize admin key for URL: " + r.URL.String())
 				return
 			}
 			next.ServeHTTP(w, r)

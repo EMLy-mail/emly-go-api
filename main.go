@@ -71,6 +71,29 @@ func main() {
 		r.Get("/health", handlers.Health(db))
 
 		r.Route("/api", func(r chi.Router) {
+			r.Route("/admin", func(r chi.Router) {
+				r.Use(httprate.LimitByIP(30, time.Minute))
+
+				// ROUTE: Auth — public, handles its own credential checks
+				r.Route("/auth", func(r chi.Router) {
+					r.Post("/login", handlers.LoginUser(db))
+					r.Get("/validate", handlers.ValidateSession(db))
+					r.Post("/logout", handlers.LogoutSession(db))
+				})
+
+				// ROUTE: User management — protected via Admin Key
+				r.Route("/users", func(r chi.Router) {
+					r.Use(apimw.AdminKeyAuth(db))
+
+					r.Get("/", handlers.ListUsers(db))
+					r.Post("/", handlers.CreateUser(db))
+					r.Get("/{id}", handlers.GetUserByID(db))
+					r.Patch("/{id}", handlers.UpdateUser(db))
+					r.Post("/{id}/reset-password", handlers.ResetPassword(db))
+					r.Delete("/{id}", handlers.DeleteUser(db))
+				})
+			})
+
 			// ROUTE: Bug Reports - Protected via API Key
 			r.Route("/bug-reports", func(r chi.Router) {
 				r.Group(func(r chi.Router) {

@@ -10,12 +10,11 @@ const (
 )
 
 type User struct {
-	ID           int64     `db:"id"            json:"id"`
+	ID           string    `db:"id"            json:"id"`
 	Username     string    `db:"username"      json:"username"`
-	Email        string    `db:"email"         json:"email"`
+	Displayname  string    `db:"displayname"   json:"displayname"`
 	PasswordHash string    `db:"password_hash" json:"-"`
 	Role         UserRole  `db:"role"          json:"role"`
 	Enabled      bool      `db:"enabled"       json:"enabled"`
 	CreatedAt    time.Time `db:"created_at"    json:"created_at"`
-	UpdatedAt    time.Time `db:"updated_at"    json:"updated_at"`
 }
