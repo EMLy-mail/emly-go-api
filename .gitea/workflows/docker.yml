@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -20,8 +20,8 @@ jobs:
         id: reg
         run: |
           host=$(echo "${{ gitea.server_url }}" | sed 's|https://||;s|http://||;s|/||g')
-          echo "host=$host" >> $GITHUB_OUTPUT
-          echo "image=$host/${{ gitea.repository }}" >> $GITHUB_OUTPUT
+          echo "host=$host" >> $GITEA_OUTPUT
+          echo "image=$host/${{ gitea.repository }}" >> $GITEA_OUTPUT
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -51,5 +51,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=registry,ref=${{ steps.reg.outputs.image }}:cache
+          cache-to: type=registry,ref=${{ steps.reg.outputs.image }}:cache,mode=max
