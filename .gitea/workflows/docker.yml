@@ -3,13 +3,13 @@ name: Build & Publish Docker Image
 on:
   push:
     branches:
-      - main
+      - master
     tags:
       - "v*"
 
 jobs:
   build-and-push:
-    runs-on: gitea-runner
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
