@@ -5,9 +5,10 @@ import "time"
 type FileRole string
 
 const (
-	FileRoleAttachment FileRole = "attachment"
-	FileRoleScreenshot FileRole = "screenshot"
-	FileRoleLog        FileRole = "log"
+	FileRoleScreenshot   FileRole = "screenshot"
+	FileRoleMailFile     FileRole = "mail_file"
+	FileRoleLocalStorage FileRole = "localstorage"
+	FileRoleConfig       FileRole = "config"
 )
 
 type BugReportFile struct {

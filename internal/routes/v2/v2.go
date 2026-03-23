@@ -1,4 +1,4 @@
-package v1
+package v2
 
 import (
 	emlyMiddleware "emly-api-go/internal/middleware"
@@ -29,7 +29,7 @@ func NewRouter(db *sqlx.DB) http.Handler {
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Server", "emly-api-go")
-			w.Header().Set("X-Powered-By", "Pure Protogen sillyness :3")
+			w.Header().Set("X-Powered-By", "Rexouium in a suit")
 			next.ServeHTTP(w, r)
 		})
 	})

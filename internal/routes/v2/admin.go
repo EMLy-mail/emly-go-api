@@ -1,4 +1,4 @@
-package v1
+package v2
 
 import (
 	apimw "emly-api-go/internal/middleware"
@@ -13,24 +13,17 @@ import (
 
 func registerAdmin(r chi.Router, db *sqlx.DB) {
 	r.Route("/admin", func(r chi.Router) {
+		r.Use(httprate.LimitByIP(30, time.Minute))
 
-		// Auth — public, handles its own credential checks.
-		// Only /login is rate-limited: it is the only endpoint vulnerable to
-		// brute-force. /validate and /logout require a 256-bit session token
-		// and are called frequently by authenticated clients, so no limit is
-		// applied there.
+		// Auth — public, handles its own credential checks
 		r.Route("/auth", func(r chi.Router) {
-			r.Group(func(r chi.Router) {
-				r.Use(httprate.LimitByIP(30, time.Minute))
-				r.Post("/login", handlers.LoginUser(db))
-			})
+			r.Post("/login", handlers.LoginUser(db))
 			r.Get("/validate", handlers.ValidateSession(db))
 			r.Post("/logout", handlers.LogoutSession(db))
 		})
 
 		// User management — protected via Admin Key
 		r.Route("/users", func(r chi.Router) {
-			r.Use(httprate.LimitByIP(30, time.Minute))
 			r.Use(apimw.AdminKeyAuth(db))
 
 			r.Get("/", handlers.ListUsers(db))

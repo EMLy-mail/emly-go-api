@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,23 @@ const (
 	BugReportStatusResolved BugReportStatus = "resolved"
 	BugReportStatusClosed   BugReportStatus = "closed"
 )
+
+func (s BugReportStatus) IsValid() bool {
+	switch s {
+	case BugReportStatusNew, BugReportStatusInReview, BugReportStatusResolved, BugReportStatusClosed:
+		return true
+	default:
+		return false
+	}
+}
+
+func ParseBugReportStatus(value string) (BugReportStatus, bool) {
+	status := BugReportStatus(strings.ToLower(strings.TrimSpace(value)))
+	if status == "" {
+		return "", false
+	}
+	return status, status.IsValid()
+}
 
 type BugReportListItem struct {
 	BugReport

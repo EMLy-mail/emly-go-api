@@ -35,9 +35,10 @@ var fileRoles = []struct {
 	role        models.FileRole
 	defaultMime string
 }{
-	{"attachment", models.FileRoleAttachment, "application/octet-stream"},
 	{"screenshot", models.FileRoleScreenshot, "image/png"},
-	{"log", models.FileRoleLog, "text/plain"},
+	{"mail_file", models.FileRoleMailFile, "message/rfc822"},
+	{"localstorage", models.FileRoleLocalStorage, "application/json"},
+	{"config", models.FileRoleConfig, "application/json"},
 }
 
 func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
@@ -46,6 +47,8 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 			jsonError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
 			return
 		}
+
+		log.Println("Req form value", r.Form)
 
 		name := r.FormValue("name")
 		email := r.FormValue("email")
@@ -91,7 +94,9 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		for _, fr := range fileRoles {
+			log.Println("Processing file role", fr.field)
 			file, header, err := r.FormFile(fr.field)
+			log.Printf("FormFile for field %s returned error: %v", fr.field, err)
 			if err != nil {
 				continue
 			}
@@ -153,17 +158,12 @@ func GetAllBugReports(db *sqlx.DB) http.HandlerFunc {
 			}
 		}
 
-		status := r.URL.Query().Get("status")
 		search := r.URL.Query().Get("search")
 		offset := (page - 1) * pageSize
 
 		var conditions []string
 		var params []interface{}
 
-		if status != "" {
-			conditions = append(conditions, "br.status = ?")
-			params = append(params, status)
-		}
 		if search != "" {
 			like := "%" + search + "%"
 			conditions = append(conditions, "(br.hostname LIKE ? OR br.os_user LIKE ? OR br.name LIKE ? OR br.email LIKE ?)")
@@ -176,20 +176,20 @@ func GetAllBugReports(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		var total int
-		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM emly_bugreports_dev.bug_reports br " + whereClause)
+		countQuery := "SELECT COUNT(*) FROM emly_bugreports_dev.bug_reports br " + whereClause
 		if err := db.GetContext(r.Context(), &total, countQuery, params...); err != nil {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
-		mainQuery := fmt.Sprintf(`
+		mainQuery := `
 	SELECT br.*, COUNT(bf.id) as file_count
 	FROM emly_bugreports_dev.bug_reports br
 	LEFT JOIN emly_bugreports_dev.bug_report_files bf ON bf.report_id = br.id
 	` + whereClause + `
 	GROUP BY br.id
 	ORDER BY br.created_at DESC
-	LIMIT ? OFFSET ?`)
+	LIMIT ? OFFSET ?`
 
 		listParams := append(params, pageSize, offset)
 		var reports []models.BugReportListItem
@@ -241,8 +241,23 @@ func GetBugReportByID(db *sqlx.DB) http.HandlerFunc {
 
 func GetReportsCount(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		rawStatus := r.URL.Query().Get("status")
+
+		query := "SELECT COUNT(*) FROM emly_bugreports_dev.bug_reports"
+		var args []interface{}
+
+		if strings.TrimSpace(rawStatus) != "" {
+			status, ok := models.ParseBugReportStatus(rawStatus)
+			if !ok {
+				jsonError(w, http.StatusBadRequest, "invalid status. allowed values: new, in_review, resolved, closed")
+				return
+			}
+			query += " WHERE status = ?"
+			args = append(args, status)
+		}
+
 		var count int
-		if err := db.GetContext(r.Context(), &count, "SELECT COUNT(*) FROM emly_bugreports_dev.bug_reports"); err != nil {
+		if err := db.GetContext(r.Context(), &count, query, args...); err != nil {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}

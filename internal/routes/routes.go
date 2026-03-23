@@ -1,6 +1,7 @@
 package routes
 
 import (
+	v2 "emly-api-go/internal/routes/v2"
 	"net/http"
 
 	v1 "emly-api-go/internal/routes/v1"
@@ -22,4 +23,5 @@ func RegisterAll(r chi.Router, db *sqlx.DB) {
 	})
 
 	r.Mount("/v1", v1.NewRouter(db))
+	r.Mount("/v2", v2.NewRouter(db))
 }
