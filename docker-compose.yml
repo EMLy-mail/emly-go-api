@@ -1,6 +1,7 @@
 services:
   api:
-    image: git.lyzcoote.cloud/emly/api-golang:latest
+    build:
+      dockerfile: .
     restart: unless-stopped
     ports:
       - "${PORT:-8080}:8080"
