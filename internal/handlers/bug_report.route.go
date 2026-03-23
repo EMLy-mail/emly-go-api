@@ -48,8 +48,6 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		log.Println("Req form value", r.Form)
-
 		name := r.FormValue("name")
 		email := r.FormValue("email")
 		description := r.FormValue("description")
@@ -94,9 +92,7 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		for _, fr := range fileRoles {
-			log.Println("Processing file role", fr.field)
 			file, header, err := r.FormFile(fr.field)
-			log.Printf("FormFile for field %s returned error: %v", fr.field, err)
 			if err != nil {
 				continue
 			}
