@@ -16,6 +16,8 @@ import (
 	"emly-api-go/internal/database"
 	"emly-api-go/internal/database/schema"
 	"emly-api-go/internal/routes"
+
+	emlyMiddleware "emly-api-go/internal/middleware"
 )
 
 func main() {
@@ -51,6 +53,15 @@ func main() {
 
 	// Global rate limit to 100 requests per minute
 	r.Use(httprate.LimitByIP(100, time.Minute))
+
+	rl := emlyMiddleware.NewRateLimiter(
+		5,              // 5 req/sec per IP
+		10,             // burst fino a 10
+		20,             // ban dopo 20 violazioni
+		30*time.Minute, // ban di 15 minuti
+	)
+
+	r.Use(rl.Handler)
 
 	routes.RegisterAll(r, db)
 

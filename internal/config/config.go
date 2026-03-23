@@ -4,6 +4,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type Config struct {
@@ -17,7 +18,17 @@ type Config struct {
 	ConnMaxLifetime int
 }
 
+var (
+	instance *Config
+	once     sync.Once
+)
+
 func Load() *Config {
+	once.Do(func() { instance = load() })
+	return instance
+}
+
+func load() *Config {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
