@@ -15,7 +15,10 @@ import (
 //	r.Mount("/v2", v2.NewRouter(db))
 func RegisterAll(r chi.Router, db *sqlx.DB) {
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("emly-api-go"))
+		_, err := w.Write([]byte("emly-api-go"))
+		if err != nil {
+			return
+		}
 	})
 
 	r.Mount("/v1", v1.NewRouter(db))
