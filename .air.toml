@@ -1,5 +1,5 @@
 [build]
-  cmd = "go build -o ./tmp/main.exe ."
-  bin = "./tmp/main.exe"
-  include_ext = ["go"]
-  exclude_dir = ["tmp", "vendor"]
+  entrypoint = ["./tmp/emly-api.exe"]
+  cmd = "go build -o ./tmp/emly-api.exe ."
+  include_ext = ["go", ".env", ".sql", ".tmpl"]
+  exclude_dir = ["tmp", "vendor", "build", ".git", ".claude", ".idea", ".vscode"]
