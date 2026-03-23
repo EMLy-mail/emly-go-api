@@ -1,7 +1,6 @@
 package main
 
 import (
-	apimw "emly-api-go/internal/middleware"
 	"fmt"
 	"log"
 	"net/http"
@@ -16,7 +15,7 @@ import (
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/database"
 	"emly-api-go/internal/database/schema"
-	"emly-api-go/internal/handlers"
+	"emly-api-go/internal/routes"
 )
 
 func main() {
@@ -53,80 +52,7 @@ func main() {
 	// Global rate limit to 100 requests per minute
 	r.Use(httprate.LimitByIP(100, time.Minute))
 
-	// Public routes (Not protected by any API Key)
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("emly-api-go"))
-	})
-
-	r.Route("/v1", func(r chi.Router) {
-		r.Use(func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("X-Server", "emly-api-go")
-				w.Header().Set("X-Powered-By", "Pure Protogen sillyness :3")
-				next.ServeHTTP(w, r)
-			})
-		})
-
-		// Health – public, no API key required
-		r.Get("/health", handlers.Health(db))
-
-		r.Route("/api", func(r chi.Router) {
-			r.Route("/admin", func(r chi.Router) {
-				r.Use(httprate.LimitByIP(30, time.Minute))
-
-				// ROUTE: Auth — public, handles its own credential checks
-				r.Route("/auth", func(r chi.Router) {
-					r.Post("/login", handlers.LoginUser(db))
-					r.Get("/validate", handlers.ValidateSession(db))
-					r.Post("/logout", handlers.LogoutSession(db))
-				})
-
-				// ROUTE: User management — protected via Admin Key
-				r.Route("/users", func(r chi.Router) {
-					r.Use(apimw.AdminKeyAuth(db))
-
-					r.Get("/", handlers.ListUsers(db))
-					r.Post("/", handlers.CreateUser(db))
-					r.Get("/{id}", handlers.GetUserByID(db))
-					r.Patch("/{id}", handlers.UpdateUser(db))
-					r.Post("/{id}/reset-password", handlers.ResetPassword(db))
-					r.Delete("/{id}", handlers.DeleteUser(db))
-				})
-			})
-
-			// ROUTE: Bug Reports - Protected via API Key
-			r.Route("/bug-reports", func(r chi.Router) {
-				r.Group(func(r chi.Router) {
-					r.Use(apimw.APIKeyAuth(db))
-
-					// Tighter rate-limit on protected group: 30 req / min per IP
-					r.Use(httprate.LimitByIP(30, time.Minute))
-
-					r.Get("/count", handlers.GetReportsCount(db))
-					r.Post("/", handlers.CreateBugReport(db))
-				})
-
-				r.Group(func(r chi.Router) {
-					// More strict auth due to sensitive info
-					r.Use(apimw.APIKeyAuth(db))
-					r.Use(apimw.AdminKeyAuth(db))
-
-					// Tighter rate-limit on protected group: 30 req / min per IP
-					r.Use(httprate.LimitByIP(30, time.Minute))
-
-					r.Get("/", handlers.GetAllBugReports(db))
-					r.Get("/{id}", handlers.GetBugReportByID(db))
-					r.Get("/{id}/status", handlers.GetReportStatusByID(db))
-					r.Get("/{id}/files", handlers.GetReportFilesByReportID(db))
-					r.Get("/{id}/files/{file_id}", handlers.GetReportFileByFileID(db))
-					r.Get("/{id}/download", handlers.GetBugReportZipById(db))
-					r.Patch("/{id}/status", handlers.PatchBugReportStatus(db))
-					r.Delete("/{id}", handlers.DeleteBugReportByID(db))
-				})
-			})
-		})
-
-	})
+	routes.RegisterAll(r, db)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	log.Printf("server listening on %s", addr)
