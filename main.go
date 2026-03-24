@@ -8,7 +8,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/httprate"
 	"github.com/jmoiron/sqlx"
 	"github.com/joho/godotenv"
 
@@ -51,15 +50,7 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
-	// Global rate limit to 100 requests per minute
-	r.Use(httprate.LimitByIP(100, time.Minute))
-
-	rl := emlyMiddleware.NewRateLimiter(
-		5,              // 5 req/sec per IP
-		10,             // burst fino a 10
-		20,             // ban dopo 20 violazioni
-		30*time.Minute, // ban di 15 minuti
-	)
+	rl := emlyMiddleware.NewRateLimiter(cfg)
 
 	r.Use(rl.Handler)
 

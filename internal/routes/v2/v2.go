@@ -3,8 +3,8 @@ package v2
 import (
 	emlyMiddleware "emly-api-go/internal/middleware"
 	"net/http"
-	"time"
 
+	"emly-api-go/internal/config"
 	"emly-api-go/internal/handlers"
 
 	"github.com/go-chi/chi/v5"
@@ -17,12 +17,7 @@ import (
 func NewRouter(db *sqlx.DB) http.Handler {
 	r := chi.NewRouter()
 
-	rl := emlyMiddleware.NewRateLimiter(
-		5,              // 5 req/sec per IP
-		10,             // burst fino a 10
-		20,             // ban dopo 20 violazioni
-		15*time.Minute, // ban di 15 minuti
-	)
+	rl := emlyMiddleware.NewRateLimiter(config.Load())
 
 	r.Use(rl.Handler)
 
