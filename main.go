@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -22,6 +23,10 @@ import (
 func main() {
 	// Load .env (ignored if not present in production)
 	_ = godotenv.Load()
+
+	if name := os.Getenv("INSTANCE_NAME"); name != "" {
+		log.SetPrefix("[" + name + "] ")
+	}
 
 	cfg := config.Load()
 
