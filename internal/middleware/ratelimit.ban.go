@@ -125,12 +125,11 @@ func (rl *RateLimiter) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := rl.getIP(r)
 
-		// Check active ban
+		// Drop connection silently if IP is banned
 		if unbanAt, banned := rl.banned.Load(ip); banned {
 			if time.Now().Before(unbanAt.(time.Time)) {
-				w.Header().Set("Retry-After", unbanAt.(time.Time).Format(time.RFC1123))
-				http.Error(w, "too many requests - temporarily banned", http.StatusForbidden)
-				return
+				log.Printf("[RATE-LIMIT] IP %s dropped (banned until %s, path: %s)", ip, unbanAt.(time.Time).Format(time.RFC1123), r.URL.Path)
+				panic(http.ErrAbortHandler)
 			}
 			rl.banned.Delete(ip)
 		}
