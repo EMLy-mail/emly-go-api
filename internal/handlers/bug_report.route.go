@@ -41,7 +41,7 @@ var fileRoles = []struct {
 	{"config", models.FileRoleConfig, "application/json"},
 }
 
-func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
+func CreateBugReport(db *sqlx.DB, dbName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			jsonError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
@@ -77,7 +77,7 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 		log.Printf("[BUGREPORT] Received from name=%s hwid=%s ip=%s", name, hwid, submitterIP)
 
 		result, err := db.ExecContext(r.Context(),
-			"INSERT INTO emly_bugreports_dev.bug_reports (name, email, description, hwid, hostname, os_user, submitter_ip, system_info, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			fmt.Sprintf("INSERT INTO %s.bug_reports (name, email, description, hwid, hostname, os_user, submitter_ip, system_info, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", dbName),
 			name, email, description, hwid, hostname, osUser, submitterIP, systemInfo, models.BugReportStatusNew,
 		)
 		if err != nil {
@@ -121,7 +121,7 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 			log.Printf("[BUGREPORT] File uploaded: role=%s size=%d bytes", fr.role, len(data))
 
 			_, err = db.ExecContext(r.Context(),
-				"INSERT INTO emly_bugreports_dev.bug_report_files (report_id, file_role, filename, mime_type, file_size, data) VALUES (?, ?, ?, ?, ?, ?)",
+				fmt.Sprintf("INSERT INTO %s.bug_report_files (report_id, file_role, filename, mime_type, file_size, data) VALUES (?, ?, ?, ?, ?, ?)", dbName),
 				reportID, fr.role, filename, mimeType, len(data), data,
 			)
 			if err != nil {
@@ -140,7 +140,7 @@ func CreateBugReport(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func GetAllBugReports(db *sqlx.DB) http.HandlerFunc {
+func GetAllBugReports(db *sqlx.DB, dbName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		page, pageSize := 1, 20
 		if p := r.URL.Query().Get("page"); p != "" {
@@ -172,17 +172,17 @@ func GetAllBugReports(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		var total int
-		countQuery := "SELECT COUNT(*) FROM emly_bugreports_dev.bug_reports br " + whereClause
+		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s.bug_reports br ", dbName) + whereClause
 		if err := db.GetContext(r.Context(), &total, countQuery, params...); err != nil {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
-		mainQuery := `
+		mainQuery := fmt.Sprintf(`
 	SELECT br.*, COUNT(bf.id) as file_count
-	FROM emly_bugreports_dev.bug_reports br
-	LEFT JOIN emly_bugreports_dev.bug_report_files bf ON bf.report_id = br.id
-	` + whereClause + `
+	FROM %s.bug_reports br
+	LEFT JOIN %s.bug_report_files bf ON bf.report_id = br.id
+	`, dbName, dbName) + whereClause + `
 	GROUP BY br.id
 	ORDER BY br.created_at DESC
 	LIMIT ? OFFSET ?`
@@ -204,7 +204,7 @@ func GetAllBugReports(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func GetBugReportByID(db *sqlx.DB) http.HandlerFunc {
+func GetBugReportByID(db *sqlx.DB, dbName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -213,7 +213,7 @@ func GetBugReportByID(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		var report models.BugReport
-		reportErr := db.GetContext(r.Context(), &report, "SELECT * FROM emly_bugreports_dev.bug_reports WHERE id = ?", id)
+		reportErr := db.GetContext(r.Context(), &report, fmt.Sprintf("SELECT * FROM %s.bug_reports WHERE id = ?", dbName), id)
 		if errors.Is(reportErr, sql.ErrNoRows) {
 			jsonError(w, http.StatusNotFound, "bug report not found")
 			return
@@ -235,11 +235,11 @@ func GetBugReportByID(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func GetReportsCount(db *sqlx.DB) http.HandlerFunc {
+func GetReportsCount(db *sqlx.DB, dbName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rawStatus := r.URL.Query().Get("status")
 
-		query := "SELECT COUNT(*) FROM emly_bugreports_dev.bug_reports"
+		query := fmt.Sprintf("SELECT COUNT(*) FROM %s.bug_reports", dbName)
 		var args []interface{}
 
 		if strings.TrimSpace(rawStatus) != "" {
@@ -262,7 +262,7 @@ func GetReportsCount(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func GetReportFilesByReportID(db *sqlx.DB) http.HandlerFunc {
+func GetReportFilesByReportID(db *sqlx.DB, dbName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -271,7 +271,7 @@ func GetReportFilesByReportID(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		var files []models.BugReportFile
-		if err := db.SelectContext(r.Context(), &files, "SELECT * FROM emly_bugreports_dev.bug_report_files WHERE report_id = ?", id); err != nil {
+		if err := db.SelectContext(r.Context(), &files, fmt.Sprintf("SELECT * FROM %s.bug_report_files WHERE report_id = ?", dbName), id); err != nil {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -280,7 +280,7 @@ func GetReportFilesByReportID(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func GetBugReportZipById(db *sqlx.DB) http.HandlerFunc {
+func GetBugReportZipById(db *sqlx.DB, dbName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -289,7 +289,7 @@ func GetBugReportZipById(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		var report models.BugReport
-		err := db.GetContext(r.Context(), &report, "SELECT * FROM emly_bugreports_dev.bug_reports WHERE id = ?", id)
+		err := db.GetContext(r.Context(), &report, fmt.Sprintf("SELECT * FROM %s.bug_reports WHERE id = ?", dbName), id)
 		if errors.Is(err, sql.ErrNoRows) {
 			jsonError(w, http.StatusNotFound, "bug report not found")
 			return
@@ -300,7 +300,7 @@ func GetBugReportZipById(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		var files []models.BugReportFile
-		if err := db.SelectContext(r.Context(), &files, "SELECT * FROM emly_bugreports_dev.bug_report_files WHERE report_id = ?", id); err != nil {
+		if err := db.SelectContext(r.Context(), &files, fmt.Sprintf("SELECT * FROM %s.bug_report_files WHERE report_id = ?", dbName), id); err != nil {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -364,7 +364,7 @@ func GetBugReportZipById(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func GetReportFileByFileID(db *sqlx.DB) http.HandlerFunc {
+func GetReportFileByFileID(db *sqlx.DB, dbName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reportId := chi.URLParam(r, "id")
 		if reportId == "" {
@@ -378,7 +378,7 @@ func GetReportFileByFileID(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		var file models.BugReportFile
-		err := db.GetContext(r.Context(), &file, "SELECT filename, mime_type, data FROM emly_bugreports_dev.bug_report_files WHERE report_id = ? AND id = ?", reportId, fileId)
+		err := db.GetContext(r.Context(), &file, fmt.Sprintf("SELECT filename, mime_type, data FROM %s.bug_report_files WHERE report_id = ? AND id = ?", dbName), reportId, fileId)
 		if errors.Is(err, sql.ErrNoRows) {
 			jsonError(w, http.StatusNotFound, "file not found")
 			return
@@ -401,7 +401,7 @@ func GetReportFileByFileID(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func GetReportStatusByID(db *sqlx.DB) http.HandlerFunc {
+func GetReportStatusByID(db *sqlx.DB, dbName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reportId := chi.URLParam(r, "id")
 		if reportId == "" {
@@ -410,7 +410,7 @@ func GetReportStatusByID(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		var reportStatus models.BugReportStatus
-		if err := db.GetContext(r.Context(), &reportStatus, "SELECT status FROM emly_bugreports_dev.bug_reports WHERE id = ?", reportId); err != nil {
+		if err := db.GetContext(r.Context(), &reportStatus, fmt.Sprintf("SELECT status FROM %s.bug_reports WHERE id = ?", dbName), reportId); err != nil {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -419,7 +419,7 @@ func GetReportStatusByID(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func PatchBugReportStatus(db *sqlx.DB) http.HandlerFunc {
+func PatchBugReportStatus(db *sqlx.DB, dbName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reportId := chi.URLParam(r, "id")
 		if reportId == "" {
@@ -434,7 +434,7 @@ func PatchBugReportStatus(db *sqlx.DB) http.HandlerFunc {
 		}
 		reportStatus := models.BugReportStatus(body)
 
-		result, err := db.ExecContext(r.Context(), "UPDATE emly_bugreports_dev.bug_reports SET status = ? WHERE id = ?", reportStatus, reportId)
+		result, err := db.ExecContext(r.Context(), fmt.Sprintf("UPDATE %s.bug_reports SET status = ? WHERE id = ?", dbName), reportStatus, reportId)
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -453,7 +453,7 @@ func PatchBugReportStatus(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func DeleteBugReportByID(db *sqlx.DB) http.HandlerFunc {
+func DeleteBugReportByID(db *sqlx.DB, dbName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reportId := chi.URLParam(r, "id")
 		if reportId == "" {
@@ -461,7 +461,7 @@ func DeleteBugReportByID(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		result, err := db.ExecContext(r.Context(), "DELETE FROM emly_bugreports_dev.bug_reports WHERE id = ?", reportId)
+		result, err := db.ExecContext(r.Context(), fmt.Sprintf("DELETE FROM %s.bug_reports WHERE id = ?", dbName), reportId)
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return

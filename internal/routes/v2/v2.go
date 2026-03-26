@@ -33,7 +33,7 @@ func NewRouter(db *sqlx.DB) http.Handler {
 
 	r.Route("/api", func(r chi.Router) {
 		registerAdmin(r, db)
-		registerBugReports(r, db)
+		registerBugReports(r, db, config.Load().Database)
 	})
 
 	return r
