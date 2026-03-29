@@ -21,6 +21,7 @@ type RateLimitConfig struct {
 
 type Config struct {
 	Port            string
+	Driver          string
 	DSN             string
 	Database        string
 	APIKey          string
@@ -80,9 +81,19 @@ func load() *Config {
 		connMaxLifetime = 5
 	}
 
-	dbName := os.Getenv("DATABASE_NAME")
-	if dbName == "" {
-		panic("DATABASE_NAME environment variable is required")
+	driver := os.Getenv("DB_DRIVER")
+	if driver == "" {
+		driver = "mysql"
+	}
+
+	var dbName string
+	if driver == "sqlite" {
+		dbName = "main"
+	} else {
+		dbName = os.Getenv("DATABASE_NAME")
+		if dbName == "" {
+			panic("DATABASE_NAME environment variable is required")
+		}
 	}
 
 	if os.Getenv("DB_DSN") == "" {
@@ -91,6 +102,7 @@ func load() *Config {
 
 	return &Config{
 		Port:            port,
+		Driver:          driver,
 		DSN:             os.Getenv("DB_DSN"),
 		Database:        dbName,
 		APIKey:          apiKey,

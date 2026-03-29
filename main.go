@@ -42,7 +42,7 @@ func main() {
 	}(db)
 
 	// Run conditional schema migrations
-	if err := schema.Migrate(db, cfg.Database); err != nil {
+	if err := schema.Migrate(db, cfg.Database, cfg.Driver); err != nil {
 		log.Fatalf("schema migration failed: %v", err)
 	}
 
