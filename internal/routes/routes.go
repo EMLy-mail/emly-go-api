@@ -1,20 +1,18 @@
 package routes
 
 import (
-	v2 "emly-api-go/internal/routes/v2"
 	"net/http"
 
 	v1 "emly-api-go/internal/routes/v1"
+	v2 "emly-api-go/internal/routes/v2"
+	"emly-api-go/internal/storage"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 )
 
 // RegisterAll mounts every versioned API onto the root router.
-// To add a new API version, create internal/routes/v2 and add:
-//
-//	r.Mount("/v2", v2.NewRouter(db))
-func RegisterAll(r chi.Router, db *sqlx.DB) {
+func RegisterAll(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector) {
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		_, err := w.Write([]byte("emly-api-go"))
 		if err != nil {
@@ -22,6 +20,6 @@ func RegisterAll(r chi.Router, db *sqlx.DB) {
 		}
 	})
 
-	r.Mount("/v1", v1.NewRouter(db))
-	r.Mount("/v2", v2.NewRouter(db))
+	r.Mount("/v1", v1.NewRouter(db, s3conn))
+	r.Mount("/v2", v2.NewRouter(db, s3conn))
 }

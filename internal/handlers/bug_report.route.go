@@ -3,6 +3,7 @@ package handlers
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -21,6 +22,8 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"emly-api-go/internal/models"
+	"emly-api-go/internal/storage"
+	"emly-api-go/internal/timing"
 )
 
 //go:embed templates/report.txt.tmpl
@@ -41,12 +44,13 @@ var fileRoles = []struct {
 	{"config", models.FileRoleConfig, "application/json"},
 }
 
-func CreateBugReport(db *sqlx.DB, dbName string) http.HandlerFunc {
+func CreateBugReport(db *sqlx.DB, dbName string, s3conn *storage.S3Connector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			jsonError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
 			return
 		}
+		timing.Mark(r.Context(), "parse_form")
 
 		name := r.FormValue("name")
 		email := r.FormValue("email")
@@ -84,6 +88,7 @@ func CreateBugReport(db *sqlx.DB, dbName string) http.HandlerFunc {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		timing.Mark(r.Context(), "db_insert_report")
 
 		reportID, err := result.LastInsertId()
 		if err != nil {
@@ -120,13 +125,32 @@ func CreateBugReport(db *sqlx.DB, dbName string) http.HandlerFunc {
 
 			log.Printf("[BUGREPORT] File uploaded: role=%s size=%d bytes", fr.role, len(data))
 
-			_, err = db.ExecContext(r.Context(),
+			fileResult, err := db.ExecContext(r.Context(),
 				fmt.Sprintf("INSERT INTO %s.bug_report_files (report_id, file_role, filename, mime_type, file_size, data) VALUES (?, ?, ?, ?, ?, ?)", dbName),
 				reportID, fr.role, filename, mimeType, len(data), data,
 			)
 			if err != nil {
 				jsonError(w, http.StatusInternalServerError, err.Error())
 				return
+			}
+			timing.Mark(r.Context(), "db_insert_file_"+string(fr.role))
+
+			if s3conn != nil {
+				fileID, err := fileResult.LastInsertId()
+				if err != nil {
+					log.Printf("[S3] could not get file insert id for report %d role %s: %v", reportID, fr.role, err)
+				} else {
+					s3Key := fmt.Sprintf("emly-api-files/bug-reports/%d/files/%s", reportID, filename)
+					if _, err := s3conn.UploadFile(
+						context.Background(), s3Key,
+						bytes.NewReader(data), mimeType,
+						map[string]string{"filename": filename, "id": strconv.FormatInt(fileID, 10)},
+					); err != nil {
+						log.Printf("[S3] upload failed for key %s: %v", s3Key, err)
+					} else {
+						timing.Mark(r.Context(), "s3_upload_file_"+string(fr.role))
+					}
+				}
 			}
 		}
 
@@ -177,6 +201,7 @@ func GetAllBugReports(db *sqlx.DB, dbName string) http.HandlerFunc {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		timing.Mark(r.Context(), "db_count")
 
 		mainQuery := fmt.Sprintf(`
 	SELECT br.*, COUNT(bf.id) as file_count
@@ -193,6 +218,7 @@ func GetAllBugReports(db *sqlx.DB, dbName string) http.HandlerFunc {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		timing.Mark(r.Context(), "db_select")
 
 		jsonOK(w, map[string]interface{}{
 			"data":        reports,
@@ -280,7 +306,7 @@ func GetReportFilesByReportID(db *sqlx.DB, dbName string) http.HandlerFunc {
 	}
 }
 
-func GetBugReportZipById(db *sqlx.DB, dbName string) http.HandlerFunc {
+func GetBugReportZipByID(db *sqlx.DB, dbName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 		if id == "" {
@@ -298,12 +324,14 @@ func GetBugReportZipById(db *sqlx.DB, dbName string) http.HandlerFunc {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		timing.Mark(r.Context(), "db_fetch_report")
 
 		var files []models.BugReportFile
 		if err := db.SelectContext(r.Context(), &files, fmt.Sprintf("SELECT * FROM %s.bug_report_files WHERE report_id = ?", dbName), id); err != nil {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		timing.Mark(r.Context(), "db_fetch_files")
 
 		var sysInfoStr string
 		if len(report.SystemInfo) > 0 && string(report.SystemInfo) != "null" {
@@ -353,6 +381,7 @@ func GetBugReportZipById(db *sqlx.DB, dbName string) http.HandlerFunc {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		timing.Mark(r.Context(), "zip_build")
 
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report-%d.zip\"", report.ID))
@@ -364,7 +393,7 @@ func GetBugReportZipById(db *sqlx.DB, dbName string) http.HandlerFunc {
 	}
 }
 
-func GetReportFileByFileID(db *sqlx.DB, dbName string) http.HandlerFunc {
+func GetReportFileByFileID(db *sqlx.DB, dbName string, s3conn *storage.S3Connector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reportId := chi.URLParam(r, "id")
 		if reportId == "" {
@@ -377,6 +406,44 @@ func GetReportFileByFileID(db *sqlx.DB, dbName string) http.HandlerFunc {
 			return
 		}
 
+		var filename string
+		if err := db.GetContext(r.Context(), &filename, fmt.Sprintf("SELECT filename FROM %s.bug_report_files WHERE report_id = ? AND id = ?", dbName), reportId, fileId); err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		timing.Mark(r.Context(), "db_fetch_filename_by_id")
+
+		// Try S3 first.
+		if s3conn != nil {
+			s3Key := fmt.Sprintf("emly-api-files/bug-reports/%s/files/%s", reportId, filename)
+			rc, info, err := s3conn.GetFile(r.Context(), s3Key)
+			if err == nil {
+				defer rc.Close()
+				timing.Mark(r.Context(), "s3_hit")
+				log.Println("[S3] cache hit for key", s3Key)
+
+				mimeType := info.ContentType
+				if mimeType == "" {
+					mimeType = "application/octet-stream"
+				}
+				filename := info.Metadata["filename"]
+				if filename == "" {
+					filename = fileId
+				}
+				w.Header().Set("Content-Type", mimeType)
+				w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+				_, _ = io.Copy(w, rc)
+				return
+			}
+			if storage.IsNotFound(err) {
+				log.Printf("[S3] file %s not found on s3", fileId)
+			}
+			if !storage.IsNotFound(err) {
+				log.Printf("[S3] unexpected error fetching key %s: %v", s3Key, err)
+			}
+		}
+
+		// Fallback: query DB.
 		var file models.BugReportFile
 		err := db.GetContext(r.Context(), &file, fmt.Sprintf("SELECT filename, mime_type, data FROM %s.bug_report_files WHERE report_id = ? AND id = ?", dbName), reportId, fileId)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -387,6 +454,25 @@ func GetReportFileByFileID(db *sqlx.DB, dbName string) http.HandlerFunc {
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		timing.Mark(r.Context(), "db_select")
+
+		// Lazy-upload to S3 so future requests are served from there.
+		if s3conn != nil {
+			s3Key := fmt.Sprintf("emly-api-files/bug-reports/%s/files/%s", reportId, fileId)
+			dataCopy := make([]byte, len(file.Data))
+			copy(dataCopy, file.Data)
+			mime := file.MimeType
+			fname := file.Filename
+			go func() {
+				if _, err := s3conn.UploadFile(
+					context.Background(), s3Key,
+					bytes.NewReader(dataCopy), mime,
+					map[string]string{"filename": fname},
+				); err != nil {
+					log.Printf("[S3] lazy upload failed for key %s: %v", s3Key, err)
+				}
+			}()
+		}
 
 		mimeType := file.MimeType
 		if mimeType == "" {
@@ -394,10 +480,7 @@ func GetReportFileByFileID(db *sqlx.DB, dbName string) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", mimeType)
 		w.Header().Set("Content-Disposition", "attachment; filename=\""+file.Filename+"\"")
-		_, err = w.Write(file.Data)
-		if err != nil {
-			return
-		}
+		_, _ = w.Write(file.Data)
 	}
 }
 

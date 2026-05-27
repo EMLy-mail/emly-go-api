@@ -19,5 +19,13 @@
         { "type": "column_not_exists", "table": "user", "column": "enabled" }
       ]
     }
+    ,{
+      "id": "3_updates",
+      "sql_file": "3_updates.sql",
+      "description": "Create update_releases table for API-managed software updates.",
+      "conditions": [
+        { "type": "table_not_exists", "table": "update_releases" }
+      ]
+    }
   ]
 }

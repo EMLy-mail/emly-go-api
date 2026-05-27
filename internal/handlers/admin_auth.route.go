@@ -198,8 +198,8 @@ func ValidateSession(db *sqlx.DB) http.HandlerFunc {
 			sessionID,
 		)
 		if err != nil {
-			jsonError(w, http.StatusUnauthorized, "invalid session")
-			log.Fatalf("Database error during session validation: %v", err)
+			log.Printf("[AUTH] Database error during session validation: %v", err)
+			jsonError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
 

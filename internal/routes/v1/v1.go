@@ -6,15 +6,14 @@ import (
 
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/handlers"
+	"emly-api-go/internal/storage"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 )
 
 // NewRouter returns a chi.Router with all /v1 routes mounted.
-// Add new API versions by creating an analogous package (e.g. v2) and
-// mounting it alongside this one in internal/routes/routes.go.
-func NewRouter(db *sqlx.DB) http.Handler {
+func NewRouter(db *sqlx.DB, s3conn *storage.S3Connector) http.Handler {
 	r := chi.NewRouter()
 
 	rl := emlyMiddleware.NewRateLimiter(config.Load())
@@ -33,7 +32,7 @@ func NewRouter(db *sqlx.DB) http.Handler {
 
 	r.Route("/api", func(r chi.Router) {
 		registerAdmin(r, db)
-		registerBugReports(r, db, config.Load().Database)
+		registerBugReports(r, db, config.Load().Database, s3conn)
 	})
 
 	return r
