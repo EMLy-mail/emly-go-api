@@ -11,7 +11,7 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func registerAdmin(r chi.Router, db *sqlx.DB) {
+func registerAdmin(r chi.Router, db *sqlx.DB, dbName string) {
 	r.Route("/admin", func(r chi.Router) {
 
 		// Auth — public, handles its own credential checks.
@@ -39,6 +39,15 @@ func registerAdmin(r chi.Router, db *sqlx.DB) {
 			r.Patch("/{id}", handlers.UpdateUser(db))
 			r.Post("/{id}/reset-password", handlers.ResetPassword(db))
 			r.Delete("/{id}", handlers.DeleteUser(db))
+		})
+
+		// Backward-compatible alias for admin-prefixed bug report delete path.
+		r.Route("/bug-reports", func(r chi.Router) {
+			r.Use(apimw.APIKeyAuth(db))
+			r.Use(apimw.AdminKeyAuth(db))
+			r.Use(httprate.LimitByIP(30, time.Minute))
+
+			r.Delete("/{id}", handlers.DeleteBugReportByID(db, dbName))
 		})
 	})
 }

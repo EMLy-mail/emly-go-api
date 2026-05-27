@@ -15,6 +15,7 @@ import (
 // NewRouter returns a chi.Router with all /v1 routes mounted.
 func NewRouter(db *sqlx.DB, s3conn *storage.S3Connector) http.Handler {
 	r := chi.NewRouter()
+	dbName := config.Load().Database
 
 	rl := emlyMiddleware.NewRateLimiter(config.Load())
 
@@ -31,8 +32,8 @@ func NewRouter(db *sqlx.DB, s3conn *storage.S3Connector) http.Handler {
 	r.Get("/health", handlers.Health(db))
 
 	r.Route("/api", func(r chi.Router) {
-		registerAdmin(r, db)
-		registerBugReports(r, db, config.Load().Database, s3conn)
+		registerAdmin(r, db, dbName)
+		registerBugReports(r, db, dbName, s3conn)
 	})
 
 	return r

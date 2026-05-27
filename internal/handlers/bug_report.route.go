@@ -544,20 +544,27 @@ func DeleteBugReportByID(db *sqlx.DB, dbName string) http.HandlerFunc {
 			return
 		}
 
+		log.Printf("[BUGREPORT] Delete requested: report_id=%s", reportId)
+
 		result, err := db.ExecContext(r.Context(), fmt.Sprintf("DELETE FROM %s.bug_reports WHERE id = ?", dbName), reportId)
 		if err != nil {
+			log.Printf("[BUGREPORT] Delete failed: report_id=%s err=%v", reportId, err)
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		rowsAffected, err := result.RowsAffected()
 		if err != nil {
+			log.Printf("[BUGREPORT] Delete rows check failed: report_id=%s err=%v", reportId, err)
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if rowsAffected == 0 {
+			log.Printf("[BUGREPORT] Delete skipped: report_id=%s not found", reportId)
 			jsonError(w, http.StatusNotFound, "bug report not found")
 			return
 		}
+
+		log.Printf("[BUGREPORT] Deleted successfully: report_id=%s rows=%d", reportId, rowsAffected)
 
 		jsonOK(w, map[string]string{"message": "bug report deleted successfully"})
 	}
