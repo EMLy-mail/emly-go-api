@@ -1,7 +1,7 @@
 package middleware
 
 import (
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -103,7 +103,6 @@ func (rl *RateLimiter) record(ip string, auth bool) (exceeded bool, failures int
 	now := time.Now()
 	v.lastSeen = now
 
-	// Roll the window if expired
 	if now.Sub(v.windowStart) >= cfg.window {
 		v.count = 0
 		v.windowStart = now
@@ -116,7 +115,6 @@ func (rl *RateLimiter) record(ip string, auth bool) (exceeded bool, failures int
 		return true, v.failures, v.failures >= cfg.maxFails, cfg.banDur
 	}
 
-	// Legitimate request within limit — reset failure streak
 	v.failures = 0
 	return false, 0, false, 0
 }
@@ -125,10 +123,9 @@ func (rl *RateLimiter) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := rl.getIP(r)
 
-		// Drop connection silently if IP is banned
 		if unbanAt, banned := rl.banned.Load(ip); banned {
 			if time.Now().Before(unbanAt.(time.Time)) {
-				log.Printf("[RATE-LIMIT] IP %s dropped (banned until %s, path: %s)", ip, unbanAt.(time.Time).Format(time.RFC1123), r.URL.Path)
+				slog.WarnContext(r.Context(), "ip dropped (banned)", "ip", ip, "ban_until", unbanAt.(time.Time), "path", r.URL.Path)
 				panic(http.ErrAbortHandler)
 			}
 			rl.banned.Delete(ip)
@@ -141,12 +138,12 @@ func (rl *RateLimiter) Handler(next http.Handler) http.Handler {
 			if shouldBan {
 				unbanAt := time.Now().Add(banDur)
 				rl.banned.Store(ip, unbanAt)
-				log.Printf("[RATE-LIMIT] IP %s banned until %s (path: %s, auth: %v)", ip, unbanAt.Format(time.RFC1123), r.URL.Path, auth)
+				slog.WarnContext(r.Context(), "ip banned", "ip", ip, "ban_until", unbanAt, "path", r.URL.Path, "auth", auth)
 				w.Header().Set("Retry-After", unbanAt.Format(time.RFC1123))
 				http.Error(w, "banned", http.StatusForbidden)
 				return
 			}
-			log.Printf("[RATE-LIMIT] IP %s exceeded limit — violation %d (path: %s, auth: %v)", ip, failures, r.URL.Path, auth)
+			slog.WarnContext(r.Context(), "rate limit exceeded", "ip", ip, "violations", failures, "path", r.URL.Path, "auth", auth)
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}

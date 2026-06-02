@@ -2,7 +2,7 @@ package middleware
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/jmoiron/sqlx"
@@ -14,8 +14,7 @@ func AdminKeyAuth(_ *sqlx.DB) func(http.Handler) http.Handler {
 	cfg := config.Load()
 
 	if len(cfg.AdminKey) == 0 {
-		log.Panic("API key or admin key are empty")
-		return nil
+		panic("admin key is empty")
 	}
 
 	allowed := make(map[string]struct{}, 1)
@@ -28,7 +27,7 @@ func AdminKeyAuth(_ *sqlx.DB) func(http.Handler) http.Handler {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized admin key"})
-				log.Println("[ADMIN-KEY] Failed to authorize admin key for URL: " + r.URL.String())
+				slog.WarnContext(r.Context(), "admin key auth failed", "url", r.URL.String())
 				return
 			}
 			next.ServeHTTP(w, r)

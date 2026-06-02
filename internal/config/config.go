@@ -29,6 +29,11 @@ type R2Config struct {
 	Endpoint        string
 }
 
+type OtelConfig struct {
+	Enabled  bool
+	Endpoint string
+}
+
 type Config struct {
 	Port                   string
 	DSN                    string
@@ -42,6 +47,7 @@ type Config struct {
 	UseS3CompatibleStorage bool
 	RateLimit              RateLimitConfig
 	R2                     R2Config
+	Otel                   OtelConfig
 }
 
 var (
@@ -122,6 +128,10 @@ func load() *Config {
 		ConnMaxLifetime:        connMaxLifetime,
 		UpdatesEnabled:         strings.ToLower(strings.TrimSpace(os.Getenv("UPDATES_ENABLED"))) == "true",
 		UseS3CompatibleStorage: strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_COMPATIBLE_STORAGE"))) == "true",
+		Otel: OtelConfig{
+			Enabled:  strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_ENABLED"))) == "true",
+			Endpoint: envString("OTEL_ENDPOINT", "http://localhost:4318"),
+		},
 		R2: R2Config{
 			AccountID:       os.Getenv("CF_ACCOUNT_ID"),
 			AccessKeyID:     os.Getenv("CF_R2_ACCESS_KEY_ID"),

@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -78,7 +78,7 @@ func CreateBugReport(db *sqlx.DB, dbName string, s3conn *storage.S3Connector) ht
 			systemInfo = json.RawMessage(systemInfoStr)
 		}
 
-		log.Printf("[BUGREPORT] Received from name=%s hwid=%s ip=%s", name, hwid, submitterIP)
+		slog.InfoContext(r.Context(), "bug report received", "name", name, "hwid", hwid, "ip", submitterIP)
 
 		result, err := db.ExecContext(r.Context(),
 			fmt.Sprintf("INSERT INTO %s.bug_reports (name, email, description, hwid, hostname, os_user, submitter_ip, system_info, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", dbName),
@@ -102,9 +102,8 @@ func CreateBugReport(db *sqlx.DB, dbName string, s3conn *storage.S3Connector) ht
 				continue
 			}
 			defer func(file multipart.File) {
-				err := file.Close()
-				if err != nil {
-					log.Fatalf("closing uploaded file failed: %v", err)
+				if err := file.Close(); err != nil {
+					slog.ErrorContext(r.Context(), "closing uploaded file failed", "err", err)
 				}
 			}(file)
 
@@ -123,7 +122,7 @@ func CreateBugReport(db *sqlx.DB, dbName string, s3conn *storage.S3Connector) ht
 				filename = fr.field + ".bin"
 			}
 
-			log.Printf("[BUGREPORT] File uploaded: role=%s size=%d bytes", fr.role, len(data))
+			slog.InfoContext(r.Context(), "file uploaded", "role", fr.role, "size_bytes", len(data))
 
 			fileResult, err := db.ExecContext(r.Context(),
 				fmt.Sprintf("INSERT INTO %s.bug_report_files (report_id, file_role, filename, mime_type, file_size, data) VALUES (?, ?, ?, ?, ?, ?)", dbName),
@@ -138,7 +137,7 @@ func CreateBugReport(db *sqlx.DB, dbName string, s3conn *storage.S3Connector) ht
 			if s3conn != nil {
 				fileID, err := fileResult.LastInsertId()
 				if err != nil {
-					log.Printf("[S3] could not get file insert id for report %d role %s: %v", reportID, fr.role, err)
+					slog.WarnContext(r.Context(), "could not get file insert id", "report_id", reportID, "role", fr.role, "err", err)
 				} else {
 					s3Key := fmt.Sprintf("emly-api-files/bug-reports/%d/files/%s", reportID, filename)
 					if _, err := s3conn.UploadFile(
@@ -146,7 +145,7 @@ func CreateBugReport(db *sqlx.DB, dbName string, s3conn *storage.S3Connector) ht
 						bytes.NewReader(data), mimeType,
 						map[string]string{"filename": filename, "id": strconv.FormatInt(fileID, 10)},
 					); err != nil {
-						log.Printf("[S3] upload failed for key %s: %v", s3Key, err)
+						slog.WarnContext(r.Context(), "s3 upload failed", "key", s3Key, "err", err)
 					} else {
 						timing.Mark(r.Context(), "s3_upload_file_"+string(fr.role))
 					}
@@ -154,7 +153,7 @@ func CreateBugReport(db *sqlx.DB, dbName string, s3conn *storage.S3Connector) ht
 			}
 		}
 
-		log.Printf("[BUGREPORT] Created successfully with id=%d", reportID)
+		slog.InfoContext(r.Context(), "bug report created", "report_id", reportID)
 
 		jsonCreated(w, map[string]interface{}{
 			"success":   true,
@@ -253,11 +252,7 @@ func GetBugReportByID(db *sqlx.DB, dbName string) http.HandlerFunc {
 			Report models.BugReport `json:"report"`
 		}
 
-		responseData := response{
-			Report: report,
-		}
-
-		jsonOK(w, responseData)
+		jsonOK(w, response{Report: report})
 	}
 }
 
@@ -385,11 +380,7 @@ func GetBugReportZipByID(db *sqlx.DB, dbName string) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report-%d.zip\"", report.ID))
-		_, err = w.Write(buf.Bytes())
-		if err != nil {
-			return
-		}
-
+		_, _ = w.Write(buf.Bytes())
 	}
 }
 
@@ -413,37 +404,34 @@ func GetReportFileByFileID(db *sqlx.DB, dbName string, s3conn *storage.S3Connect
 		}
 		timing.Mark(r.Context(), "db_fetch_filename_by_id")
 
-		// Try S3 first.
 		if s3conn != nil {
 			s3Key := fmt.Sprintf("emly-api-files/bug-reports/%s/files/%s", reportId, filename)
 			rc, info, err := s3conn.GetFile(r.Context(), s3Key)
 			if err == nil {
 				defer rc.Close()
 				timing.Mark(r.Context(), "s3_hit")
-				log.Println("[S3] cache hit for key", s3Key)
+				slog.InfoContext(r.Context(), "s3 cache hit", "key", s3Key)
 
 				mimeType := info.ContentType
 				if mimeType == "" {
 					mimeType = "application/octet-stream"
 				}
-				filename := info.Metadata["filename"]
-				if filename == "" {
-					filename = fileId
+				fname := info.Metadata["filename"]
+				if fname == "" {
+					fname = fileId
 				}
 				w.Header().Set("Content-Type", mimeType)
-				w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+				w.Header().Set("Content-Disposition", "attachment; filename=\""+fname+"\"")
 				_, _ = io.Copy(w, rc)
 				return
 			}
 			if storage.IsNotFound(err) {
-				log.Printf("[S3] file %s not found on s3", fileId)
-			}
-			if !storage.IsNotFound(err) {
-				log.Printf("[S3] unexpected error fetching key %s: %v", s3Key, err)
+				slog.InfoContext(r.Context(), "file not found on s3", "file_id", fileId)
+			} else {
+				slog.WarnContext(r.Context(), "unexpected s3 error", "key", s3Key, "err", err)
 			}
 		}
 
-		// Fallback: query DB.
 		var file models.BugReportFile
 		err := db.GetContext(r.Context(), &file, fmt.Sprintf("SELECT filename, mime_type, data FROM %s.bug_report_files WHERE report_id = ? AND id = ?", dbName), reportId, fileId)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -456,7 +444,6 @@ func GetReportFileByFileID(db *sqlx.DB, dbName string, s3conn *storage.S3Connect
 		}
 		timing.Mark(r.Context(), "db_select")
 
-		// Lazy-upload to S3 so future requests are served from there.
 		if s3conn != nil {
 			s3Key := fmt.Sprintf("emly-api-files/bug-reports/%s/files/%s", reportId, fileId)
 			dataCopy := make([]byte, len(file.Data))
@@ -469,7 +456,7 @@ func GetReportFileByFileID(db *sqlx.DB, dbName string, s3conn *storage.S3Connect
 					bytes.NewReader(dataCopy), mime,
 					map[string]string{"filename": fname},
 				); err != nil {
-					log.Printf("[S3] lazy upload failed for key %s: %v", s3Key, err)
+					slog.Warn("lazy s3 upload failed", "key", s3Key, "err", err)
 				}
 			}()
 		}
@@ -544,27 +531,25 @@ func DeleteBugReportByID(db *sqlx.DB, dbName string) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[BUGREPORT] Delete requested: report_id=%s", reportId)
+		slog.InfoContext(r.Context(), "bug report delete requested", "report_id", reportId)
 
 		result, err := db.ExecContext(r.Context(), fmt.Sprintf("DELETE FROM %s.bug_reports WHERE id = ?", dbName), reportId)
 		if err != nil {
-			log.Printf("[BUGREPORT] Delete failed: report_id=%s err=%v", reportId, err)
+			slog.ErrorContext(r.Context(), "bug report delete failed", "report_id", reportId, "err", err)
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		rowsAffected, err := result.RowsAffected()
 		if err != nil {
-			log.Printf("[BUGREPORT] Delete rows check failed: report_id=%s err=%v", reportId, err)
 			jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if rowsAffected == 0 {
-			log.Printf("[BUGREPORT] Delete skipped: report_id=%s not found", reportId)
 			jsonError(w, http.StatusNotFound, "bug report not found")
 			return
 		}
 
-		log.Printf("[BUGREPORT] Deleted successfully: report_id=%s rows=%d", reportId, rowsAffected)
+		slog.InfoContext(r.Context(), "bug report deleted", "report_id", reportId, "rows", rowsAffected)
 
 		jsonOK(w, map[string]string{"message": "bug report deleted successfully"})
 	}

@@ -7,7 +7,7 @@ import (
 	"emly-api-go/internal/models"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -35,7 +35,7 @@ func MigrateReportFilesToS3(db *sqlx.DB, s3conn *S3Connector, dbName string) err
 			return err
 		}
 		totalReports++
-		log.Printf("[migrate] processing report %d", reportId)
+		slog.Info("migrate: processing report", "report_id", reportId)
 
 		filesRows, err := db.Query(
 			"SELECT id, report_id, filename FROM emly_bugreports_dev.bug_report_files WHERE report_id = ?",
@@ -58,7 +58,7 @@ func MigrateReportFilesToS3(db *sqlx.DB, s3conn *S3Connector, dbName string) err
 			var file models.BugReportFile
 			err := db.GetContext(context.Background(), &file, fmt.Sprintf("SELECT filename, mime_type, data FROM %s.bug_report_files WHERE report_id = ? AND id = ?", dbName), reportId, fileID)
 			if errors.Is(err, sql.ErrNoRows) {
-				log.Printf("[migrate] report %d / file %d: not found in bug_report_files, skipping", reportId, fileID)
+				slog.Info("migrate: file not found, skipping", "report_id", reportId, "file_id", fileID)
 				skipped++
 				continue
 			}
@@ -74,7 +74,7 @@ func MigrateReportFilesToS3(db *sqlx.DB, s3conn *S3Connector, dbName string) err
 				mime := file.MimeType
 				fname := file.Filename
 				totalFiles++
-				log.Printf("[migrate] report %d / file %d (%s, %d bytes): uploading to s3://%s", reportId, fileID, fname, len(dataCopy), s3Key)
+				slog.Info("migrate: uploading to s3", "report_id", reportId, "file_id", fileID, "filename", fname, "size_bytes", len(dataCopy), "key", s3Key)
 				wg.Add(1)
 				go func(key, mimeType, filename string, payload []byte, rid, fid int) {
 					defer wg.Done()
@@ -88,10 +88,10 @@ func MigrateReportFilesToS3(db *sqlx.DB, s3conn *S3Connector, dbName string) err
 					)
 					if upErr != nil {
 						errCh <- fmt.Errorf("report %d / file %d (%s): %w", rid, fid, key, upErr)
-						log.Printf("[migrate] [ERROR] upload failed for s3://%s: %v", key, upErr)
+						slog.Error("migrate: s3 upload failed", "key", key, "err", upErr)
 						return
 					}
-					log.Printf("[migrate] upload complete: s3://%s", key)
+					slog.Info("migrate: s3 upload complete", "key", key)
 				}(s3Key, mime, fname, dataCopy, reportId, fileID)
 
 				uploaded++
@@ -109,11 +109,10 @@ func MigrateReportFilesToS3(db *sqlx.DB, s3conn *S3Connector, dbName string) err
 	var uploadErrCount int
 	for e := range errCh {
 		uploadErrCount++
-		log.Printf("[migrate] [ERROR] %v", e)
+		slog.Error("migrate: upload error", "err", e)
 	}
 
-	log.Printf("[migrate] done — reports: %d, files queued: %d, skipped: %d, upload errors: %d",
-		totalReports, uploaded, skipped, uploadErrCount)
+	slog.Info("migrate: done", "reports", totalReports, "files_queued", uploaded, "skipped", skipped, "upload_errors", uploadErrCount)
 
 	if uploadErrCount > 0 {
 		return fmt.Errorf("migration completed with %d upload errors", uploadErrCount)

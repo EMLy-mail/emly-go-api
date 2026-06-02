@@ -4,7 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/jmoiron/sqlx"
@@ -40,7 +40,7 @@ func Migrate(db *sqlx.DB, dbName string) error {
 		return fmt.Errorf("schema: check empty: %w", err)
 	}
 	if empty {
-		log.Println("[migrate] empty schema detected – running init.sql")
+		slog.Info("migrate: empty schema, running init.sql")
 		initSQL, err := migrationsFS.ReadFile("init.sql")
 		if err != nil {
 			return fmt.Errorf("schema: read init.sql: %w", err)
@@ -50,10 +50,9 @@ func Migrate(db *sqlx.DB, dbName string) error {
 				return fmt.Errorf("schema: exec init.sql: %w\nSQL: %s", err, stmt)
 			}
 		}
-		log.Println("[migrate] init.sql applied – base schema created")
+		slog.Info("migrate: init.sql applied")
 	} else {
-		log.Println("[migrate] checking if tables exist")
-		// Check if the tables are there or not
+		slog.Info("migrate: checking tables")
 		var tableNames []string
 		var foundTables []string
 		tableNames = append(tableNames, "bug_reports", "bug_report_files", "rate_limit_hwid", "user", "session")
@@ -63,14 +62,13 @@ func Migrate(db *sqlx.DB, dbName string) error {
 				return fmt.Errorf("schema: check table %s: %w", tableName, err)
 			}
 			if !found {
-				log.Printf("[migrate] warning: expected table %s not found – schema may be in an inconsistent state", tableName)
+				slog.Warn("migrate: expected table not found", "table", tableName)
 				continue
 			}
 			foundTables = append(foundTables, tableName)
 		}
 		if len(foundTables) != len(tableNames) {
-			log.Printf("[migrate] warning: expected %d tables, found %d", len(tableNames), len(foundTables))
-			log.Printf("[migrate] info: running init.sql")
+			slog.Warn("migrate: table count mismatch, running init.sql", "expected", len(tableNames), "found", len(foundTables))
 			initSQL, err := migrationsFS.ReadFile("init.sql")
 			if err != nil {
 				return fmt.Errorf("schema: read init.sql: %w", err)
@@ -80,9 +78,9 @@ func Migrate(db *sqlx.DB, dbName string) error {
 					return fmt.Errorf("schema: exec init.sql: %w\nSQL: %s", err, stmt)
 				}
 			}
-			log.Println("[migrate] init.sql applied – base schema created")
+			slog.Info("migrate: init.sql applied")
 		} else {
-			log.Println("[migrate] all expected tables found – skipping init.sql")
+			slog.Info("migrate: all tables found, skipping init.sql")
 		}
 	}
 
@@ -102,7 +100,7 @@ func Migrate(db *sqlx.DB, dbName string) error {
 			return fmt.Errorf("schema: evaluate conditions for %s: %w", t.ID, err)
 		}
 		if !needed {
-			log.Printf("[migrate] skip %s – conditions already met", t.ID)
+			slog.Info("migrate: skip task", "id", t.ID)
 			continue
 		}
 
@@ -117,7 +115,7 @@ func Migrate(db *sqlx.DB, dbName string) error {
 				return fmt.Errorf("schema: exec %s: %w\nSQL: %s", t.ID, err, stmt)
 			}
 		}
-		log.Printf("[migrate] applied %s – %s", t.ID, t.Description)
+		slog.Info("migrate: applied task", "id", t.ID, "desc", t.Description)
 	}
 	return nil
 }

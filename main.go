@@ -4,26 +4,37 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/jmoiron/sqlx"
 	"github.com/joho/godotenv"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/database"
 	"emly-api-go/internal/database/schema"
+	emlyMiddleware "emly-api-go/internal/middleware"
 	"emly-api-go/internal/routes"
 	"emly-api-go/internal/storage"
-
-	emlyMiddleware "emly-api-go/internal/middleware"
+	"emly-api-go/internal/telemetry"
 )
 
+// logBridge redirects the standard log package output to slog so that legacy
+// log.Printf calls are forwarded through the OTel log pipeline.
+type logBridge struct{}
+
+func (logBridge) Write(p []byte) (int, error) {
+	slog.Info(strings.TrimRight(string(p), "\n"))
+	return len(p), nil
+}
+
 func main() {
-	// Load .env (ignored if not present in production)
 	_ = godotenv.Load()
 
 	if name := os.Getenv("INSTANCE_NAME"); name != "" {
@@ -32,18 +43,38 @@ func main() {
 
 	cfg := config.Load()
 
+	// OTel setup — runs early so all subsequent logs flow through the pipeline.
+	if cfg.Otel.Enabled {
+		stdoutHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+		otelShutdown, err := telemetry.Setup(context.Background(), cfg.Otel.Endpoint, stdoutHandler)
+		if err != nil {
+			log.Fatalf("otel setup failed: %v", err)
+		}
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := otelShutdown(ctx); err != nil {
+				slog.Error("otel shutdown error", "err", err)
+			}
+		}()
+
+		// Forward standard log package output through slog → OTel.
+		log.SetOutput(logBridge{})
+		log.SetFlags(0)
+
+		slog.Info("OpenTelemetry enabled", "endpoint", cfg.Otel.Endpoint)
+	}
+
 	db, err := database.Connect(cfg)
 	if err != nil {
 		log.Fatalf("database connection failed: %v", err)
 	}
 	defer func(db *sqlx.DB) {
-		err := db.Close()
-		if err != nil {
+		if err := db.Close(); err != nil {
 			log.Fatalf("closing database failed: %v", err)
 		}
 	}(db)
 
-	// Run conditional schema migrations
 	if err := schema.Migrate(db, cfg.Database); err != nil {
 		log.Fatalf("schema migration failed: %v", err)
 	}
@@ -57,46 +88,47 @@ func main() {
 		if err := conn.Ping(context.Background()); err != nil {
 			log.Fatalf("R2 connection test failed: %v", err)
 		}
-		log.Printf("R2 storage connected (bucket: %s)", cfg.R2.BucketName)
+		slog.Info("R2 storage connected", "bucket", cfg.R2.BucketName)
 		s3conn = conn
 	}
 
-	argsWithoutProg := os.Args[1:]
-	for _, arg := range argsWithoutProg {
-		log.Printf("arg: %s", arg)
+	for _, arg := range os.Args[1:] {
 		if arg == "--migrate-files" {
 			if cfg.UseS3CompatibleStorage && s3conn != nil {
-				log.Printf("migrate report files from db to s3...")
+				slog.Info("migrating report files from db to s3")
 				if err := storage.MigrateReportFilesToS3(db, s3conn, cfg.Database); err != nil {
 					log.Fatalf("migrating report files failed: %v", err)
 				}
-				log.Printf("migrate report files from db to s3 completed successfully")
+				slog.Info("migration from db to s3 completed")
 				continue
-			} else {
-				log.Printf("migrate report files from db to s3 skipped (R2 not enabled)")
 			}
-
+			slog.Info("migrate-files skipped: R2 not enabled")
 		}
 	}
 
 	r := chi.NewRouter()
 
-	// Global middlewares
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
+	r.Use(chiMiddleware.RequestID)
+	r.Use(chiMiddleware.RealIP)
+	r.Use(chiMiddleware.Logger)
+	r.Use(chiMiddleware.Recoverer)
+	r.Use(chiMiddleware.Timeout(30 * time.Second))
 	r.Use(emlyMiddleware.Timing)
+	if cfg.Otel.Enabled {
+		r.Use(otelhttp.NewMiddleware("emly-api",
+			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+				return r.Method + " " + r.URL.Path
+			}),
+		))
+	}
 
 	rl := emlyMiddleware.NewRateLimiter(cfg)
-
 	r.Use(rl.Handler)
 
 	routes.RegisterAll(r, db, s3conn)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
-	log.Printf("server listening on %s", addr)
+	slog.Info("server listening", "addr", addr)
 	if err := http.ListenAndServe(addr, r); err != nil {
 		log.Fatalf("server error: %v", err)
 	}

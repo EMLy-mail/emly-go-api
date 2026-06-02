@@ -2,7 +2,7 @@ package middleware
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -29,8 +29,7 @@ func Timing(next http.Handler) http.Handler {
 		checkpoints := t.Checkpoints()
 
 		if len(checkpoints) == 0 {
-			// No checkpoints: just log the total so every request is visible.
-			log.Printf("[TIMING] %s %s  total=%s", r.Method, r.URL.Path, round(total))
+			slog.InfoContext(r.Context(), "timing", "method", r.Method, "path", r.URL.Path, "total", round(total))
 			return
 		}
 
@@ -40,13 +39,12 @@ func Timing(next http.Handler) http.Handler {
 			parts = append(parts, fmt.Sprintf("%s=%s", cp.Name, round(cp.At.Sub(prev))))
 			prev = cp.At
 		}
-		// Remainder after the last checkpoint.
 		if tail := total - prev.Sub(t.Start); tail > 0 {
 			parts = append(parts, fmt.Sprintf("response=%s", round(tail)))
 		}
 		parts = append(parts, fmt.Sprintf("total=%s", round(total)))
 
-		log.Printf("[TIMING] %s %s  %s", r.Method, r.URL.Path, strings.Join(parts, "  "))
+		slog.InfoContext(r.Context(), "timing", "method", r.Method, "path", r.URL.Path, "steps", strings.Join(parts, "  "))
 	})
 }
 

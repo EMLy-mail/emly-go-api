@@ -7,7 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -157,7 +157,7 @@ func LoginUser(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[AUTH] User logged in: username=%s session=%s...", body.Username, sessionID[:8])
+		slog.InfoContext(r.Context(), "user logged in", "username", body.Username, "session_prefix", sessionID[:8])
 
 		jsonOK(w, map[string]any{
 			"session_id": sessionID,
@@ -198,7 +198,7 @@ func ValidateSession(db *sqlx.DB) http.HandlerFunc {
 			sessionID,
 		)
 		if err != nil {
-			log.Printf("[AUTH] Database error during session validation: %v", err)
+			slog.ErrorContext(r.Context(), "session validation db error", "err", err)
 			jsonError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
@@ -244,7 +244,7 @@ func LogoutSession(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[AUTH] Session logged out: %s...", sessionID[:8])
+		slog.InfoContext(r.Context(), "session logged out", "session_prefix", sessionID[:8])
 
 		jsonOK(w, map[string]bool{"logged_out": true})
 	}
