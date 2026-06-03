@@ -1,17 +1,4 @@
 services:
-  otel-lgtm:
-    image: grafana/otel-lgtm:latest
-    restart: unless-stopped
-    ports:
-      - "3000:3000"   # Grafana UI
-      - "4317:4317"   # OTLP gRPC
-      - "4318:4318"   # OTLP HTTP
-    environment:
-      GF_SECURITY_ADMIN_USER: ${GF_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
-    volumes:
-      - grafana_data:/var/lib/grafana
-
   api:
     build: .
     restart: unless-stopped
