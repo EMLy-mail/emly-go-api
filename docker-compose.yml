@@ -2,8 +2,6 @@ services:
   api:
     build: .
     restart: unless-stopped
-    depends_on:
-      - otel-lgtm
     ports:
       - "${PORT:-8080}:8080"
     environment:
