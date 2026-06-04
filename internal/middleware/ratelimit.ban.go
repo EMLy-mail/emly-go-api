@@ -10,6 +10,36 @@ import (
 	"emly-api-go/internal/config"
 )
 
+var privateRanges = func() []*net.IPNet {
+	cidrs := []string{
+		"127.0.0.0/8",
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"::1/128",
+		"fc00::/7",
+	}
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, _ := net.ParseCIDR(c)
+		nets = append(nets, n)
+	}
+	return nets
+}()
+
+func isPrivateIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	for _, r := range privateRanges {
+		if r.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 type limitConfig struct {
 	maxReqs  int
 	window   time.Duration
@@ -129,6 +159,11 @@ func (rl *RateLimiter) Handler(next http.Handler) http.Handler {
 		}
 
 		ip := rl.getIP(r)
+
+		if isPrivateIP(ip) {
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		if unbanAt, banned := rl.banned.Load(ip); banned {
 			if time.Now().Before(unbanAt.(time.Time)) {
