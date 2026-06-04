@@ -40,6 +40,7 @@ type Config struct {
 	Database               string
 	APIKey                 string
 	AdminKey               string
+	DashboardKey           string
 	MaxOpenConns           int
 	MaxIdleConns           int
 	ConnMaxLifetime        int
@@ -123,6 +124,7 @@ func load() *Config {
 		Database:               dbName,
 		APIKey:                 apiKey,
 		AdminKey:               adminKey,
+		DashboardKey:           os.Getenv("DASHBOARD_KEY"),
 		MaxOpenConns:           maxOpenConns,
 		MaxIdleConns:           maxIdleConns,
 		ConnMaxLifetime:        connMaxLifetime,

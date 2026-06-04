@@ -30,9 +30,10 @@ type RateLimiter struct {
 	authVisitors   map[string]*ipState
 	banned         sync.Map // ip -> unban time (shared)
 
-	unauthCfg  limitConfig
-	authCfg    limitConfig
-	cleanEvery time.Duration
+	unauthCfg    limitConfig
+	authCfg      limitConfig
+	cleanEvery   time.Duration
+	dashboardKey string
 }
 
 // NewRateLimiter creates a two-tier rate limiter configured from cfg:
@@ -54,7 +55,8 @@ func NewRateLimiter(cfg *config.Config) *RateLimiter {
 			maxFails: cfg.RateLimit.AuthMaxFails,
 			banDur:   cfg.RateLimit.AuthBanDur,
 		},
-		cleanEvery: 10 * time.Minute,
+		cleanEvery:   10 * time.Minute,
+		dashboardKey: cfg.DashboardKey,
 	}
 	go rl.cleanupLoop()
 	return rl
@@ -121,6 +123,11 @@ func (rl *RateLimiter) record(ip string, auth bool) (exceeded bool, failures int
 
 func (rl *RateLimiter) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rl.dashboardKey != "" && r.Header.Get("X-Dashboard-Key") == rl.dashboardKey {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		ip := rl.getIP(r)
 
 		if unbanAt, banned := rl.banned.Load(ip); banned {
