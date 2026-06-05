@@ -45,7 +45,8 @@ type Config struct {
 	MaxIdleConns           int
 	ConnMaxLifetime        int
 	UpdatesEnabled         bool
-	UpdatesS3BaseURL       string
+	APIBaseURL             string
+	UpdatesS3Prefix        string
 	UseS3CompatibleStorage bool
 	RateLimit              RateLimitConfig
 	R2                     R2Config
@@ -130,7 +131,8 @@ func load() *Config {
 		MaxIdleConns:           maxIdleConns,
 		ConnMaxLifetime:        connMaxLifetime,
 		UpdatesEnabled:         strings.ToLower(strings.TrimSpace(os.Getenv("UPDATES_ENABLED"))) == "true",
-		UpdatesS3BaseURL:       strings.TrimRight(os.Getenv("UPDATES_S3_BASE_URL"), "/"),
+		APIBaseURL:             strings.TrimRight(envString("API_BASE_URL", "http://localhost:8080"), "/"),
+		UpdatesS3Prefix:        strings.Trim(os.Getenv("UPDATES_S3_PREFIX"), "/"),
 		UseS3CompatibleStorage: strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_COMPATIBLE_STORAGE"))) == "true",
 		Otel: OtelConfig{
 			Enabled:  strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_ENABLED"))) == "true",

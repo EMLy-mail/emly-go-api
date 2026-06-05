@@ -61,9 +61,16 @@ func ListReleases(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
+func s3Key(prefix, filename string) string {
+	if prefix == "" {
+		return filename
+	}
+	return prefix + "/" + filename
+}
+
 // CreateRelease handles POST /v2/updates/releases as multipart/form-data.
 // The .exe is uploaded to R2; SHA-256 is computed server-side.
-func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector) http.HandlerFunc {
+func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s3conn == nil {
 			jsonError(w, http.StatusServiceUnavailable, "S3 storage is not configured")
@@ -128,7 +135,7 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector) http.HandlerFunc {
 		checksum := hex.EncodeToString(sum[:])
 		filename := header.Filename
 
-		if _, err := s3conn.UploadFile(r.Context(), filename, bytes.NewReader(data), "application/octet-stream", nil); err != nil {
+		if _, err := s3conn.UploadFile(r.Context(), s3Key(s3Prefix, filename), bytes.NewReader(data), "application/octet-stream", nil); err != nil {
 			jsonError(w, http.StatusInternalServerError, "upload failed: "+err.Error())
 			return
 		}
@@ -166,7 +173,48 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector) http.HandlerFunc {
 	}
 }
 
-func DeleteRelease(db *sqlx.DB, s3conn *storage.S3Connector) http.HandlerFunc {
+func DownloadRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s3conn == nil {
+			jsonError(w, http.StatusServiceUnavailable, "S3 storage is not configured")
+			return
+		}
+
+		version := chi.URLParam(r, "version")
+
+		var filename string
+		if err := db.GetContext(r.Context(), &filename,
+			`SELECT download_filename FROM update_releases WHERE version = ?`, version); err != nil {
+			jsonError(w, http.StatusNotFound, "release not found")
+			return
+		}
+
+		rc, info, err := s3conn.GetFile(r.Context(), s3Key(s3Prefix, filename))
+		if err != nil {
+			if storage.IsNotFound(err) {
+				jsonError(w, http.StatusNotFound, "installer file not found in storage")
+				return
+			}
+			jsonError(w, http.StatusInternalServerError, "failed to retrieve file: "+err.Error())
+			return
+		}
+		defer rc.Close()
+
+		contentType := info.ContentType
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+		if info.Size > 0 {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size))
+		}
+
+		io.Copy(w, rc) //nolint:errcheck
+	}
+}
+
+func DeleteRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		version := chi.URLParam(r, "version")
 
@@ -179,7 +227,7 @@ func DeleteRelease(db *sqlx.DB, s3conn *storage.S3Connector) http.HandlerFunc {
 		}
 
 		if s3conn != nil {
-			if err := s3conn.DeleteFile(r.Context(), filename); err != nil && !storage.IsNotFound(err) {
+			if err := s3conn.DeleteFile(r.Context(), s3Key(s3Prefix, filename)); err != nil && !storage.IsNotFound(err) {
 				jsonError(w, http.StatusInternalServerError, "failed to delete file from storage: "+err.Error())
 				return
 			}
@@ -256,7 +304,7 @@ func PatchReleaseChannel(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func buildManifest(releases []models.Release, s3BaseURL string) models.UpdateManifest {
+func buildManifest(releases []models.Release, apiBaseURL string) models.UpdateManifest {
 	m := models.UpdateManifest{
 		SHA256Checksums:      make(map[string]string),
 		ReleaseNotes:         make(map[string]string),
@@ -287,14 +335,14 @@ func buildManifest(releases []models.Release, s3BaseURL string) models.UpdateMan
 		switch rel.Channel {
 		case "stable":
 			m.StableVersion = rel.Version
-			m.StableDownload = fmt.Sprintf("%s/%s", s3BaseURL, rel.DownloadFilename)
+			m.StableDownload = fmt.Sprintf("%s/v2/updates/releases/%s/download", apiBaseURL, rel.Version)
 			m.IsCritical = rel.IsCritical
 			if rel.MinRequiredVersion != nil {
 				m.MinRequiredVersion = *rel.MinRequiredVersion
 			}
 		case "beta":
 			m.BetaVersion = rel.Version
-			m.BetaDownload = fmt.Sprintf("%s/%s", s3BaseURL, rel.DownloadFilename)
+			m.BetaDownload = fmt.Sprintf("%s/v2/updates/releases/%s/download", apiBaseURL, rel.Version)
 		}
 	}
 

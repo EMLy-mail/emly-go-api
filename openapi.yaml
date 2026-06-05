@@ -260,11 +260,13 @@ components:
         stableDownload:
           type: string
           format: uri
-          example: "https://updates.example.com/EMLy_Installer_1.7.0.exe"
+          description: API proxy download URL — no direct S3 access required
+          example: "https://api.example.com/v2/updates/releases/1.7.0/download"
         betaDownload:
           type: string
           format: uri
-          example: "https://updates.example.com/EMLy_Installer_1.7.4_beta.exe"
+          description: API proxy download URL — no direct S3 access required
+          example: "https://api.example.com/v2/updates/releases/1.7.4/download"
         isCritical:
           type: boolean
           description: True when the current stable release must be applied immediately
@@ -1204,6 +1206,52 @@ paths:
                 $ref: '#/components/schemas/Error'
         "401":
           description: Missing or invalid admin key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "503":
+          description: S3 storage not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v2/updates/releases/{version}/download:
+    get:
+      tags: [Updates]
+      summary: Download installer
+      description: |
+        Public endpoint — no authentication required.
+        Proxies the installer binary from private R2/S3 storage directly to the
+        client, so the bucket never needs to be exposed publicly.
+        Returns `404` if the version doesn't exist in the database or the file
+        is missing from storage. Returns `503` if S3 is not configured.
+      parameters:
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "1.7.0"
+      responses:
+        "200":
+          description: Installer binary stream
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: 'attachment; filename="EMLy_Installer_1.7.0.exe"'
+            Content-Length:
+              schema:
+                type: integer
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Version not found or file missing from storage
           content:
             application/json:
               schema:
