@@ -77,3 +77,11 @@ The `DB_DSN` must include `parseTime=true&loc=UTC`, e.g.:
 ```
 DB_DSN=root:secret@tcp(127.0.0.1:3306)/emly?parseTime=true&loc=UTC
 ```
+
+### Adding new environment variables
+
+When you add a new env var to `internal/config/config.go`, you **must** update all three files in the same commit:
+
+1. **`.env.example`** — add the var with a sensible default or placeholder value and a comment explaining it.
+2. **`docker-compose.yml`** — add it under `services.api.environment` using `${VAR_NAME:-default}` syntax.
+3. **`docker-compose-prod.yml`** — add it to the `x-api-env` anchor (`&api-env`) so all replicas inherit it. Use `https://${API_DOMAIN}` or other compose-level expressions where the value differs from dev.

@@ -30,6 +30,9 @@ services:
       CF_R2_ENDPOINT: ${CF_R2_ENDPOINT}
       OTEL_ENABLED: ${OTEL_ENABLED:-true}
       OTEL_ENDPOINT: ${OTEL_ENDPOINT:-http://otel-lgtm:4318}
+      UPDATES_ENABLED: ${UPDATES_ENABLED:-false}
+      API_BASE_URL: ${API_BASE_URL:-http://localhost:8080}
+      UPDATES_S3_PREFIX: ${UPDATES_S3_PREFIX:-updates}
     volumes:
       - logs:/logs
     logging:
