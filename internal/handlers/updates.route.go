@@ -165,10 +165,10 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 		}
 
 		jsonCreated(w, map[string]string{
-			"version":         version,
-			"channel":         channel,
+			"version":           version,
+			"channel":           channel,
 			"download_filename": filename,
-			"sha256_checksum": checksum,
+			"sha256_checksum":   checksum,
 		})
 	}
 }
@@ -252,6 +252,28 @@ type patchChannelRequest struct {
 	Channel string `json:"channel"`
 }
 
+type putReleaseRequest struct {
+	Channel            string  `json:"channel"`
+	ShortNote          string  `json:"short_note"`
+	SeverityType       string  `json:"severity_type"`
+	DescriptionEN      *string `json:"description_en"`
+	DescriptionIT      *string `json:"description_it"`
+	IsCritical         bool    `json:"is_critical"`
+	MinRequiredVersion *string `json:"min_required_version"`
+	ReleasedAt         string  `json:"released_at"`
+}
+
+type patchReleaseRequest struct {
+	Channel            *string `json:"channel"`
+	ShortNote          *string `json:"short_note"`
+	SeverityType       *string `json:"severity_type"`
+	DescriptionEN      *string `json:"description_en"`
+	DescriptionIT      *string `json:"description_it"`
+	IsCritical         *bool   `json:"is_critical"`
+	MinRequiredVersion *string `json:"min_required_version"`
+	ReleasedAt         *string `json:"released_at"`
+}
+
 func PatchReleaseChannel(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		version := chi.URLParam(r, "version")
@@ -301,6 +323,201 @@ func PatchReleaseChannel(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		jsonOK(w, map[string]string{"version": version, "channel": req.Channel})
+	}
+}
+
+func PutRelease(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		version := chi.URLParam(r, "version")
+
+		var req putReleaseRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+
+		if req.Channel == "" {
+			req.Channel = "archived"
+		}
+		if !validChannels[req.Channel] {
+			jsonError(w, http.StatusBadRequest, "channel must be one of: stable, beta, archived")
+			return
+		}
+		if req.SeverityType == "" {
+			req.SeverityType = "none"
+		}
+		if !validSeverity[req.SeverityType] {
+			jsonError(w, http.StatusBadRequest, "severity_type must be one of: none, security, bugfix, feature")
+			return
+		}
+
+		releasedAt := time.Now().UTC()
+		if req.ReleasedAt != "" {
+			if t, err := time.Parse(time.RFC3339, req.ReleasedAt); err == nil {
+				releasedAt = t.UTC()
+			}
+		}
+
+		tx, err := db.BeginTxx(r.Context(), nil)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to begin transaction")
+			return
+		}
+		defer tx.Rollback()
+
+		if req.Channel != "archived" {
+			if _, err = tx.ExecContext(r.Context(),
+				`UPDATE update_releases SET channel = 'archived' WHERE channel = ? AND version != ?`,
+				req.Channel, version,
+			); err != nil {
+				jsonError(w, http.StatusInternalServerError, "failed to archive existing release")
+				return
+			}
+		}
+
+		res, err := tx.ExecContext(r.Context(),
+			`UPDATE update_releases
+			 SET channel = ?, short_note = ?, severity_type = ?,
+			     description_en = ?, description_it = ?, is_critical = ?,
+			     min_required_version = ?, released_at = ?
+			 WHERE version = ?`,
+			req.Channel, req.ShortNote, req.SeverityType,
+			req.DescriptionEN, req.DescriptionIT, req.IsCritical,
+			req.MinRequiredVersion, releasedAt, version,
+		)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to update release")
+			return
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			jsonError(w, http.StatusNotFound, "release not found")
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to commit")
+			return
+		}
+
+		var updated models.Release
+		if err := db.GetContext(r.Context(), &updated,
+			`SELECT`+releaseSelectCols+`FROM update_releases WHERE version = ?`, version,
+		); err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to fetch updated release")
+			return
+		}
+		jsonOK(w, updated)
+	}
+}
+
+func PatchRelease(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		version := chi.URLParam(r, "version")
+
+		var req patchReleaseRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+
+		if req.Channel != nil && !validChannels[*req.Channel] {
+			jsonError(w, http.StatusBadRequest, "channel must be one of: stable, beta, archived")
+			return
+		}
+		if req.SeverityType != nil && !validSeverity[*req.SeverityType] {
+			jsonError(w, http.StatusBadRequest, "severity_type must be one of: none, security, bugfix, feature")
+			return
+		}
+
+		var setClauses []string
+		var args []interface{}
+
+		if req.Channel != nil {
+			setClauses = append(setClauses, "channel = ?")
+			args = append(args, *req.Channel)
+		}
+		if req.ShortNote != nil {
+			setClauses = append(setClauses, "short_note = ?")
+			args = append(args, *req.ShortNote)
+		}
+		if req.SeverityType != nil {
+			setClauses = append(setClauses, "severity_type = ?")
+			args = append(args, *req.SeverityType)
+		}
+		if req.DescriptionEN != nil {
+			setClauses = append(setClauses, "description_en = ?")
+			args = append(args, *req.DescriptionEN)
+		}
+		if req.DescriptionIT != nil {
+			setClauses = append(setClauses, "description_it = ?")
+			args = append(args, *req.DescriptionIT)
+		}
+		if req.IsCritical != nil {
+			setClauses = append(setClauses, "is_critical = ?")
+			args = append(args, *req.IsCritical)
+		}
+		if req.MinRequiredVersion != nil {
+			setClauses = append(setClauses, "min_required_version = ?")
+			args = append(args, *req.MinRequiredVersion)
+		}
+		if req.ReleasedAt != nil {
+			t, err := time.Parse(time.RFC3339, *req.ReleasedAt)
+			if err != nil {
+				jsonError(w, http.StatusBadRequest, "released_at must be RFC3339")
+				return
+			}
+			setClauses = append(setClauses, "released_at = ?")
+			args = append(args, t.UTC())
+		}
+
+		if len(setClauses) == 0 {
+			jsonError(w, http.StatusBadRequest, "no fields to update")
+			return
+		}
+
+		args = append(args, version)
+
+		tx, err := db.BeginTxx(r.Context(), nil)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to begin transaction")
+			return
+		}
+		defer tx.Rollback()
+
+		if req.Channel != nil && *req.Channel != "archived" {
+			if _, err = tx.ExecContext(r.Context(),
+				`UPDATE update_releases SET channel = 'archived' WHERE channel = ? AND version != ?`,
+				*req.Channel, version,
+			); err != nil {
+				jsonError(w, http.StatusInternalServerError, "failed to archive existing release")
+				return
+			}
+		}
+
+		query := "UPDATE update_releases SET " + strings.Join(setClauses, ", ") + " WHERE version = ?"
+		res, err := tx.ExecContext(r.Context(), query, args...)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to update release")
+			return
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			jsonError(w, http.StatusNotFound, "release not found")
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to commit")
+			return
+		}
+
+		var updated models.Release
+		if err := db.GetContext(r.Context(), &updated,
+			`SELECT`+releaseSelectCols+`FROM update_releases WHERE version = ?`, version,
+		); err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to fetch updated release")
+			return
+		}
+		jsonOK(w, updated)
 	}
 }
 

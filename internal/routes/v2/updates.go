@@ -26,6 +26,8 @@ func registerUpdates(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, api
 
 			r.Get("/releases", handlers.ListReleases(db))
 			r.Post("/releases", handlers.CreateRelease(db, s3conn, s3Prefix))
+			r.Put("/releases/{version}", handlers.PutRelease(db))
+			r.Patch("/releases/{version}", handlers.PatchRelease(db))
 			r.Delete("/releases/{version}", handlers.DeleteRelease(db, s3conn, s3Prefix))
 			r.Patch("/releases/{version}/channel", handlers.PatchReleaseChannel(db))
 		})
