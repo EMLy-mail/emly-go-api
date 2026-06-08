@@ -92,6 +92,9 @@ func Setup(ctx context.Context, endpoint string, stdoutHandler slog.Handler) (sh
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		slog.Warn("otel", "err", err)
+	}))
 
 	otelHandler := otelslog.NewHandler("emly-api", otelslog.WithLoggerProvider(lp))
 	slog.SetDefault(slog.New(&teeHandler{a: stdoutHandler, b: otelHandler}))
