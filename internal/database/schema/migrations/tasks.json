@@ -27,5 +27,13 @@
         { "type": "table_not_exists", "table": "update_releases" }
       ]
     }
+    ,{
+      "id": "4_updates_critical_version",
+      "sql_file": "4_updates_critical_version.sql",
+      "description": "Add critical_version column to update_releases.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "update_releases", "column": "critical_version" }
+      ]
+    }
   ]
 }

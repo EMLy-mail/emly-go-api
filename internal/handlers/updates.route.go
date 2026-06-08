@@ -23,7 +23,7 @@ var validSeverity = map[string]bool{"none": true, "security": true, "bugfix": tr
 
 const releaseSelectCols = `
 	id, version, channel, download_filename, sha256_checksum, short_note,
-	severity_type, description_en, description_it, is_critical, min_required_version,
+	severity_type, description_en, description_it, is_critical, critical_version, min_required_version,
 	released_at, created_at `
 
 func GetUpdateManifest(db *sqlx.DB, s3BaseURL string) http.HandlerFunc {
@@ -89,6 +89,7 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 		descEN := strings.TrimSpace(r.FormValue("description_en"))
 		descIT := strings.TrimSpace(r.FormValue("description_it"))
 		isCritical := r.FormValue("is_critical") == "true" || r.FormValue("is_critical") == "1"
+		criticalVer := strings.TrimSpace(r.FormValue("critical_version"))
 		minVer := strings.TrimSpace(r.FormValue("min_required_version"))
 		releasedAtStr := strings.TrimSpace(r.FormValue("released_at"))
 
@@ -140,27 +141,51 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 			return
 		}
 
-		var pDescEN, pDescIT, pMinVer *string
+		var pDescEN, pDescIT, pCriticalVer, pMinVer *string
 		if descEN != "" {
 			pDescEN = &descEN
 		}
 		if descIT != "" {
 			pDescIT = &descIT
 		}
+		if criticalVer != "" {
+			pCriticalVer = &criticalVer
+		}
 		if minVer != "" {
 			pMinVer = &minVer
 		}
 
-		_, err = db.ExecContext(r.Context(),
+		tx, err := db.BeginTxx(r.Context(), nil)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to begin transaction")
+			return
+		}
+		defer tx.Rollback()
+
+		if isCritical {
+			if _, err = tx.ExecContext(r.Context(),
+				`UPDATE update_releases SET is_critical = 0, critical_version = NULL WHERE is_critical = 1`,
+			); err != nil {
+				jsonError(w, http.StatusInternalServerError, "failed to clear existing critical flag")
+				return
+			}
+		}
+
+		_, err = tx.ExecContext(r.Context(),
 			`INSERT INTO update_releases
 			 (version, channel, download_filename, sha256_checksum, short_note, severity_type,
-			  description_en, description_it, is_critical, min_required_version, released_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			  description_en, description_it, is_critical, critical_version, min_required_version, released_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			version, channel, filename, checksum, shortNote,
-			severityType, pDescEN, pDescIT, isCritical, pMinVer, releasedAt,
+			severityType, pDescEN, pDescIT, isCritical, pCriticalVer, pMinVer, releasedAt,
 		)
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "failed to create release: "+err.Error())
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to commit")
 			return
 		}
 
@@ -259,6 +284,7 @@ type putReleaseRequest struct {
 	DescriptionEN      *string `json:"description_en"`
 	DescriptionIT      *string `json:"description_it"`
 	IsCritical         bool    `json:"is_critical"`
+	CriticalVersion    *string `json:"critical_version"`
 	MinRequiredVersion *string `json:"min_required_version"`
 	ReleasedAt         string  `json:"released_at"`
 }
@@ -270,6 +296,7 @@ type patchReleaseRequest struct {
 	DescriptionEN      *string `json:"description_en"`
 	DescriptionIT      *string `json:"description_it"`
 	IsCritical         *bool   `json:"is_critical"`
+	CriticalVersion    *string `json:"critical_version"`
 	MinRequiredVersion *string `json:"min_required_version"`
 	ReleasedAt         *string `json:"released_at"`
 }
@@ -375,14 +402,24 @@ func PutRelease(db *sqlx.DB) http.HandlerFunc {
 			}
 		}
 
+		if req.IsCritical {
+			if _, err = tx.ExecContext(r.Context(),
+				`UPDATE update_releases SET is_critical = 0, critical_version = NULL WHERE is_critical = 1 AND version != ?`,
+				version,
+			); err != nil {
+				jsonError(w, http.StatusInternalServerError, "failed to clear existing critical flag")
+				return
+			}
+		}
+
 		res, err := tx.ExecContext(r.Context(),
 			`UPDATE update_releases
 			 SET channel = ?, short_note = ?, severity_type = ?,
-			     description_en = ?, description_it = ?, is_critical = ?,
+			     description_en = ?, description_it = ?, is_critical = ?, critical_version = ?,
 			     min_required_version = ?, released_at = ?
 			 WHERE version = ?`,
 			req.Channel, req.ShortNote, req.SeverityType,
-			req.DescriptionEN, req.DescriptionIT, req.IsCritical,
+			req.DescriptionEN, req.DescriptionIT, req.IsCritical, req.CriticalVersion,
 			req.MinRequiredVersion, releasedAt, version,
 		)
 		if err != nil {
@@ -456,6 +493,10 @@ func PatchRelease(db *sqlx.DB) http.HandlerFunc {
 			setClauses = append(setClauses, "is_critical = ?")
 			args = append(args, *req.IsCritical)
 		}
+		if req.CriticalVersion != nil {
+			setClauses = append(setClauses, "critical_version = ?")
+			args = append(args, *req.CriticalVersion)
+		}
 		if req.MinRequiredVersion != nil {
 			setClauses = append(setClauses, "min_required_version = ?")
 			args = append(args, *req.MinRequiredVersion)
@@ -490,6 +531,16 @@ func PatchRelease(db *sqlx.DB) http.HandlerFunc {
 				*req.Channel, version,
 			); err != nil {
 				jsonError(w, http.StatusInternalServerError, "failed to archive existing release")
+				return
+			}
+		}
+
+		if req.IsCritical != nil && *req.IsCritical {
+			if _, err = tx.ExecContext(r.Context(),
+				`UPDATE update_releases SET is_critical = 0, critical_version = NULL WHERE is_critical = 1 AND version != ?`,
+				version,
+			); err != nil {
+				jsonError(w, http.StatusInternalServerError, "failed to clear existing critical flag")
 				return
 			}
 		}
@@ -549,11 +600,19 @@ func buildManifest(releases []models.Release, apiBaseURL string) models.UpdateMa
 			m.DetailedReleaseNotes[rel.Version] = note
 		}
 
+		if rel.IsCritical {
+			m.IsCritical = true
+			if rel.CriticalVersion != nil {
+				m.CriticalVersion = *rel.CriticalVersion
+			} else {
+				m.CriticalVersion = rel.Version
+			}
+		}
+
 		switch rel.Channel {
 		case "stable":
 			m.StableVersion = rel.Version
 			m.StableDownload = fmt.Sprintf("%s/v2/updates/releases/%s/download", apiBaseURL, rel.Version)
-			m.IsCritical = rel.IsCritical
 			if rel.MinRequiredVersion != nil {
 				m.MinRequiredVersion = *rel.MinRequiredVersion
 			}

@@ -271,6 +271,10 @@ components:
           type: boolean
           description: True when the current stable release must be applied immediately
           example: false
+        criticalVersion:
+          type: string
+          description: The version clients must update to when `isCritical` is true; omitted when not set
+          example: "1.7.0"
         minRequiredVersion:
           type: string
           description: Clients below this version are blocked; omitted when no minimum is set
@@ -324,6 +328,11 @@ components:
         is_critical:
           type: boolean
           example: false
+        critical_version:
+          type: string
+          nullable: true
+          description: Version clients must update to when `is_critical` is true; only one release can hold this at a time
+          example: "1.7.0"
         min_required_version:
           type: string
           nullable: true
@@ -1170,7 +1179,11 @@ paths:
                   type: string
                   enum: ["true", "false", "1", "0"]
                   default: "false"
-                  description: When `true` and this release is stable, clients must update immediately
+                  description: When `true`, clears the critical flag from any other release and sets this as the sole critical release
+                critical_version:
+                  type: string
+                  description: The version clients must update to when `is_critical` is true
+                  example: "1.7.5"
                 min_required_version:
                   type: string
                   description: Clients below this version are forced to update; omit to leave unset
@@ -1264,6 +1277,152 @@ paths:
                 $ref: '#/components/schemas/Error'
 
   /v2/updates/releases/{version}:
+    put:
+      tags: [Updates]
+      summary: Replace all release metadata
+      description: |
+        Full replacement of all mutable fields. `version` and `download_filename`
+        are immutable and ignored. When `is_critical` is `true` the critical flag
+        and `critical_version` are cleared from every other release atomically.
+        When promoting to `stable` or `beta`, any release currently occupying
+        that slot is automatically moved to `archived`.
+      security:
+        - AdminKey: []
+      parameters:
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "1.7.0"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                channel:
+                  $ref: '#/components/schemas/ReleaseChannel'
+                short_note:
+                  type: string
+                  example: "Fix critico al renderer PDF."
+                severity_type:
+                  $ref: '#/components/schemas/ReleaseSeverity'
+                description_en:
+                  type: string
+                  nullable: true
+                description_it:
+                  type: string
+                  nullable: true
+                is_critical:
+                  type: boolean
+                  default: false
+                  description: When `true`, clears the critical flag from any other release
+                critical_version:
+                  type: string
+                  nullable: true
+                  description: The version clients must update to when `is_critical` is true
+                  example: "1.7.0"
+                min_required_version:
+                  type: string
+                  nullable: true
+                  example: "1.6.0"
+                released_at:
+                  type: string
+                  format: date-time
+      responses:
+        "200":
+          description: Updated release
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Release'
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: Version not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    patch:
+      tags: [Updates]
+      summary: Partially update release metadata
+      description: |
+        Updates only the fields present in the request body. When `is_critical`
+        is set to `true` the critical flag and `critical_version` are cleared
+        from every other release atomically.
+        When promoting to `stable` or `beta`, any release currently occupying
+        that slot is automatically moved to `archived`.
+      security:
+        - AdminKey: []
+      parameters:
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "1.7.0"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                channel:
+                  $ref: '#/components/schemas/ReleaseChannel'
+                short_note:
+                  type: string
+                severity_type:
+                  $ref: '#/components/schemas/ReleaseSeverity'
+                description_en:
+                  type: string
+                  nullable: true
+                description_it:
+                  type: string
+                  nullable: true
+                is_critical:
+                  type: boolean
+                  description: When `true`, clears the critical flag from any other release
+                critical_version:
+                  type: string
+                  nullable: true
+                  description: The version clients must update to when `is_critical` is true
+                  example: "1.7.0"
+                min_required_version:
+                  type: string
+                  nullable: true
+                  example: "1.6.0"
+                released_at:
+                  type: string
+                  format: date-time
+      responses:
+        "200":
+          description: Updated release
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Release'
+        "400":
+          description: Validation error or no fields provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: Version not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
     delete:
       tags: [Updates]
       summary: Delete a release
