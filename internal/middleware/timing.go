@@ -29,7 +29,7 @@ func Timing(next http.Handler) http.Handler {
 		checkpoints := t.Checkpoints()
 
 		if len(checkpoints) == 0 {
-			slog.InfoContext(r.Context(), "timing", "method", r.Method, "path", r.URL.Path, "total", round(total))
+			slog.InfoContext(r.Context(), "timing", "method", r.Method, "path", r.URL.Path, "total", round(total), "user_agent", r.UserAgent())
 			return
 		}
 
@@ -44,7 +44,7 @@ func Timing(next http.Handler) http.Handler {
 		}
 		parts = append(parts, fmt.Sprintf("total=%s", round(total)))
 
-		slog.InfoContext(r.Context(), "timing", "method", r.Method, "path", r.URL.Path, "steps", strings.Join(parts, "  "))
+		slog.InfoContext(r.Context(), "timing", "method", r.Method, "path", r.URL.Path, "steps", strings.Join(parts, "  "), "user_agent", r.UserAgent())
 	})
 }
 

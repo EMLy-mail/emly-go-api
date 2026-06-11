@@ -110,7 +110,7 @@ func main() {
 
 	r.Use(chiMiddleware.RequestID)
 	r.Use(chiMiddleware.RealIP)
-	r.Use(chiMiddleware.Logger)
+	r.Use(emlyMiddleware.AccessLog)
 	r.Use(chiMiddleware.Recoverer)
 	r.Use(chiMiddleware.Timeout(30 * time.Second))
 	r.Use(emlyMiddleware.Timing)
