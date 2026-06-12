@@ -65,17 +65,31 @@ func CreateBugReport(db *sqlx.DB, dbName string, s3conn *storage.S3Connector) ht
 			return
 		}
 
-		submitterIP := strings.TrimSpace(strings.SplitN(r.Header.Get("X-Forwarded-For"), ",", 2)[0])
+		var systemInfo json.RawMessage
+		if systemInfoStr != "" && json.Valid([]byte(systemInfoStr)) {
+			systemInfo = json.RawMessage(systemInfoStr)
+		}
+
+		var internalIP string
+		if systemInfo != nil {
+			var sysInfoMap map[string]interface{}
+			if err := json.Unmarshal(systemInfo, &sysInfoMap); err == nil {
+				if ip, ok := sysInfoMap["InternalIP"].(string); ok {
+					internalIP = ip
+				}
+			}
+		}
+
+		submitterIP := strings.TrimSpace(internalIP)
+		if submitterIP == "" {
+			submitterIP = strings.TrimSpace(strings.SplitN(r.Header.Get("X-Forwarded-For"), ",", 2)[0])
+		}
+
 		if submitterIP == "" {
 			submitterIP = r.Header.Get("X-Real-IP")
 		}
 		if submitterIP == "" {
 			submitterIP = "unknown"
-		}
-
-		var systemInfo json.RawMessage
-		if systemInfoStr != "" && json.Valid([]byte(systemInfoStr)) {
-			systemInfo = json.RawMessage(systemInfoStr)
 		}
 
 		slog.InfoContext(r.Context(), "bug report received", "name", name, "hwid", hwid, "ip", submitterIP)
