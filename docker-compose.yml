@@ -5,7 +5,7 @@ services:
     ports:
       - "${PORT:-8080}:8080"
     environment:
-      PORT: ${PORT:-8080}
+      PORT: 8080
       DB_DSN: ${DB_DSN}
       DATABASE_NAME: ${DATABASE_NAME}
       API_KEY: ${API_KEY}
