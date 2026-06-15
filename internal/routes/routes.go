@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"emly-api-go/internal/handlers"
 	"net/http"
 
 	v1 "emly-api-go/internal/routes/v1"
@@ -22,4 +23,7 @@ func RegisterAll(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector) {
 
 	r.Mount("/v1", v1.NewRouter(db, s3conn))
 	r.Mount("/v2", v2.NewRouter(db, s3conn))
+	// Redirect /health to /v1/health
+	r.Get("/health", handlers.Health(db))
+
 }
