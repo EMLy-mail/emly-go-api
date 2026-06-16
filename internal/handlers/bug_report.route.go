@@ -34,6 +34,11 @@ var reportTmpl = template.Must(
 	template.ParseFS(reportTemplateFS, "templates/report.txt.tmpl"),
 )
 
+// maxUploadFileSize caps each individual uploaded file. Enforced both against the
+// client-reported part size and against the bytes actually read, so a missing or
+// spoofed Content-Length cannot bypass it.
+const maxUploadFileSize = 32 << 20 // 32 MiB
+
 var fileRoles = []struct {
 	field       string
 	role        models.FileRole
@@ -122,14 +127,20 @@ func CreateBugReport(db *sqlx.DB, dbName string, s3conn *storage.S3Connector) ht
 				}
 			}(file)
 
-			if header.Size > 32<<20 {
+			if header.Size > maxUploadFileSize {
 				slog.WarnContext(r.Context(), "file too large, skipping", "field", fr.field, "size_bytes", header.Size)
 				continue
 			}
-			data, err := io.ReadAll(file)
+			// Hard cap the bytes actually read: header.Size is client-supplied and may be
+			// absent or understated. Read one byte past the limit to detect an overrun.
+			data, err := io.ReadAll(io.LimitReader(file, maxUploadFileSize+1))
 			if err != nil {
 				jsonError(w, http.StatusInternalServerError, "reading file "+fr.field+": "+err.Error())
 				return
+			}
+			if len(data) > maxUploadFileSize {
+				slog.WarnContext(r.Context(), "file exceeded size limit, skipping", "field", fr.field, "size_bytes", len(data))
+				continue
 			}
 
 			mimeType := header.Header.Get("Content-Type")
@@ -373,40 +384,41 @@ func GetBugReportZipByID(db *sqlx.DB, dbName string) http.HandlerFunc {
 			SystemInfo: sysInfoStr,
 		}
 
-		var buf bytes.Buffer
-		zw := zip.NewWriter(&buf)
+		// Stream the archive straight to the client rather than buffering the whole
+		// ZIP in memory. Headers are committed up front; once bytes have flowed we can
+		// no longer change the status code, so post-header failures are only logged.
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report-%d.zip\"", report.ID))
+
+		zw := zip.NewWriter(w)
 
 		rf, err := zw.Create("report.txt")
 		if err != nil {
-			jsonError(w, http.StatusInternalServerError, err.Error())
+			slog.ErrorContext(r.Context(), "zip stream: create report.txt failed", "report_id", report.ID, "err", err)
 			return
 		}
 		if err = reportTmpl.Execute(rf, tmplData); err != nil {
-			jsonError(w, http.StatusInternalServerError, err.Error())
+			slog.ErrorContext(r.Context(), "zip stream: render report.txt failed", "report_id", report.ID, "err", err)
 			return
 		}
 
 		for _, file := range files {
 			ff, err := zw.Create(fmt.Sprintf("%s/%s", file.FileRole, file.Filename))
 			if err != nil {
-				jsonError(w, http.StatusInternalServerError, err.Error())
+				slog.ErrorContext(r.Context(), "zip stream: create entry failed", "report_id", report.ID, "err", err)
 				return
 			}
 			if _, err = ff.Write(file.Data); err != nil {
-				jsonError(w, http.StatusInternalServerError, err.Error())
+				slog.ErrorContext(r.Context(), "zip stream: write entry failed", "report_id", report.ID, "err", err)
 				return
 			}
 		}
 
 		if err := zw.Close(); err != nil {
-			jsonError(w, http.StatusInternalServerError, err.Error())
+			slog.ErrorContext(r.Context(), "zip stream: close failed", "report_id", report.ID, "err", err)
 			return
 		}
 		timing.Mark(r.Context(), "zip_build")
-
-		w.Header().Set("Content-Type", "application/zip")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"report-%d.zip\"", report.ID))
-		_, _ = w.Write(buf.Bytes())
 	}
 }
 
