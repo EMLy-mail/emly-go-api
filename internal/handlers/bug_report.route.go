@@ -516,7 +516,12 @@ func PatchBugReportStatus(db *sqlx.DB, dbName string) http.HandlerFunc {
 			jsonError(w, http.StatusBadRequest, "unable to read request body: "+err.Error())
 			return
 		}
-		reportStatus := models.BugReportStatus(body)
+		rawReportStatus := models.BugReportStatus(body)
+		reportStatus, isValid := models.ParseBugReportStatus(string(rawReportStatus))
+		if !isValid {
+			jsonError(w, http.StatusBadRequest, "invalid status. allowed values: new, in_review, resolved, closed")
+			return
+		}
 
 		result, err := db.ExecContext(r.Context(), fmt.Sprintf("UPDATE %s.bug_reports SET status = ? WHERE id = ?", dbName), reportStatus, reportId)
 		if err != nil {
