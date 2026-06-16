@@ -14,6 +14,7 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/template"
@@ -153,7 +154,14 @@ func CreateBugReport(db *sqlx.DB, dbName string, s3conn *storage.S3Connector) ht
 				if err != nil {
 					slog.WarnContext(r.Context(), "could not get file insert id", "report_id", reportID, "role", fr.role, "err", err)
 				} else {
+
 					s3Key := fmt.Sprintf("emly-api-files/bug-reports/%d/files/%s", reportID, filename)
+					// Sanitize key
+					isPathValid := filepath.Base(s3Key) == filename
+					if !isPathValid {
+						jsonError(w, http.StatusInternalServerError, "invalid file path or name")
+						return
+					}
 					if _, err := s3conn.UploadFile(
 						context.Background(), s3Key,
 						bytes.NewReader(data), mimeType,
