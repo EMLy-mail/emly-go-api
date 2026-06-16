@@ -35,6 +35,7 @@ func NewRouter(db *sqlx.DB, s3conn *storage.S3Connector) http.Handler {
 	r.Route("/api", func(r chi.Router) {
 		registerAdmin(r, db)
 		registerBugReports(r, db, config.Load().Database, s3conn)
+		registerConfig(r)
 	})
 
 	return r
