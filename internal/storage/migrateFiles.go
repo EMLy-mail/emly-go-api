@@ -17,7 +17,7 @@ import (
 func MigrateReportFilesToS3(db *sqlx.DB, s3conn *S3Connector, dbName string) error {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 128) // buffer ragionevole
-	reportsRows, err := db.Query("SELECT id, created_at, updated_at FROM emly_bugreports_dev.bug_reports ORDER BY created_at DESC")
+	reportsRows, err := db.Query(fmt.Sprintf("SELECT id, created_at, updated_at FROM %s.bug_reports ORDER BY created_at DESC", dbName))
 	if err != nil {
 		return err
 	}
@@ -38,7 +38,7 @@ func MigrateReportFilesToS3(db *sqlx.DB, s3conn *S3Connector, dbName string) err
 		slog.Info("migrate: processing report", "report_id", reportId)
 
 		filesRows, err := db.Query(
-			"SELECT id, report_id, filename FROM emly_bugreports_dev.bug_report_files WHERE report_id = ?",
+			fmt.Sprintf("SELECT id, report_id, filename FROM %s.bug_report_files WHERE report_id = ?", dbName),
 			reportId,
 		)
 
