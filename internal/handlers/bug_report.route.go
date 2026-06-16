@@ -443,7 +443,8 @@ func GetReportFileByFileID(db *sqlx.DB, dbName string, s3conn *storage.S3Connect
 					fname = fileId
 				}
 				w.Header().Set("Content-Type", mimeType)
-				w.Header().Set("Content-Disposition", "attachment; filename=\""+fname+"\"")
+				safe := strings.NewReplacer("\"", "", "\\", "", "\r", "", "\n", "").Replace(filepath.Base(fname))
+				w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safe))
 				_, _ = io.Copy(w, rc)
 				return
 			}
