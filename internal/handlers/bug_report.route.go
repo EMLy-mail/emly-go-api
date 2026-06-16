@@ -122,6 +122,10 @@ func CreateBugReport(db *sqlx.DB, dbName string, s3conn *storage.S3Connector) ht
 				}
 			}(file)
 
+			if header.Size > 32<<20 {
+				slog.WarnContext(r.Context(), "file too large, skipping", "field", fr.field, "size_bytes", header.Size)
+				continue
+			}
 			data, err := io.ReadAll(file)
 			if err != nil {
 				jsonError(w, http.StatusInternalServerError, "reading file "+fr.field+": "+err.Error())
