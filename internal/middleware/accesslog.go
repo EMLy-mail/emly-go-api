@@ -41,18 +41,14 @@ func AccessLog(next http.Handler) http.Handler {
 			lrw.status = http.StatusOK
 		}
 
-		var UAString string
+		UAString := r.UserAgent()
 
 		adDomain := r.Header.Get("X-EMLy-ADDomain")
 		hostName := r.Header.Get("X-EMLy-Hostname")
 
-		if adDomain != "" && hostName != "" {
-			UAString = r.UserAgent() + " [ + " + adDomain + "\\" + hostName + " ]"
-		} else {
-			UAString = r.UserAgent()
-		}
-
-		slog.InfoContext(r.Context(), "request",
+		// Log AD domain and hostname as separate fields to avoid escaping
+		// characters like backslashes inside the user_agent field.
+		args := []any{
 			"request_id", chiMiddleware.GetReqID(r.Context()),
 			"method", r.Method,
 			"path", r.URL.Path,
@@ -60,6 +56,13 @@ func AccessLog(next http.Handler) http.Handler {
 			"bytes", lrw.bytes,
 			"duration", time.Since(started).String(),
 			"user_agent", UAString,
-		)
+		}
+		if adDomain != "" {
+			args = append(args, "ad_domain", adDomain)
+		}
+		if hostName != "" {
+			args = append(args, "host_name", hostName)
+		}
+		slog.InfoContext(r.Context(), "request", args...)
 	})
 }
