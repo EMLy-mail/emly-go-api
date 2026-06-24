@@ -41,6 +41,17 @@ func AccessLog(next http.Handler) http.Handler {
 			lrw.status = http.StatusOK
 		}
 
+		var UAString string
+
+		adDomain := r.Header.Get("X-EMLy-ADDomain")
+		hostName := r.Header.Get("X-EMLy-Hostname")
+
+		if adDomain != "" && hostName != "" {
+			UAString = r.UserAgent() + " [ + " + adDomain + "\\" + hostName + " ]"
+		} else {
+			UAString = r.UserAgent()
+		}
+
 		slog.InfoContext(r.Context(), "request",
 			"request_id", chiMiddleware.GetReqID(r.Context()),
 			"method", r.Method,
@@ -48,7 +59,7 @@ func AccessLog(next http.Handler) http.Handler {
 			"status", lrw.status,
 			"bytes", lrw.bytes,
 			"duration", time.Since(started).String(),
-			"user_agent", r.UserAgent(),
+			"user_agent", UAString,
 		)
 	})
 }
