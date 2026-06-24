@@ -148,6 +148,9 @@ func main() {
 	defer cancel()
 
 	slog.Info("shutting down server, waiting for in-flight requests to finish")
+	// Disable keep-alives to make sure no new requests are serviced on
+	// long-lived connections during shutdown.
+	srv.SetKeepAlivesEnabled(false)
 	if err := srv.Shutdown(ctxShut); err != nil {
 		slog.Error("server shutdown error", "err", err)
 	} else {
