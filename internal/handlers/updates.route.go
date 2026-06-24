@@ -16,6 +16,7 @@ import (
 
 	"emly-api-go/internal/models"
 	"emly-api-go/internal/storage"
+	"emly-api-go/internal/timing"
 )
 
 var validChannels = map[string]bool{"stable": true, "beta": true, "archived": true}
@@ -35,7 +36,10 @@ func GetUpdateManifest(db *sqlx.DB, s3BaseURL string) http.HandlerFunc {
 			jsonError(w, http.StatusInternalServerError, "failed to fetch releases")
 			return
 		}
-		jsonOK(w, buildManifest(releases, s3BaseURL))
+		timing.Mark(r.Context(), "db_select")
+		manifest := buildManifest(releases, s3BaseURL)
+		timing.Mark(r.Context(), "build_manifest")
+		jsonOK(w, manifest)
 	}
 }
 
