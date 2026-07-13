@@ -4,6 +4,7 @@ import "time"
 
 type Release struct {
 	ID                 int       `db:"id"                   json:"-"`
+	Product            string    `db:"product"               json:"product"`
 	Version            string    `db:"version"              json:"version"`
 	Channel            string    `db:"channel"              json:"channel"`
 	DownloadFilename   string    `db:"download_filename"    json:"download_filename"`

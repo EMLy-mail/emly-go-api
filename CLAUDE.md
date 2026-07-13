@@ -56,14 +56,16 @@ The custom middleware live in `internal/middleware/`: `AccessLog` (`accesslog.go
 - `POST /api/bug-reports` → legacy alias for v1 bug-report creation
 - `r.Mount("/v1", v1.NewRouter(...))` and `r.Mount("/v2", v2.NewRouter(...))`
 
-Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applies the custom `RateLimiter`, sets `X-Server`/`X-Powered-By` headers, exposes `GET /health`, and mounts route groups defined in sibling files (`bug_reports.go`, `admin.go`, and for v2 `updates.go`).
+Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`, `v3/v3.go`) re-applies the custom `RateLimiter`, sets `X-Server`/`X-Powered-By` headers, exposes `GET /health`, and mounts route groups defined in sibling files (`bug_reports.go`, `admin.go`, and for v2/v3 `updates.go`).
 
 **v1** (`/v1/api/...`):
 - `bug-reports`: API-key-only group (`POST /`, `GET /count`) and API-key + admin-key group (full CRUD, `{id}/status`, `{id}/files`, `{id}/download`, etc.).
 - `admin/auth`: session login/validate/logout (`/login` is rate-limited; `/validate` + `/logout` require a session token).
 - `admin/users`: admin-key-protected user CRUD + password reset.
 
-**v2** (`/v2/...`): everything in v1 plus `updates/` — public update manifest + release download, and admin-key-protected release management (`update_releases` table).
+**v2** (`/v2/...`): everything in v1 plus `updates/` — public update manifest + release download, and admin-key-protected release management (`update_releases` table). The `updates/` routes here have no `{product}` path segment and are always implicitly scoped to `product = 'app'`; kept frozen so already-deployed EMLy Updater installations (URL hardcoded in their config) keep working.
+
+**v3** (`/v3/...`): scoped *only* to `updates/{product}/...` — the same update-management surface as v2, but every route takes a `{product}` segment (`app` or `updater`) and every query/mutation is scoped to it (`channel` and `is_critical` singleton slots are per-product, not global). No bug-reports/admin/auth here — those are unaffected by the product dimension and stay on v1/v2. `internal/handlers/updates.route.go` implements both v2 and v3 with the same handler functions via a `productParam(r)` helper (`chi.URLParam(r, "product")`, defaulting to `"app"` when absent) — there is no separate v3 handler code.
 
 ### Rate limiting — two layers
 
@@ -89,7 +91,7 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - Use the request context (`r.Context()`) for DB calls (`SelectContext`, `GetContext`) and `slog.*Context` logging so traces/spans propagate.
 - File uploads use `r.ParseMultipartForm(32 << 20)`; close file streams explicitly.
 - ZIP downloads: in-memory `archive/zip` with template-rendered report text via `internal/handlers/templates/report.txt.tmpl`.
-- Update releases validate against `validChannels` (`stable`/`beta`/`archived`) and `validSeverity` (`none`/`security`/`bugfix`/`feature`).
+- Update releases validate against `validChannels` (`stable`/`beta`/`archived`), `validSeverity` (`none`/`security`/`bugfix`/`feature`), and `validProducts` (`app`/`updater`). The natural key is `(product, version)`, not `version` alone.
 
 ### Database migrations
 

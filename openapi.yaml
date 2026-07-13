@@ -234,6 +234,15 @@ components:
       enum: [none, security, bugfix, feature]
       example: none
 
+    ReleaseProduct:
+      type: string
+      enum: [app, updater]
+      description: >
+        Which binary the release is for — the EMLy desktop app or the EMLy Updater.
+        `channel` and `is_critical` are singleton slots scoped per product (e.g. there
+        can be one `app` stable release and one `updater` stable release at the same time).
+      example: app
+
     DetailedNote:
       type: object
       properties:
@@ -301,6 +310,8 @@ components:
     Release:
       type: object
       properties:
+        product:
+          $ref: '#/components/schemas/ReleaseProduct'
         version:
           type: string
           example: "1.7.0"
@@ -1081,9 +1092,13 @@ paths:
   /v2/updates/manifest:
     get:
       tags: [Updates]
-      summary: Get update manifest
+      summary: Get update manifest (legacy, app-only)
       description: |
         Public endpoint — no authentication required.
+        **Legacy/frozen path**, kept unchanged for EMLy Updater installations that
+        already have this URL hardcoded. Always implicitly scoped to `product=app`.
+        For the Updater's own release channel, or for new integrations, use
+        `/v3/updates/{product}/manifest` instead.
         Returns the current update manifest consumed by the EMLy desktop client.
         The `stableDownload` / `betaDownload` URLs point directly to S3.
         `betaVersion`, `betaDownload`, `minRequiredVersion`, and `detailedReleaseNotes`
@@ -1233,9 +1248,11 @@ paths:
   /v2/updates/releases/{version}/download:
     get:
       tags: [Updates]
-      summary: Download installer
+      summary: Download installer (legacy, app-only)
       description: |
         Public endpoint — no authentication required.
+        **Legacy/frozen path**, implicitly scoped to `product=app`; see
+        `/v3/updates/{product}/releases/{version}/download` for the Updater product.
         Proxies the installer binary from private R2/S3 storage directly to the
         client, so the bucket never needs to be exposed publicly.
         Returns `404` if the version doesn't exist in the database or the file
@@ -1458,6 +1475,447 @@ paths:
                 $ref: '#/components/schemas/Error'
         "500":
           description: Storage deletion failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ── Updates v3 (multi-product: app + updater) ───────────────
+  #
+  # Same behaviour as the /v2/updates/* endpoints above, but every path takes
+  # a {product} segment (`app` or `updater`) and every query/mutation is
+  # scoped to that product: `channel` and `is_critical` are singleton slots
+  # per product, not global. Use these for anything Updater-related; use
+  # /v2/updates/* only for the frozen, app-only legacy manifest/download URLs.
+
+  /v3/updates/{product}/manifest:
+    get:
+      tags: [Updates]
+      summary: Get update manifest for a product
+      description: |
+        Public endpoint — no authentication required.
+        Same shape as `/v2/updates/manifest`, scoped to `{product}`.
+      parameters:
+        - name: product
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ReleaseProduct'
+      responses:
+        "200":
+          description: Update manifest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateManifest'
+        "404":
+          description: Unknown product
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "500":
+          description: Database error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v3/updates/{product}/releases:
+    get:
+      tags: [Updates]
+      summary: List all releases for a product
+      description: Same as `GET /v2/updates/releases`, scoped to `{product}`. Filterable by channel.
+      security:
+        - AdminKey: []
+      parameters:
+        - name: product
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ReleaseProduct'
+        - name: channel
+          in: query
+          description: Filter by channel
+          schema:
+            $ref: '#/components/schemas/ReleaseChannel'
+      responses:
+        "200":
+          description: Array of releases
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Release'
+        "401":
+          description: Missing or invalid admin key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: Unknown product
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    post:
+      tags: [Updates]
+      summary: Create a new release for a product
+      description: |
+        Same as `POST /v2/updates/releases`, scoped to `{product}`. Accepts
+        `multipart/form-data` with the same fields (`version`, `file`, `channel`,
+        `short_note`, `severity_type`, `description_en`, `description_it`,
+        `is_critical`, `critical_version`, `min_required_version`, `released_at`).
+        `channel`/`is_critical` singleton slots are scoped to `{product}`.
+      security:
+        - AdminKey: []
+      parameters:
+        - name: product
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ReleaseProduct'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [version, file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                version:
+                  type: string
+                  example: "1.0.3"
+                channel:
+                  $ref: '#/components/schemas/ReleaseChannel'
+                short_note:
+                  type: string
+                severity_type:
+                  $ref: '#/components/schemas/ReleaseSeverity'
+                description_en:
+                  type: string
+                description_it:
+                  type: string
+                is_critical:
+                  type: string
+                  enum: ["true", "false", "1", "0"]
+                  default: "false"
+                critical_version:
+                  type: string
+                min_required_version:
+                  type: string
+                released_at:
+                  type: string
+                  format: date-time
+      responses:
+        "201":
+          description: Release created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  product:
+                    $ref: '#/components/schemas/ReleaseProduct'
+                  version:
+                    type: string
+                  channel:
+                    $ref: '#/components/schemas/ReleaseChannel'
+                  download_filename:
+                    type: string
+                  sha256_checksum:
+                    type: string
+        "400":
+          description: Validation error or missing file
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "401":
+          description: Missing or invalid admin key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "503":
+          description: S3 storage not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v3/updates/{product}/releases/{version}/download:
+    get:
+      tags: [Updates]
+      summary: Download installer for a product
+      description: Same as `GET /v2/updates/releases/{version}/download`, scoped to `{product}`.
+      parameters:
+        - name: product
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ReleaseProduct'
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Installer binary stream
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Version not found or file missing from storage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "503":
+          description: S3 storage not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v3/updates/{product}/releases/{version}:
+    put:
+      tags: [Updates]
+      summary: Replace all release metadata for a product's release
+      description: Same as `PUT /v2/updates/releases/{version}`, scoped to `{product}`.
+      security:
+        - AdminKey: []
+      parameters:
+        - name: product
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ReleaseProduct'
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                channel:
+                  $ref: '#/components/schemas/ReleaseChannel'
+                short_note:
+                  type: string
+                severity_type:
+                  $ref: '#/components/schemas/ReleaseSeverity'
+                description_en:
+                  type: string
+                  nullable: true
+                description_it:
+                  type: string
+                  nullable: true
+                is_critical:
+                  type: boolean
+                  default: false
+                critical_version:
+                  type: string
+                  nullable: true
+                min_required_version:
+                  type: string
+                  nullable: true
+                released_at:
+                  type: string
+                  format: date-time
+      responses:
+        "200":
+          description: Updated release
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Release'
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: Product/version not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    patch:
+      tags: [Updates]
+      summary: Partially update a product's release metadata
+      description: Same as `PATCH /v2/updates/releases/{version}`, scoped to `{product}`.
+      security:
+        - AdminKey: []
+      parameters:
+        - name: product
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ReleaseProduct'
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                channel:
+                  $ref: '#/components/schemas/ReleaseChannel'
+                short_note:
+                  type: string
+                severity_type:
+                  $ref: '#/components/schemas/ReleaseSeverity'
+                description_en:
+                  type: string
+                  nullable: true
+                description_it:
+                  type: string
+                  nullable: true
+                is_critical:
+                  type: boolean
+                critical_version:
+                  type: string
+                  nullable: true
+                min_required_version:
+                  type: string
+                  nullable: true
+                released_at:
+                  type: string
+                  format: date-time
+      responses:
+        "200":
+          description: Updated release
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Release'
+        "400":
+          description: Validation error or no fields provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: Product/version not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      tags: [Updates]
+      summary: Delete a product's release
+      description: Same as `DELETE /v2/updates/releases/{version}`, scoped to `{product}`.
+      security:
+        - AdminKey: []
+      parameters:
+        - name: product
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ReleaseProduct'
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+        "404":
+          description: Product/version not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "500":
+          description: Storage deletion failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v3/updates/{product}/releases/{version}/channel:
+    patch:
+      tags: [Updates]
+      summary: Promote or demote a product's release
+      description: |
+        Same as `PATCH /v2/updates/releases/{version}/channel`, scoped to `{product}`.
+        When promoting to `stable` or `beta`, any release of the *same product*
+        currently occupying that slot is automatically moved to `archived`.
+      security:
+        - AdminKey: []
+      parameters:
+        - name: product
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ReleaseProduct'
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel]
+              properties:
+                channel:
+                  $ref: '#/components/schemas/ReleaseChannel'
+      responses:
+        "200":
+          description: Channel updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  product:
+                    $ref: '#/components/schemas/ReleaseProduct'
+                  version:
+                    type: string
+                  channel:
+                    $ref: '#/components/schemas/ReleaseChannel'
+        "400":
+          description: Invalid channel value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: Product/version not found
           content:
             application/json:
               schema:

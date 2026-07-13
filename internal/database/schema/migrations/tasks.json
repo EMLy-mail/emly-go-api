@@ -35,5 +35,13 @@
         { "type": "column_not_exists", "table": "update_releases", "column": "critical_version" }
       ]
     }
+    ,{
+      "id": "5_updates_product",
+      "sql_file": "5_updates_product.sql",
+      "description": "Add product column to update_releases to distinguish app vs updater releases; move unique key to (product, version).",
+      "conditions": [
+        { "type": "column_not_exists", "table": "update_releases", "column": "product" }
+      ]
+    }
   ]
 }

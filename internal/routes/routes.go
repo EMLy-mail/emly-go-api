@@ -9,6 +9,7 @@ import (
 
 	v1 "emly-api-go/internal/routes/v1"
 	v2 "emly-api-go/internal/routes/v2"
+	v3 "emly-api-go/internal/routes/v3"
 	"emly-api-go/internal/storage"
 
 	"github.com/go-chi/chi/v5"
@@ -29,6 +30,7 @@ func RegisterAll(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector) {
 
 	r.Mount("/v1", v1.NewRouter(db, s3conn))
 	r.Mount("/v2", v2.NewRouter(db, s3conn))
+	r.Mount("/v3", v3.NewRouter(db, s3conn))
 	// Redirect /health to /v1/health
 	r.Get("/health", handlers.Health(db))
 
