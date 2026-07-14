@@ -310,6 +310,17 @@ func (c *S3Connector) DeleteFolder(ctx context.Context, folderPath string) error
 }
 
 // normalizePrefix ensures prefix ends with "/" (returns "" for root).
+// Close performs a best-effort cleanup of the connector.
+// AWS SDK v2 does not require explicit shutdown for the client; this is a no-op
+// provided for symmetry with other resources.
+func (c *S3Connector) Close() error {
+	// Nil out internal references to help GC.
+	c.client = nil
+	c.uploader = nil
+	c.downloader = nil
+	return nil
+}
+
 func normalizePrefix(p string) string {
 	p = strings.TrimPrefix(p, "/")
 	if p == "" {

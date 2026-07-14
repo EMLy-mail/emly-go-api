@@ -7,12 +7,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
-	"github.com/jmoiron/sqlx"
 	"github.com/joho/godotenv"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -69,11 +70,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("database connection failed: %v", err)
 	}
-	defer func(db *sqlx.DB) {
-		if err := db.Close(); err != nil {
-			log.Fatalf("closing database failed: %v", err)
-		}
-	}(db)
+	// NOTE: close the DB explicitly during graceful shutdown below
 
 	if err := schema.Migrate(db, cfg.Database); err != nil {
 		log.Fatalf("schema migration failed: %v", err)
@@ -128,8 +125,55 @@ func main() {
 	routes.RegisterAll(r, db, s3conn)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
-	slog.Info("server listening", "addr", addr)
-	if err := http.ListenAndServe(addr, r); err != nil {
-		log.Fatalf("server error: %v", err)
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: r,
 	}
+
+	// Start server in a goroutine so we can listen for shutdown signals
+	go func() {
+		slog.Info("server listening", "addr", addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// Graceful shutdown on interrupt (Ctrl-C) or SIGTERM
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	sig := <-quit
+	slog.Info("shutdown signal received", "signal", sig.String())
+
+	ctxShut, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	slog.Info("shutting down server, waiting for in-flight requests to finish")
+	// Disable keep-alives to make sure no new requests are serviced on
+	// long-lived connections during shutdown.
+	srv.SetKeepAlivesEnabled(false)
+	if err := srv.Shutdown(ctxShut); err != nil {
+		slog.Error("server shutdown error", "err", err)
+	} else {
+		slog.Info("server shutdown complete")
+	}
+
+	// Close database connection
+	if db != nil {
+		if err := db.Close(); err != nil {
+			slog.Error("closing database failed", "err", err)
+		} else {
+			slog.Info("database closed")
+		}
+	}
+
+	// Close S3 connector (best-effort)
+	if s3conn != nil {
+		if err := s3conn.Close(); err != nil {
+			slog.Error("closing s3 connector failed", "err", err)
+		} else {
+			slog.Info("s3 connector closed")
+		}
+	}
+
+	slog.Info("shutdown complete")
 }
