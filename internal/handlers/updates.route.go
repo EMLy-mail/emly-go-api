@@ -103,6 +103,14 @@ const releaseSelectCols = `
 
 func GetUpdateManifest(db *sqlx.DB, s3BaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		slog.InfoContext(r.Context(), "manifest request",
+			"method", r.Method,
+			"url", r.URL.String(),
+			"host", r.Host,
+			"remote_addr", r.RemoteAddr,
+			"headers", r.Header,
+		)
+
 		var releases []models.Release
 		err := db.SelectContext(r.Context(), &releases,
 			`SELECT`+releaseSelectCols+`FROM update_releases ORDER BY released_at DESC`)
