@@ -101,7 +101,28 @@ const releaseSelectCols = `
 	severity_type, description_en, description_it, is_critical, critical_version, min_required_version,
 	released_at, created_at `
 
-func GetUpdateManifest(db *sqlx.DB, s3BaseURL string) http.HandlerFunc {
+// requestBaseURL derives the externally-visible scheme+host for the current
+// request, so download links in the manifest match whatever hostname/IP the
+// client actually used to reach the API, instead of a hardcoded config value.
+// Honors X-Forwarded-Proto/X-Forwarded-Host when the API sits behind a proxy.
+func requestBaseURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	}
+
+	host := r.Host
+	if fwHost := r.Header.Get("X-Forwarded-Host"); fwHost != "" {
+		host = fwHost
+	}
+
+	return scheme + "://" + host
+}
+
+func GetUpdateManifest(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		slog.InfoContext(r.Context(), "manifest request",
 			"method", r.Method,
@@ -119,7 +140,7 @@ func GetUpdateManifest(db *sqlx.DB, s3BaseURL string) http.HandlerFunc {
 			return
 		}
 		timing.Mark(r.Context(), "db_select")
-		manifest := buildManifest(releases, s3BaseURL)
+		manifest := buildManifest(releases, requestBaseURL(r))
 		timing.Mark(r.Context(), "build_manifest")
 		jsonOK(w, manifest)
 

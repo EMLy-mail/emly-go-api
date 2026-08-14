@@ -113,7 +113,7 @@ Other notable vars (see `.env.example` for full list + defaults):
 - Rate limiting: `RL_UNAUTH_*` and `RL_AUTH_*` (`MAX_REQS`, `WINDOW`, `MAX_FAILS`, `BAN_DUR`)
 - Storage: `USE_S3_COMPATIBLE_STORAGE`, `CF_ACCOUNT_ID`, `CF_R2_ACCESS_KEY_ID`, `CF_R2_SECRET_ACCESS_KEY`, `CF_R2_BUCKET_NAME`, `CF_R2_REGION`, `CF_R2_ENDPOINT`
 - Telemetry: `OTEL_ENABLED`, `OTEL_ENDPOINT`
-- Updates: `UPDATES_ENABLED`, `API_BASE_URL` (builds manifest download links), `UPDATES_S3_PREFIX`
+- Updates: `UPDATES_ENABLED`, `UPDATES_S3_PREFIX` (manifest download links are built from the request's `Host`/`X-Forwarded-*` headers, not an env var)
 
 ### Adding new environment variables
 

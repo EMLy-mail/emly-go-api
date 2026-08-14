@@ -12,11 +12,11 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func registerUpdates(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, apiBaseURL, s3Prefix string) {
+func registerUpdates(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) {
 	r.Route("/updates", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(httprate.LimitByIP(30, time.Minute))
-			r.Get("/manifest", handlers.GetUpdateManifest(db, apiBaseURL))
+			r.Get("/manifest", handlers.GetUpdateManifest(db))
 			r.Get("/releases/{version}/download", handlers.DownloadRelease(db, s3conn, s3Prefix))
 		})
 
