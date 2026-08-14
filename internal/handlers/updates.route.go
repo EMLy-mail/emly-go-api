@@ -2,12 +2,16 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -21,6 +25,76 @@ import (
 
 var validChannels = map[string]bool{"stable": true, "beta": true, "archived": true}
 var validSeverity = map[string]bool{"none": true, "security": true, "bugfix": true, "feature": true}
+
+// updaterUAPattern matches the EMLy Updater's User-Agent, e.g.
+// "EMLy-Updater/1.3.0 (f.fois@3git.eu)".
+var updaterUAPattern = regexp.MustCompile(`^EMLy-Updater/([\w.\-]+)\s*\(([^)]*)\)`)
+
+func parseUpdaterUserAgent(ua string) (version, contact string) {
+	m := updaterUAPattern.FindStringSubmatch(ua)
+	if m == nil {
+		return "", ""
+	}
+	return m[1], strings.TrimSpace(m[2])
+}
+
+func clientIPFromRequest(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// recordUpdaterEvent best-effort persists an EMLy Updater client sighting and
+// operation event. It never fails the caller's HTTP response - a client
+// missing the identifying header is silently skipped, and DB errors are only
+// logged, since this is telemetry on a client-facing path.
+func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, eventType, version string) {
+	hostname := r.Header.Get("X-EMLy-Hostname")
+	if hostname == "" {
+		return
+	}
+	adDomain := r.Header.Get("X-EMLy-ADDomain")
+	uaVersion, contact := parseUpdaterUserAgent(r.UserAgent())
+	ip := clientIPFromRequest(r)
+
+	res, err := db.ExecContext(ctx,
+		`INSERT INTO updater_clients (hostname, ad_domain, updater_version, contact, last_ip)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON DUPLICATE KEY UPDATE
+		     updater_version = VALUES(updater_version),
+		     contact = VALUES(contact),
+		     last_ip = VALUES(last_ip),
+		     last_seen_at = CURRENT_TIMESTAMP,
+		     id = LAST_INSERT_ID(id)`,
+		hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
+	)
+	if err != nil {
+		slog.WarnContext(ctx, "updater stats: failed to upsert client", "error", err)
+		return
+	}
+
+	clientID, err := res.LastInsertId()
+	if err != nil {
+		slog.WarnContext(ctx, "updater stats: failed to resolve client id", "error", err)
+		return
+	}
+
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO updater_events (client_id, event_type, version, ip_address) VALUES (?, ?, ?, ?)`,
+		clientID, eventType, nullableString(version), nullableString(ip),
+	); err != nil {
+		slog.WarnContext(ctx, "updater stats: failed to record event", "error", err)
+	}
+}
+
+func nullableString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
 
 const releaseSelectCols = `
 	id, version, channel, download_filename, sha256_checksum, short_note,
@@ -40,6 +114,9 @@ func GetUpdateManifest(db *sqlx.DB, s3BaseURL string) http.HandlerFunc {
 		manifest := buildManifest(releases, s3BaseURL)
 		timing.Mark(r.Context(), "build_manifest")
 		jsonOK(w, manifest)
+
+		uaVersion, _ := parseUpdaterUserAgent(r.UserAgent())
+		recordUpdaterEvent(r.Context(), db, r, "manifest_check", uaVersion)
 	}
 }
 
@@ -240,6 +317,8 @@ func DownloadRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) 
 		}
 
 		io.Copy(w, rc) //nolint:errcheck
+
+		recordUpdaterEvent(r.Context(), db, r, "download", version)
 	}
 }
 
