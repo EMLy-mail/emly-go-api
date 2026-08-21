@@ -226,6 +226,11 @@ components:
 
     ReleaseChannel:
       type: string
+      description: |
+        Read-only filter value for `GET /v2/updates/releases?channel=`.
+        `stable`/`beta` match releases with `is_stable`/`is_beta` true;
+        `archived` matches releases with both flags false. Not used to set
+        channel membership — use `is_stable`/`is_beta` on the release itself.
       enum: [stable, beta, archived]
       example: stable
 
@@ -304,8 +309,14 @@ components:
         version:
           type: string
           example: "1.7.0"
-        channel:
-          $ref: '#/components/schemas/ReleaseChannel'
+        is_stable:
+          type: boolean
+          description: Whether this is the current stable release; only one release can hold this at a time
+          example: true
+        is_beta:
+          type: boolean
+          description: Whether this is the current beta release; only one release can hold this at a time. Independent of `is_stable` — a release may be both at once
+          example: false
         download_filename:
           type: string
           example: "EMLy_Installer_1.7.0.exe"
@@ -1138,9 +1149,10 @@ paths:
         Accepts `multipart/form-data`. Uploads the `.exe` to R2/S3, computes
         the SHA-256 checksum server-side, and saves the release record.
 
-        `channel` defaults to `archived`, `severity_type` defaults to `none`.
-        If `severity_type` is not `none`, the release will appear in
-        `detailedReleaseNotes` in the manifest.
+        `is_stable`/`is_beta` default to `false` (i.e. archived), `severity_type`
+        defaults to `none`. A release may have both `is_stable` and `is_beta`
+        set to `true` at once. If `severity_type` is not `none`, the release
+        will appear in `detailedReleaseNotes` in the manifest.
 
         Returns `503` if S3 storage is not configured on the server.
       security:
@@ -1160,8 +1172,16 @@ paths:
                 version:
                   type: string
                   example: "1.7.5"
-                channel:
-                  $ref: '#/components/schemas/ReleaseChannel'
+                is_stable:
+                  type: string
+                  enum: ["true", "false", "1", "0"]
+                  default: "false"
+                  description: When `true`, clears is_stable from any other release and sets this as the sole stable release
+                is_beta:
+                  type: string
+                  enum: ["true", "false", "1", "0"]
+                  default: "false"
+                  description: When `true`, clears is_beta from any other release and sets this as the sole beta release. Independent of `is_stable`
                 short_note:
                   type: string
                   example: "Fix critico al renderer PDF."
@@ -1203,8 +1223,12 @@ paths:
                   version:
                     type: string
                     example: "1.7.5"
-                  channel:
-                    $ref: '#/components/schemas/ReleaseChannel'
+                  is_stable:
+                    type: boolean
+                    example: false
+                  is_beta:
+                    type: boolean
+                    example: true
                   download_filename:
                     type: string
                     example: "EMLy_Installer_1.7.5_beta.exe"
@@ -1284,8 +1308,9 @@ paths:
         Full replacement of all mutable fields. `version` and `download_filename`
         are immutable and ignored. When `is_critical` is `true` the critical flag
         and `critical_version` are cleared from every other release atomically.
-        When promoting to `stable` or `beta`, any release currently occupying
-        that slot is automatically moved to `archived`.
+        Setting `is_stable` or `is_beta` to `true` clears that flag from
+        whichever other release currently holds it; the two flags are
+        independent, so a release may hold both at once.
       security:
         - AdminKey: []
       parameters:
@@ -1302,8 +1327,14 @@ paths:
             schema:
               type: object
               properties:
-                channel:
-                  $ref: '#/components/schemas/ReleaseChannel'
+                is_stable:
+                  type: boolean
+                  default: false
+                  description: When `true`, clears is_stable from any other release
+                is_beta:
+                  type: boolean
+                  default: false
+                  description: When `true`, clears is_beta from any other release. Independent of `is_stable`
                 short_note:
                   type: string
                   example: "Fix critico al renderer PDF."
@@ -1358,8 +1389,9 @@ paths:
         Updates only the fields present in the request body. When `is_critical`
         is set to `true` the critical flag and `critical_version` are cleared
         from every other release atomically.
-        When promoting to `stable` or `beta`, any release currently occupying
-        that slot is automatically moved to `archived`.
+        Setting `is_stable` or `is_beta` to `true` clears that flag from
+        whichever other release currently holds it; the two flags are
+        independent, so a release may hold both at once.
       security:
         - AdminKey: []
       parameters:
@@ -1376,8 +1408,12 @@ paths:
             schema:
               type: object
               properties:
-                channel:
-                  $ref: '#/components/schemas/ReleaseChannel'
+                is_stable:
+                  type: boolean
+                  description: When `true`, clears is_stable from any other release
+                is_beta:
+                  type: boolean
+                  description: When `true`, clears is_beta from any other release. Independent of `is_stable`
                 short_note:
                   type: string
                 severity_type:
@@ -1466,11 +1502,14 @@ paths:
   /v2/updates/releases/{version}/channel:
     patch:
       tags: [Updates]
-      summary: Promote or demote a release
+      summary: Promote or demote a release's channel membership
       description: |
-        Changes the channel of a release.
-        When promoting to `stable` or `beta`, any release currently occupying
-        that slot is automatically moved to `archived`.
+        Sets `is_stable` and/or `is_beta` on a release. Setting either to
+        `true` clears that flag from whichever other release currently holds
+        it; the two flags are independent, so a single release may hold both
+        at once (i.e. be the current stable *and* beta build simultaneously).
+        Setting a flag to `false` just clears it on this release. At least
+        one of `is_stable`/`is_beta` must be present.
       security:
         - AdminKey: []
       parameters:
@@ -1486,13 +1525,17 @@ paths:
           application/json:
             schema:
               type: object
-              required: [channel]
               properties:
-                channel:
-                  $ref: '#/components/schemas/ReleaseChannel'
+                is_stable:
+                  type: boolean
+                is_beta:
+                  type: boolean
+              example:
+                is_stable: true
+                is_beta: true
       responses:
         "200":
-          description: Channel updated
+          description: Channel flags updated
           content:
             application/json:
               schema:
@@ -1501,10 +1544,14 @@ paths:
                   version:
                     type: string
                     example: "1.7.4"
-                  channel:
-                    $ref: '#/components/schemas/ReleaseChannel'
+                  is_stable:
+                    type: boolean
+                    example: true
+                  is_beta:
+                    type: boolean
+                    example: true
         "400":
-          description: Invalid channel value
+          description: Neither is_stable nor is_beta provided
           content:
             application/json:
               schema:
