@@ -43,5 +43,13 @@
         { "type": "table_not_exists", "table": "updater_clients" }
       ]
     }
+    ,{
+      "id": "6_release_channel_flags",
+      "sql_file": "6_release_channel_flags.sql",
+      "description": "Replace the exclusive channel ENUM with independent is_stable/is_beta flags on update_releases, so a release can be both stable and beta at once.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "update_releases", "column": "is_stable" }
+      ]
+    }
   ]
 }

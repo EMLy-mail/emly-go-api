@@ -5,7 +5,8 @@ import "time"
 type Release struct {
 	ID                 int       `db:"id"                   json:"-"`
 	Version            string    `db:"version"              json:"version"`
-	Channel            string    `db:"channel"              json:"channel"`
+	IsStable           bool      `db:"is_stable"            json:"is_stable"`
+	IsBeta             bool      `db:"is_beta"              json:"is_beta"`
 	DownloadFilename   string    `db:"download_filename"    json:"download_filename"`
 	SHA256Checksum     string    `db:"sha256_checksum"      json:"sha256_checksum"`
 	ShortNote          string    `db:"short_note"           json:"short_note"`

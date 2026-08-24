@@ -89,7 +89,7 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - Use the request context (`r.Context()`) for DB calls (`SelectContext`, `GetContext`) and `slog.*Context` logging so traces/spans propagate.
 - File uploads use `r.ParseMultipartForm(32 << 20)`; close file streams explicitly.
 - ZIP downloads: in-memory `archive/zip` with template-rendered report text via `internal/handlers/templates/report.txt.tmpl`.
-- Update releases validate against `validChannels` (`stable`/`beta`/`archived`) and `validSeverity` (`none`/`security`/`bugfix`/`feature`).
+- Update releases have independent `is_stable`/`is_beta` boolean flags (a release can be both at once — setting either to `true` clears that flag from whichever other release previously held it) and validate `severity_type` against `validSeverity` (`none`/`security`/`bugfix`/`feature`).
 
 ### Database migrations
 

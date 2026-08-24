@@ -23,7 +23,6 @@ import (
 	"emly-api-go/internal/timing"
 )
 
-var validChannels = map[string]bool{"stable": true, "beta": true, "archived": true}
 var validSeverity = map[string]bool{"none": true, "security": true, "bugfix": true, "feature": true}
 
 // updaterUAPattern matches the EMLy Updater's User-Agent, e.g.
@@ -97,9 +96,25 @@ func nullableString(s string) *string {
 }
 
 const releaseSelectCols = `
-	id, version, channel, download_filename, sha256_checksum, short_note,
+	id, version, is_stable, is_beta, download_filename, sha256_checksum, short_note,
 	severity_type, description_en, description_it, is_critical, critical_version, min_required_version,
 	released_at, created_at `
+
+// clearStableFlag/clearBetaFlag enforce that at most one release holds each
+// channel slot at a time - promoting a release to stable (or beta) demotes
+// whoever previously held that slot. The two flags are independent, so the
+// same release can hold both is_stable and is_beta simultaneously.
+func clearStableFlag(ctx context.Context, tx *sqlx.Tx, exceptVersion string) error {
+	_, err := tx.ExecContext(ctx,
+		`UPDATE update_releases SET is_stable = 0 WHERE is_stable = 1 AND version != ?`, exceptVersion)
+	return err
+}
+
+func clearBetaFlag(ctx context.Context, tx *sqlx.Tx, exceptVersion string) error {
+	_, err := tx.ExecContext(ctx,
+		`UPDATE update_releases SET is_beta = 0 WHERE is_beta = 1 AND version != ?`, exceptVersion)
+	return err
+}
 
 // requestBaseURL derives the externally-visible scheme+host for the current
 // request, so download links in the manifest match whatever hostname/IP the
@@ -155,13 +170,22 @@ func ListReleases(db *sqlx.DB) http.HandlerFunc {
 
 		var releases []models.Release
 		var err error
-		if channel != "" {
-			err = db.SelectContext(r.Context(), &releases,
-				`SELECT`+releaseSelectCols+`FROM update_releases WHERE channel = ? ORDER BY released_at DESC`,
-				channel)
-		} else {
+		switch channel {
+		case "":
 			err = db.SelectContext(r.Context(), &releases,
 				`SELECT`+releaseSelectCols+`FROM update_releases ORDER BY released_at DESC`)
+		case "stable":
+			err = db.SelectContext(r.Context(), &releases,
+				`SELECT`+releaseSelectCols+`FROM update_releases WHERE is_stable = 1 ORDER BY released_at DESC`)
+		case "beta":
+			err = db.SelectContext(r.Context(), &releases,
+				`SELECT`+releaseSelectCols+`FROM update_releases WHERE is_beta = 1 ORDER BY released_at DESC`)
+		case "archived":
+			err = db.SelectContext(r.Context(), &releases,
+				`SELECT`+releaseSelectCols+`FROM update_releases WHERE is_stable = 0 AND is_beta = 0 ORDER BY released_at DESC`)
+		default:
+			jsonError(w, http.StatusBadRequest, "channel must be one of: stable, beta, archived")
+			return
 		}
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "failed to fetch releases")
@@ -193,7 +217,8 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 		}
 
 		version := strings.TrimSpace(r.FormValue("version"))
-		channel := strings.TrimSpace(r.FormValue("channel"))
+		isStable := r.FormValue("is_stable") == "true" || r.FormValue("is_stable") == "1"
+		isBeta := r.FormValue("is_beta") == "true" || r.FormValue("is_beta") == "1"
 		shortNote := r.FormValue("short_note")
 		severityType := strings.TrimSpace(r.FormValue("severity_type"))
 		descEN := strings.TrimSpace(r.FormValue("description_en"))
@@ -205,13 +230,6 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 
 		if version == "" {
 			jsonError(w, http.StatusBadRequest, "version is required")
-			return
-		}
-		if channel == "" {
-			channel = "archived"
-		}
-		if !validChannels[channel] {
-			jsonError(w, http.StatusBadRequest, "channel must be one of: stable, beta, archived")
 			return
 		}
 		if severityType == "" {
@@ -281,12 +299,25 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 			}
 		}
 
+		if isStable {
+			if err = clearStableFlag(r.Context(), tx, version); err != nil {
+				jsonError(w, http.StatusInternalServerError, "failed to clear existing stable release")
+				return
+			}
+		}
+		if isBeta {
+			if err = clearBetaFlag(r.Context(), tx, version); err != nil {
+				jsonError(w, http.StatusInternalServerError, "failed to clear existing beta release")
+				return
+			}
+		}
+
 		_, err = tx.ExecContext(r.Context(),
 			`INSERT INTO update_releases
-			 (version, channel, download_filename, sha256_checksum, short_note, severity_type,
+			 (version, is_stable, is_beta, download_filename, sha256_checksum, short_note, severity_type,
 			  description_en, description_it, is_critical, critical_version, min_required_version, released_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			version, channel, filename, checksum, shortNote,
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			version, isStable, isBeta, filename, checksum, shortNote,
 			severityType, pDescEN, pDescIT, isCritical, pCriticalVer, pMinVer, releasedAt,
 		)
 		if err != nil {
@@ -299,9 +330,10 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 			return
 		}
 
-		jsonCreated(w, map[string]string{
+		jsonCreated(w, map[string]interface{}{
 			"version":           version,
-			"channel":           channel,
+			"is_stable":         isStable,
+			"is_beta":           isBeta,
 			"download_filename": filename,
 			"sha256_checksum":   checksum,
 		})
@@ -385,12 +417,14 @@ func DeleteRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 	}
 }
 
-type patchChannelRequest struct {
-	Channel string `json:"channel"`
+type patchReleaseChannelsRequest struct {
+	IsStable *bool `json:"is_stable"`
+	IsBeta   *bool `json:"is_beta"`
 }
 
 type putReleaseRequest struct {
-	Channel            string  `json:"channel"`
+	IsStable           bool    `json:"is_stable"`
+	IsBeta             bool    `json:"is_beta"`
 	ShortNote          string  `json:"short_note"`
 	SeverityType       string  `json:"severity_type"`
 	DescriptionEN      *string `json:"description_en"`
@@ -402,7 +436,8 @@ type putReleaseRequest struct {
 }
 
 type patchReleaseRequest struct {
-	Channel            *string `json:"channel"`
+	IsStable           *bool   `json:"is_stable"`
+	IsBeta             *bool   `json:"is_beta"`
 	ShortNote          *string `json:"short_note"`
 	SeverityType       *string `json:"severity_type"`
 	DescriptionEN      *string `json:"description_en"`
@@ -413,17 +448,21 @@ type patchReleaseRequest struct {
 	ReleasedAt         *string `json:"released_at"`
 }
 
-func PatchReleaseChannel(db *sqlx.DB) http.HandlerFunc {
+// PatchReleaseChannels handles PATCH /v2/updates/releases/{version}/channel.
+// is_stable and is_beta are independent flags: setting either to true
+// demotes whoever currently holds that slot, but a single release may hold
+// both at once (e.g. it is simultaneously the current stable and beta build).
+func PatchReleaseChannels(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		version := chi.URLParam(r, "version")
 
-		var req patchChannelRequest
+		var req patchReleaseChannelsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			jsonError(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		if !validChannels[req.Channel] {
-			jsonError(w, http.StatusBadRequest, "channel must be one of: stable, beta, archived")
+		if req.IsStable == nil && req.IsBeta == nil {
+			jsonError(w, http.StatusBadRequest, "is_stable and/or is_beta required")
 			return
 		}
 
@@ -434,21 +473,35 @@ func PatchReleaseChannel(db *sqlx.DB) http.HandlerFunc {
 		}
 		defer tx.Rollback()
 
-		// Archive whoever currently holds the target channel slot
-		if req.Channel != "archived" {
-			if _, err = tx.ExecContext(r.Context(),
-				`UPDATE update_releases SET channel = 'archived' WHERE channel = ? AND version != ?`,
-				req.Channel, version,
-			); err != nil {
-				jsonError(w, http.StatusInternalServerError, "failed to archive existing release")
-				return
+		var setClauses []string
+		var args []interface{}
+
+		if req.IsStable != nil {
+			if *req.IsStable {
+				if err = clearStableFlag(r.Context(), tx, version); err != nil {
+					jsonError(w, http.StatusInternalServerError, "failed to clear existing stable release")
+					return
+				}
 			}
+			setClauses = append(setClauses, "is_stable = ?")
+			args = append(args, *req.IsStable)
 		}
+		if req.IsBeta != nil {
+			if *req.IsBeta {
+				if err = clearBetaFlag(r.Context(), tx, version); err != nil {
+					jsonError(w, http.StatusInternalServerError, "failed to clear existing beta release")
+					return
+				}
+			}
+			setClauses = append(setClauses, "is_beta = ?")
+			args = append(args, *req.IsBeta)
+		}
+		args = append(args, version)
 
 		res, err := tx.ExecContext(r.Context(),
-			`UPDATE update_releases SET channel = ? WHERE version = ?`, req.Channel, version)
+			"UPDATE update_releases SET "+strings.Join(setClauses, ", ")+" WHERE version = ?", args...)
 		if err != nil {
-			jsonError(w, http.StatusInternalServerError, "failed to update channel")
+			jsonError(w, http.StatusInternalServerError, "failed to update channels")
 			return
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
@@ -461,7 +514,18 @@ func PatchReleaseChannel(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		jsonOK(w, map[string]string{"version": version, "channel": req.Channel})
+		var updated models.Release
+		if err := db.GetContext(r.Context(), &updated,
+			`SELECT`+releaseSelectCols+`FROM update_releases WHERE version = ?`, version,
+		); err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to fetch updated release")
+			return
+		}
+		jsonOK(w, map[string]interface{}{
+			"version":   updated.Version,
+			"is_stable": updated.IsStable,
+			"is_beta":   updated.IsBeta,
+		})
 	}
 }
 
@@ -475,13 +539,6 @@ func PutRelease(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		if req.Channel == "" {
-			req.Channel = "archived"
-		}
-		if !validChannels[req.Channel] {
-			jsonError(w, http.StatusBadRequest, "channel must be one of: stable, beta, archived")
-			return
-		}
 		if req.SeverityType == "" {
 			req.SeverityType = "none"
 		}
@@ -504,12 +561,15 @@ func PutRelease(db *sqlx.DB) http.HandlerFunc {
 		}
 		defer tx.Rollback()
 
-		if req.Channel != "archived" {
-			if _, err = tx.ExecContext(r.Context(),
-				`UPDATE update_releases SET channel = 'archived' WHERE channel = ? AND version != ?`,
-				req.Channel, version,
-			); err != nil {
-				jsonError(w, http.StatusInternalServerError, "failed to archive existing release")
+		if req.IsStable {
+			if err = clearStableFlag(r.Context(), tx, version); err != nil {
+				jsonError(w, http.StatusInternalServerError, "failed to clear existing stable release")
+				return
+			}
+		}
+		if req.IsBeta {
+			if err = clearBetaFlag(r.Context(), tx, version); err != nil {
+				jsonError(w, http.StatusInternalServerError, "failed to clear existing beta release")
 				return
 			}
 		}
@@ -526,11 +586,11 @@ func PutRelease(db *sqlx.DB) http.HandlerFunc {
 
 		res, err := tx.ExecContext(r.Context(),
 			`UPDATE update_releases
-			 SET channel = ?, short_note = ?, severity_type = ?,
+			 SET is_stable = ?, is_beta = ?, short_note = ?, severity_type = ?,
 			     description_en = ?, description_it = ?, is_critical = ?, critical_version = ?,
 			     min_required_version = ?, released_at = ?
 			 WHERE version = ?`,
-			req.Channel, req.ShortNote, req.SeverityType,
+			req.IsStable, req.IsBeta, req.ShortNote, req.SeverityType,
 			req.DescriptionEN, req.DescriptionIT, req.IsCritical, req.CriticalVersion,
 			req.MinRequiredVersion, releasedAt, version,
 		)
@@ -569,10 +629,6 @@ func PatchRelease(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		if req.Channel != nil && !validChannels[*req.Channel] {
-			jsonError(w, http.StatusBadRequest, "channel must be one of: stable, beta, archived")
-			return
-		}
 		if req.SeverityType != nil && !validSeverity[*req.SeverityType] {
 			jsonError(w, http.StatusBadRequest, "severity_type must be one of: none, security, bugfix, feature")
 			return
@@ -581,9 +637,13 @@ func PatchRelease(db *sqlx.DB) http.HandlerFunc {
 		var setClauses []string
 		var args []interface{}
 
-		if req.Channel != nil {
-			setClauses = append(setClauses, "channel = ?")
-			args = append(args, *req.Channel)
+		if req.IsStable != nil {
+			setClauses = append(setClauses, "is_stable = ?")
+			args = append(args, *req.IsStable)
+		}
+		if req.IsBeta != nil {
+			setClauses = append(setClauses, "is_beta = ?")
+			args = append(args, *req.IsBeta)
 		}
 		if req.ShortNote != nil {
 			setClauses = append(setClauses, "short_note = ?")
@@ -637,12 +697,15 @@ func PatchRelease(db *sqlx.DB) http.HandlerFunc {
 		}
 		defer tx.Rollback()
 
-		if req.Channel != nil && *req.Channel != "archived" {
-			if _, err = tx.ExecContext(r.Context(),
-				`UPDATE update_releases SET channel = 'archived' WHERE channel = ? AND version != ?`,
-				*req.Channel, version,
-			); err != nil {
-				jsonError(w, http.StatusInternalServerError, "failed to archive existing release")
+		if req.IsStable != nil && *req.IsStable {
+			if err = clearStableFlag(r.Context(), tx, version); err != nil {
+				jsonError(w, http.StatusInternalServerError, "failed to clear existing stable release")
+				return
+			}
+		}
+		if req.IsBeta != nil && *req.IsBeta {
+			if err = clearBetaFlag(r.Context(), tx, version); err != nil {
+				jsonError(w, http.StatusInternalServerError, "failed to clear existing beta release")
 				return
 			}
 		}
@@ -721,14 +784,16 @@ func buildManifest(releases []models.Release, apiBaseURL string) models.UpdateMa
 			}
 		}
 
-		switch rel.Channel {
-		case "stable":
+		// is_stable and is_beta are independent, so the same release can
+		// populate both the stable and beta slots of the manifest at once.
+		if rel.IsStable {
 			m.StableVersion = rel.Version
 			m.StableDownload = fmt.Sprintf("%s/v2/updates/releases/%s/download", apiBaseURL, rel.Version)
 			if rel.MinRequiredVersion != nil {
 				m.MinRequiredVersion = *rel.MinRequiredVersion
 			}
-		case "beta":
+		}
+		if rel.IsBeta {
 			m.BetaVersion = rel.Version
 			m.BetaDownload = fmt.Sprintf("%s/v2/updates/releases/%s/download", apiBaseURL, rel.Version)
 		}
