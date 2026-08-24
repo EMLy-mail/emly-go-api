@@ -40,6 +40,15 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.00'
+          memory: 512M
+          pids: 1
+        reservations:
+          cpus: '0.25'
+          memory: 128M
 
 volumes:
   logs:
