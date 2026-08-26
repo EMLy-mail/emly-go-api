@@ -83,10 +83,14 @@ func main() {
 			log.Fatalf("R2 connector init failed: %v", err)
 		}
 		if err := conn.Ping(context.Background()); err != nil {
-			log.Fatalf("R2 connection test failed: %v", err)
+			// Don't crash the whole API over an unreachable object store: log and
+			// keep s3conn nil so S3-backed handlers degrade (they already treat a
+			// nil connector as "storage unavailable" and reply 503).
+			slog.Error("R2 connection test failed, starting without S3 storage", "bucket", cfg.R2.BucketName, "err", err)
+		} else {
+			slog.Info("R2 storage connected", "bucket", cfg.R2.BucketName)
+			s3conn = conn
 		}
-		slog.Info("R2 storage connected", "bucket", cfg.R2.BucketName)
-		s3conn = conn
 	}
 
 	for _, arg := range os.Args[1:] {
