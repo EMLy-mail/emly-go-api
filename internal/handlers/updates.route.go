@@ -139,7 +139,7 @@ func requestBaseURL(r *http.Request) string {
 
 func GetUpdateManifest(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		slog.InfoContext(r.Context(), "manifest request",
+		slog.DebugContext(r.Context(), "manifest request",
 			"method", r.Method,
 			"url", r.URL.String(),
 			"host", r.Host,
