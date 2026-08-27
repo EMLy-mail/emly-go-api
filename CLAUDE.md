@@ -14,7 +14,7 @@ go build -o ./build/emly-api.exe .
 # Run directly
 go run .
 
-# One-off: migrate report files from DB blobs to S3/R2 (requires USE_S3_COMPATIBLE_STORAGE=true)
+# One-off: migrate report files from DB blobs to S3 (requires USE_S3_API_FILE_STORAGE=true)
 go run . --migrate-files
 
 # Tests (note: the repo currently has no _test.go files)
@@ -29,7 +29,7 @@ Module name is `emly-api-go` (see `go.mod`); imports are `emly-api-go/internal/.
 Go REST API for the "EMLy" bug-reporting system. Stack:
 - **Router**: `go-chi/chi/v5`
 - **Database**: MySQL via `jmoiron/sqlx`
-- **Object storage**: Cloudflare R2 (S3-compatible) via `aws-sdk-go-v2` — optional, gated by `USE_S3_COMPATIBLE_STORAGE`
+- **Object storage**: two independent S3-compatible buckets via `aws-sdk-go-v2` — an API-file bucket (bug report attachments, gated by `USE_S3_API_FILE_STORAGE`) and an updates bucket (release installers, gated by `USE_S3_UPDATES_STORAGE`). Each has its own `S3BucketConfig` (access key, secret, bucket, region, endpoint) and can live on a different S3-compatible host/service/provider (Cloudflare R2, MinIO, AWS S3, etc.) — an `AccountID` field is a Cloudflare R2 convenience for deriving the endpoint when `Endpoint` is left blank.
 - **Observability**: OpenTelemetry (traces + metrics + logs) exported via OTLP/HTTP — optional, gated by `OTEL_ENABLED`
 - **Auth**: header API key (`X-API-Key`), admin key (`X-Admin-Key`), session tokens for the dashboard, and a rate-limit bypass key (`X-Dashboard-Key`)
 
@@ -38,7 +38,7 @@ Go REST API for the "EMLy" bug-reporting system. Stack:
 1. `godotenv.Load()` then `config.Load()` (singleton via `sync.Once`).
 2. If `OTEL_ENABLED`, set up OTel and bridge the std `log` package into `slog` → OTLP.
 3. Connect to MySQL, run `schema.Migrate`.
-4. If `USE_S3_COMPATIBLE_STORAGE`, build + ping the R2 connector.
+4. For each of `USE_S3_API_FILE_STORAGE` / `USE_S3_UPDATES_STORAGE` that is enabled, build + ping that bucket's S3 connector independently (an unreachable bucket logs an error and leaves that connector `nil` rather than crashing startup).
 5. Handle `--migrate-files` CLI flag.
 6. Build chi router, apply global middleware, call `routes.RegisterAll`.
 
@@ -77,7 +77,7 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - `internal/database/schema/` — Conditional migrator (see below).
 - `internal/handlers/` — Factory functions returning `http.HandlerFunc`, named `<resource>.route.go`. Response helpers (`jsonOK`, `jsonCreated`, `jsonError`) in `response.go`.
 - `internal/middleware/` — Auth (`apikey.go`, `adminKey.go`) and rate limiting. Auth middleware load allowed keys into a map at construction for O(1) lookup; they take a `*sqlx.DB` arg that is currently unused (keys come from config).
-- `internal/storage/` — `S3Connector` wrapping R2 (upload/download/list/delete/rename, folder helpers) and `migrateFiles.go`.
+- `internal/storage/` — `S3Connector` wrapping an S3-compatible bucket (upload/download/list/delete/rename, folder helpers) and `migrateFiles.go`. `NewS3Connector` is provider-agnostic; `main.go` constructs one instance per bucket (API files, updates) from their respective `config.S3BucketConfig`.
 - `internal/telemetry/` — OTel provider setup (trace/metric/log exporters, W3C propagators).
 - `internal/timing/` — Per-request timing checkpoints carried on the context.
 - `internal/models/` — Structs with `db:` and `json:` tags. Sensitive fields use `json:"-"`.
@@ -111,9 +111,10 @@ Other notable vars (see `.env.example` for full list + defaults):
 - DB pool: `DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_CONNS`, `DB_CONN_MAX_LIFETIME`
 - Auth extras: `DASHBOARD_KEY` (rate-limit bypass)
 - Rate limiting: `RL_UNAUTH_*` and `RL_AUTH_*` (`MAX_REQS`, `WINDOW`, `MAX_FAILS`, `BAN_DUR`)
-- Storage: `USE_S3_COMPATIBLE_STORAGE`, `CF_ACCOUNT_ID`, `CF_R2_ACCESS_KEY_ID`, `CF_R2_SECRET_ACCESS_KEY`, `CF_R2_BUCKET_NAME`, `CF_R2_REGION`, `CF_R2_ENDPOINT`
+- Storage — API file bucket: `USE_S3_API_FILE_STORAGE`, `S3_API_FILE_ACCESS_KEY_ID`, `S3_API_FILE_SECRET_ACCESS_KEY`, `S3_API_FILE_BUCKET`, `S3_API_FILE_REGION`, `S3_API_FILE_ENDPOINT`, `S3_API_FILE_ACCOUNT_ID` (optional, R2 endpoint shortcut)
+- Storage — updates bucket: `USE_S3_UPDATES_STORAGE`, `S3_UPDATES_ACCESS_KEY_ID`, `S3_UPDATES_SECRET_ACCESS_KEY`, `S3_UPDATES_BUCKET`, `S3_UPDATES_REGION`, `S3_UPDATES_ENDPOINT`, `S3_UPDATES_ACCOUNT_ID` (optional, R2 endpoint shortcut). The two buckets are fully independent and may sit on different S3-compatible providers.
 - Telemetry: `OTEL_ENABLED`, `OTEL_ENDPOINT`
-- Updates: `UPDATES_ENABLED`, `UPDATES_S3_PREFIX` (manifest download links are built from the request's `Host`/`X-Forwarded-*` headers, not an env var)
+- Updates: `UPDATES_ENABLED`, `S3_UPDATES_PREFIX` (path prefix inside the updates bucket; manifest download links are built from the request's `Host`/`X-Forwarded-*` headers, not an env var)
 
 ### Adding new environment variables
 
