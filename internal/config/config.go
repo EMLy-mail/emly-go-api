@@ -20,7 +20,13 @@ type RateLimitConfig struct {
 	AuthBanDur     time.Duration
 }
 
-type R2Config struct {
+// S3BucketConfig holds the connection details for one S3-compatible bucket.
+// AccountID is a Cloudflare R2 convenience: when Endpoint is empty it is used
+// to derive the R2 endpoint (https://<AccountID>.r2.cloudflarestorage.com).
+// Any other S3-compatible provider should set Endpoint explicitly and leave
+// AccountID blank. Two S3BucketConfig values can point at entirely different
+// hosts/services/providers.
+type S3BucketConfig struct {
 	AccountID       string
 	AccessKeyID     string
 	SecretAccessKey string

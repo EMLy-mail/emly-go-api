@@ -59,15 +59,21 @@ type FolderInfo struct {
 	Prefix string
 }
 
-func NewCloudflareR2Connector(cfg config.R2Config) (*S3Connector, error) {
+// NewS3Connector builds a connector for one S3-compatible bucket. cfg.Endpoint
+// may point at any S3-compatible host/service/provider (Cloudflare R2, MinIO,
+// AWS S3, etc.); if it is left empty and cfg.AccountID is set, the endpoint is
+// derived as a Cloudflare R2 URL for convenience. Independent buckets (e.g. the
+// API-file bucket and the updates bucket) each get their own S3BucketConfig and
+// can live on entirely different providers.
+func NewS3Connector(cfg config.S3BucketConfig) (*S3Connector, error) {
 	if cfg.AccessKeyID == "" || cfg.SecretAccessKey == "" || cfg.BucketName == "" {
-		return nil, fmt.Errorf("missing required R2 config fields (CF_R2_ACCESS_KEY_ID, CF_R2_SECRET_ACCESS_KEY, CF_R2_BUCKET_NAME)")
+		return nil, fmt.Errorf("missing required S3 config fields (access key id, secret access key, bucket name)")
 	}
 
 	endpoint := cfg.Endpoint
 	if endpoint == "" {
 		if cfg.AccountID == "" {
-			return nil, fmt.Errorf("either CF_R2_ENDPOINT or CF_ACCOUNT_ID must be set")
+			return nil, fmt.Errorf("either an S3 endpoint or a Cloudflare account id must be set")
 		}
 		endpoint = fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.AccountID)
 	}
@@ -104,7 +110,7 @@ func (c *S3Connector) Ping(ctx context.Context) error {
 		Bucket: aws.String(c.bucket),
 	})
 	if err != nil {
-		return fmt.Errorf("R2 ping failed for bucket %q: %w", c.bucket, err)
+		return fmt.Errorf("S3 ping failed for bucket %q: %w", c.bucket, err)
 	}
 	return nil
 }
