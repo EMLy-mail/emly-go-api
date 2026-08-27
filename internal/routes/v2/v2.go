@@ -12,8 +12,11 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// NewRouter returns a chi.Router with all /v2 routes mounted.
-func NewRouter(db *sqlx.DB, s3conn *storage.S3Connector) http.Handler {
+// NewRouter returns a chi.Router with all /v2 routes mounted. apiFileS3conn
+// backs bug-report file attachments and updatesS3conn backs update-release
+// installers; the two are independent connectors and may live on different
+// S3-compatible providers.
+func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector) http.Handler {
 	r := chi.NewRouter()
 
 	rl := emlyMiddleware.NewRateLimiter(config.Load())
@@ -30,12 +33,12 @@ func NewRouter(db *sqlx.DB, s3conn *storage.S3Connector) http.Handler {
 
 	r.Get("/health", handlers.Health(db))
 
-	registerUpdates(r, db, s3conn, config.Load().UpdatesS3Prefix)
+	registerUpdates(r, db, updatesS3conn, config.Load().UpdatesS3Prefix)
 	registerStats(r, db)
 
 	r.Route("/api", func(r chi.Router) {
 		registerAdmin(r, db)
-		registerBugReports(r, db, config.Load().Database, s3conn)
+		registerBugReports(r, db, config.Load().Database, apiFileS3conn)
 	})
 
 	return r
