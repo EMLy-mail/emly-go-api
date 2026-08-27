@@ -76,34 +76,55 @@ func main() {
 		log.Fatalf("schema migration failed: %v", err)
 	}
 
-	var s3conn *storage.S3Connector
-	if cfg.UseS3CompatibleStorage {
-		conn, err := storage.NewCloudflareR2Connector(cfg.R2)
+	// Two independent S3-compatible buckets, each optionally on a different
+	// host/service/provider: one for bug-report file attachments, one for
+	// software update installers.
+	var apiFileS3conn *storage.S3Connector
+	if cfg.UseS3APIFileStorage {
+		conn, err := storage.NewS3Connector(cfg.S3APIFile)
 		if err != nil {
-			log.Fatalf("R2 connector init failed: %v", err)
+			log.Fatalf("API file S3 connector init failed: %v", err)
 		}
 		if err := conn.Ping(context.Background()); err != nil {
-			// Don't crash the whole API over an unreachable object store: log and
-			// keep s3conn nil so S3-backed handlers degrade (they already treat a
-			// nil connector as "storage unavailable" and reply 503).
-			slog.Error("R2 connection test failed, starting without S3 storage", "bucket", cfg.R2.BucketName, "err", err)
+			// Don't crash the whole API over an unreachable object store: warn and
+			// keep the connector nil. Bug-report file handlers already treat a nil
+			// connector as "fall back to the DB copy", so this bucket degrades
+			// gracefully rather than failing requests.
+			slog.Warn("API file S3 unreachable, degrading to DB-backed file storage", "bucket", cfg.S3APIFile.BucketName, "err", err)
 		} else {
-			slog.Info("R2 storage connected", "bucket", cfg.R2.BucketName)
-			s3conn = conn
+			slog.Info("API file S3 storage connected", "bucket", cfg.S3APIFile.BucketName)
+			apiFileS3conn = conn
+		}
+	}
+
+	var updatesS3conn *storage.S3Connector
+	if cfg.UseS3UpdatesStorage {
+		conn, err := storage.NewS3Connector(cfg.S3Updates)
+		if err != nil {
+			log.Fatalf("updates S3 connector init failed: %v", err)
+		}
+		if err := conn.Ping(context.Background()); err != nil {
+			// Unlike the API file bucket, there is no DB fallback for release
+			// installers: keep the connector nil so every update-release endpoint
+			// that touches storage replies 503 until the bucket is reachable again.
+			slog.Error("updates S3 unreachable, update-release storage endpoints will return 503", "bucket", cfg.S3Updates.BucketName, "err", err)
+		} else {
+			slog.Info("updates S3 storage connected", "bucket", cfg.S3Updates.BucketName)
+			updatesS3conn = conn
 		}
 	}
 
 	for _, arg := range os.Args[1:] {
 		if arg == "--migrate-files" {
-			if cfg.UseS3CompatibleStorage && s3conn != nil {
+			if cfg.UseS3APIFileStorage && apiFileS3conn != nil {
 				slog.Info("migrating report files from db to s3")
-				if err := storage.MigrateReportFilesToS3(db, s3conn, cfg.Database); err != nil {
+				if err := storage.MigrateReportFilesToS3(db, apiFileS3conn, cfg.Database); err != nil {
 					log.Fatalf("migrating report files failed: %v", err)
 				}
 				slog.Info("migration from db to s3 completed")
 				continue
 			}
-			slog.Info("migrate-files skipped: R2 not enabled")
+			slog.Info("migrate-files skipped: API file S3 storage not enabled")
 		}
 	}
 
@@ -126,7 +147,7 @@ func main() {
 	rl := emlyMiddleware.NewRateLimiter(cfg)
 	r.Use(rl.Handler)
 
-	routes.RegisterAll(r, db, s3conn)
+	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
@@ -170,12 +191,19 @@ func main() {
 		}
 	}
 
-	// Close S3 connector (best-effort)
-	if s3conn != nil {
-		if err := s3conn.Close(); err != nil {
-			slog.Error("closing s3 connector failed", "err", err)
+	// Close S3 connectors (best-effort)
+	if apiFileS3conn != nil {
+		if err := apiFileS3conn.Close(); err != nil {
+			slog.Error("closing API file s3 connector failed", "err", err)
 		} else {
-			slog.Info("s3 connector closed")
+			slog.Info("API file s3 connector closed")
+		}
+	}
+	if updatesS3conn != nil {
+		if err := updatesS3conn.Close(); err != nil {
+			slog.Error("closing updates s3 connector failed", "err", err)
+		} else {
+			slog.Info("updates s3 connector closed")
 		}
 	}
 
