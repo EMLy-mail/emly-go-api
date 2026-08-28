@@ -25,6 +25,14 @@ import (
 
 var validSeverity = map[string]bool{"none": true, "security": true, "bugfix": true, "feature": true}
 
+// Values for updater_events.product: which piece of software an event is
+// about. The EMLy Updater checks for EMLy releases and, separately, for its
+// own new builds - both from the same machine and the same headers.
+const (
+	productEMLy    = "emly"
+	productUpdater = "updater"
+)
+
 // updaterUAPattern matches the EMLy Updater's User-Agent, e.g.
 // "EMLy-Updater/1.3.0 (f.fois@3git.eu)".
 var updaterUAPattern = regexp.MustCompile(`^EMLy-Updater/([\w.\-]+)\s*\(([^)]*)\)`)
@@ -49,7 +57,10 @@ func clientIPFromRequest(r *http.Request) string {
 // operation event. It never fails the caller's HTTP response - a client
 // missing the identifying header is silently skipped, and DB errors are only
 // logged, since this is telemetry on a client-facing path.
-func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, eventType, version string) {
+//
+// product is productEMLy for traffic about the EMLy app and productUpdater for
+// the updater's own self-update, so the two never get mixed in fleet stats.
+func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, eventType, product, version string) {
 	hostname := r.Header.Get("X-EMLy-Hostname")
 	if hostname == "" {
 		return
@@ -81,8 +92,8 @@ func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, event
 	}
 
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO updater_events (client_id, event_type, version, ip_address) VALUES (?, ?, ?, ?)`,
-		clientID, eventType, nullableString(version), nullableString(ip),
+		`INSERT INTO updater_events (client_id, event_type, product, version, ip_address) VALUES (?, ?, ?, ?, ?)`,
+		clientID, eventType, product, nullableString(version), nullableString(ip),
 	); err != nil {
 		slog.WarnContext(ctx, "updater stats: failed to record event", "error", err)
 	}
@@ -160,7 +171,7 @@ func GetUpdateManifest(db *sqlx.DB) http.HandlerFunc {
 		jsonOK(w, manifest)
 
 		uaVersion, _ := parseUpdaterUserAgent(r.UserAgent())
-		recordUpdaterEvent(r.Context(), db, r, "manifest_check", uaVersion)
+		recordUpdaterEvent(r.Context(), db, r, "manifest_check", productEMLy, uaVersion)
 	}
 }
 
@@ -379,7 +390,7 @@ func DownloadRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) 
 
 		io.Copy(w, rc) //nolint:errcheck
 
-		recordUpdaterEvent(r.Context(), db, r, "download", version)
+		recordUpdaterEvent(r.Context(), db, r, "download", productEMLy, version)
 	}
 }
 

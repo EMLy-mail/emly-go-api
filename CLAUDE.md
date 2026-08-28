@@ -17,7 +17,8 @@ go run .
 # One-off: migrate report files from DB blobs to S3 (requires USE_S3_API_FILE_STORAGE=true)
 go run . --migrate-files
 
-# Tests (note: the repo currently has no _test.go files)
+# Tests (only the updater self-update contract is covered: routing in
+# internal/routes/v2, manifest wire format + input sanitizing in internal/handlers)
 go test ./...
 go test ./internal/... -run TestName -v
 ```
@@ -63,7 +64,7 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - `admin/auth`: session login/validate/logout (`/login` is rate-limited; `/validate` + `/logout` require a session token).
 - `admin/users`: admin-key-protected user CRUD + password reset.
 
-**v2** (`/v2/...`): everything in v1 plus `updates/` — public update manifest + release download, and admin-key-protected release management (`update_releases` table).
+**v2** (`/v2/...`): everything in v1 plus `updates/` — public update manifest + release download, and admin-key-protected release management (`update_releases` table). The same `updates/` group also carries the EMLy Updater's **self-update** surface (`updater.route.go`, `updater_releases` table): an API-key-protected manifest (`GET /manifest/updater`), a public installer download (`GET /download/updater/{version}`), and admin-key-protected release management (`updater/releases`).
 
 ### Rate limiting — two layers
 
@@ -89,6 +90,7 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - Use the request context (`r.Context()`) for DB calls (`SelectContext`, `GetContext`) and `slog.*Context` logging so traces/spans propagate.
 - File uploads use `r.ParseMultipartForm(32 << 20)`; close file streams explicitly.
 - ZIP downloads: in-memory `archive/zip` with template-rendered report text via `internal/handlers/templates/report.txt.tmpl`.
+- The updater self-update manifest answers 200 in every non-error case: an empty catalogue serializes as `{"version": ""}`, which the client treats as a silent no-op. **Never return 404 there** — the client reads 404 as "this mirror does not implement the endpoint yet" and stops without retrying, which is what lets not-yet-upgraded internal site mirrors coexist. At most one `updater_releases` row holds `is_current`; clearing it everywhere is the kill-switch.
 - Update releases have independent `is_stable`/`is_beta` boolean flags (a release can be both at once — setting either to `true` clears that flag from whichever other release previously held it) and validate `severity_type` against `validSeverity` (`none`/`security`/`bugfix`/`feature`).
 
 ### Database migrations
@@ -114,7 +116,7 @@ Other notable vars (see `.env.example` for full list + defaults):
 - Storage — API file bucket: `USE_S3_API_FILE_STORAGE`, `S3_API_FILE_ACCESS_KEY_ID`, `S3_API_FILE_SECRET_ACCESS_KEY`, `S3_API_FILE_BUCKET`, `S3_API_FILE_REGION`, `S3_API_FILE_ENDPOINT`, `S3_API_FILE_ACCOUNT_ID` (optional, R2 endpoint shortcut)
 - Storage — updates bucket: `USE_S3_UPDATES_STORAGE`, `S3_UPDATES_ACCESS_KEY_ID`, `S3_UPDATES_SECRET_ACCESS_KEY`, `S3_UPDATES_BUCKET`, `S3_UPDATES_REGION`, `S3_UPDATES_ENDPOINT`, `S3_UPDATES_ACCOUNT_ID` (optional, R2 endpoint shortcut). The two buckets are fully independent and may sit on different S3-compatible providers.
 - Telemetry: `OTEL_ENABLED`, `OTEL_ENDPOINT`
-- Updates: `UPDATES_ENABLED`, `S3_UPDATES_PREFIX` (path prefix inside the updates bucket; manifest download links are built from the request's `Host`/`X-Forwarded-*` headers, not an env var)
+- Updates: `UPDATES_ENABLED`, `S3_UPDATES_PREFIX` (path prefix inside the updates bucket; manifest download links are built from the request's `Host`/`X-Forwarded-*` headers, not an env var), `S3_UPDATER_PREFIX` (default `updater`; separate prefix in the same updates bucket for the EMLy Updater's own installers)
 
 ### Adding new environment variables
 

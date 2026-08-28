@@ -793,6 +793,69 @@ Aggiorna solo i campi forniti. Campi modificabili: `displayname`, `enabled`.
 
 ---
 
+### Self-update dell'EMLy Updater (solo v2)
+
+L'updater installato sulle macchine aggiorna EMLy e, tramite queste rotte, sé stesso.
+Il contratto è identico sull'API pubblica e su ogni mirror interno di sede, così che una
+sede senza uscita internet possa aggiornare i propri updater dal proprio mirror.
+
+#### `GET /v2/updates/manifest/updater` — `X-API-Key`
+
+Ritorna la build che la macchina deve installare.
+
+```json
+{
+  "version": "1.5.0",
+  "download": "https://api.emly.ffois.it/v2/updates/download/updater/1.5.0",
+  "sha256": "3f786850e387550fdab836ed7e6dc881de23001b1f8b9a3d6e5c4a2b0f9e8d7c",
+  "size": 4812345,
+  "publishedAt": "2026-08-28T09:00:00Z",
+  "releaseNotes": {
+    "it": "Corretta la gestione dei mapping DC/subnet multipli.",
+    "en": "Fixed handling of multiple DC/subnet mappings."
+  }
+}
+```
+
+`download` è costruito da `requestBaseURL` a partire da `Host` / `X-Forwarded-Proto` /
+`X-Forwarded-Host` della richiesta: un mirror interno serve da solo un link che punta a
+sé stesso, senza configurazione per sede.
+
+**Niente da distribuire** — `200` con `version` vuoto:
+
+```json
+{ "version": "" }
+```
+
+Il client lo tratta come no-op silenzioso: nessun errore, nessun retry, nessun toast.
+È anche il kill-switch — se una release si rivela difettosa basta azzerarne `is_current`.
+
+Questo endpoint **non ritorna mai `404`**: per il client un 404 significa "questo mirror
+non implementa ancora la rotta", ed è ciò che permette ai mirror non aggiornati di
+convivere. Un catalogo vuoto è quindi un `200`, non un `404`.
+
+#### `GET /v2/updates/download/updater/{version}` — pubblico
+
+Streama l'installer firmato dalla CI, byte per byte, dallo storage S3 privato. Pubblico
+come il download delle release EMLy: il link del manifest può passare da un mirror o una
+CDN che non inoltra l'API key. Il client verifica lo SHA-256 e rifiuta di eseguire il
+file in caso di mismatch.
+
+#### `GET|POST /v2/updates/updater/releases` — `X-Admin-Key`
+
+`POST` è `multipart/form-data`: `version` (semver senza `v`), `file`, e opzionali
+`is_current`, `notes_it`, `notes_en`, `published_at`. SHA-256 e dimensione sono calcolati
+lato server dai byte caricati, così il checksum del manifest descrive sempre ciò che
+viene davvero servito. Con `is_current=true` la release viene servita subito e quella che
+occupava lo slot viene retrocessa, atomicamente.
+
+#### `PATCH|DELETE /v2/updates/updater/releases/{version}` — `X-Admin-Key`
+
+`PATCH {"is_current": false}` è il kill-switch. Non esiste downgrade: per tornare
+indietro si pubblica una versione superiore contenente il codice precedente.
+
+---
+
 ### Modello `BugReport`
 
 ```json

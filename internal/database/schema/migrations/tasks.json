@@ -51,5 +51,21 @@
         { "type": "column_not_exists", "table": "update_releases", "column": "is_stable" }
       ]
     }
+    ,{
+      "id": "7_updater_releases",
+      "sql_file": "7_updater_releases.sql",
+      "description": "Create updater_releases table for the EMLy Updater self-update manifest.",
+      "conditions": [
+        { "type": "table_not_exists", "table": "updater_releases" }
+      ]
+    }
+    ,{
+      "id": "8_updater_events_product",
+      "sql_file": "8_updater_events_product.sql",
+      "description": "Add product column to updater_events so EMLy client traffic and updater self-update traffic can be told apart.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "updater_events", "column": "product" }
+      ]
+    }
   ]
 }

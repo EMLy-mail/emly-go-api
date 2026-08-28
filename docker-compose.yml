@@ -40,6 +40,7 @@ services:
       OTEL_ENDPOINT: ${OTEL_ENDPOINT:-http://otel-lgtm:4318}
       UPDATES_ENABLED: ${UPDATES_ENABLED:-false}
       S3_UPDATES_PREFIX: ${S3_UPDATES_PREFIX:-updates}
+      S3_UPDATER_PREFIX: ${S3_UPDATER_PREFIX:-updater}
     volumes:
       - logs:/logs
     logging:
