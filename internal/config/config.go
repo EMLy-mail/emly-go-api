@@ -20,7 +20,13 @@ type RateLimitConfig struct {
 	AuthBanDur     time.Duration
 }
 
-type R2Config struct {
+// S3BucketConfig holds the connection details for one S3-compatible bucket.
+// AccountID is a Cloudflare R2 convenience: when Endpoint is empty it is used
+// to derive the R2 endpoint (https://<AccountID>.r2.cloudflarestorage.com).
+// Any other S3-compatible provider should set Endpoint explicitly and leave
+// AccountID blank. Two S3BucketConfig values can point at entirely different
+// hosts/services/providers.
+type S3BucketConfig struct {
 	AccountID       string
 	AccessKeyID     string
 	SecretAccessKey string
@@ -46,9 +52,11 @@ type Config struct {
 	ConnMaxLifetime        int
 	UpdatesEnabled         bool
 	UpdatesS3Prefix        string
-	UseS3CompatibleStorage bool
+	UseS3APIFileStorage    bool
+	UseS3UpdatesStorage    bool
 	RateLimit              RateLimitConfig
-	R2                     R2Config
+	S3APIFile              S3BucketConfig
+	S3Updates              S3BucketConfig
 	Otel                   OtelConfig
 }
 
@@ -130,19 +138,28 @@ func load() *Config {
 		MaxIdleConns:           maxIdleConns,
 		ConnMaxLifetime:        connMaxLifetime,
 		UpdatesEnabled:         strings.ToLower(strings.TrimSpace(os.Getenv("UPDATES_ENABLED"))) == "true",
-		UpdatesS3Prefix:        strings.Trim(os.Getenv("UPDATES_S3_PREFIX"), "/"),
-		UseS3CompatibleStorage: strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_COMPATIBLE_STORAGE"))) == "true",
+		UpdatesS3Prefix:        strings.Trim(os.Getenv("S3_UPDATES_PREFIX"), "/"),
+		UseS3APIFileStorage:    strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_API_FILE_STORAGE"))) == "true",
+		UseS3UpdatesStorage:    strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_UPDATES_STORAGE"))) == "true",
 		Otel: OtelConfig{
 			Enabled:  strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_ENABLED"))) == "true",
 			Endpoint: envString("OTEL_ENDPOINT", "http://localhost:4318"),
 		},
-		R2: R2Config{
-			AccountID:       os.Getenv("CF_ACCOUNT_ID"),
-			AccessKeyID:     os.Getenv("CF_R2_ACCESS_KEY_ID"),
-			SecretAccessKey: os.Getenv("CF_R2_SECRET_ACCESS_KEY"),
-			BucketName:      os.Getenv("CF_R2_BUCKET_NAME"),
-			Region:          envString("CF_R2_REGION", "auto"),
-			Endpoint:        os.Getenv("CF_R2_ENDPOINT"),
+		S3APIFile: S3BucketConfig{
+			AccountID:       os.Getenv("S3_API_FILE_ACCOUNT_ID"),
+			AccessKeyID:     os.Getenv("S3_API_FILE_ACCESS_KEY_ID"),
+			SecretAccessKey: os.Getenv("S3_API_FILE_SECRET_ACCESS_KEY"),
+			BucketName:      os.Getenv("S3_API_FILE_BUCKET"),
+			Region:          envString("S3_API_FILE_REGION", "auto"),
+			Endpoint:        os.Getenv("S3_API_FILE_ENDPOINT"),
+		},
+		S3Updates: S3BucketConfig{
+			AccountID:       os.Getenv("S3_UPDATES_ACCOUNT_ID"),
+			AccessKeyID:     os.Getenv("S3_UPDATES_ACCESS_KEY_ID"),
+			SecretAccessKey: os.Getenv("S3_UPDATES_SECRET_ACCESS_KEY"),
+			BucketName:      os.Getenv("S3_UPDATES_BUCKET"),
+			Region:          envString("S3_UPDATES_REGION", "auto"),
+			Endpoint:        os.Getenv("S3_UPDATES_ENDPOINT"),
 		},
 		RateLimit: RateLimitConfig{
 			UnauthMaxReqs:  envInt("RL_UNAUTH_MAX_REQS", 10),

@@ -203,7 +203,7 @@ func s3Key(prefix, filename string) string {
 }
 
 // CreateRelease handles POST /v2/updates/releases as multipart/form-data.
-// The .exe is uploaded to R2; SHA-256 is computed server-side.
+// The .exe is uploaded to the updates S3 bucket; SHA-256 is computed server-side.
 func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s3conn == nil {
@@ -385,6 +385,11 @@ func DownloadRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) 
 
 func DeleteRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s3conn == nil {
+			jsonError(w, http.StatusServiceUnavailable, "S3 storage is not configured")
+			return
+		}
+
 		version := chi.URLParam(r, "version")
 
 		var filename string
@@ -395,11 +400,9 @@ func DeleteRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 			return
 		}
 
-		if s3conn != nil {
-			if err := s3conn.DeleteFile(r.Context(), s3Key(s3Prefix, filename)); err != nil && !storage.IsNotFound(err) {
-				jsonError(w, http.StatusInternalServerError, "failed to delete file from storage: "+err.Error())
-				return
-			}
+		if err := s3conn.DeleteFile(r.Context(), s3Key(s3Prefix, filename)); err != nil && !storage.IsNotFound(err) {
+			jsonError(w, http.StatusInternalServerError, "failed to delete file from storage: "+err.Error())
+			return
 		}
 
 		res, err := db.ExecContext(r.Context(),

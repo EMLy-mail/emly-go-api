@@ -16,8 +16,10 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// RegisterAll mounts every versioned API onto the root router.
-func RegisterAll(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector) {
+// RegisterAll mounts every versioned API onto the root router. apiFileS3conn
+// and updatesS3conn are independent connectors — each may be nil, and each
+// may point at a bucket on a different S3-compatible host/service/provider.
+func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector) {
 	dbName := config.Load().Database
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -27,13 +29,13 @@ func RegisterAll(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector) {
 		}
 	})
 
-	r.Mount("/v1", v1.NewRouter(db, s3conn))
-	r.Mount("/v2", v2.NewRouter(db, s3conn))
+	r.Mount("/v1", v1.NewRouter(db, apiFileS3conn))
+	r.Mount("/v2", v2.NewRouter(db, apiFileS3conn, updatesS3conn))
 	// Redirect /health to /v1/health
 	r.Get("/health", handlers.Health(db))
 
 	// Legacy compatibility: expose bug-report creation also under /api/bug-reports.
-	r.Post("/api/bug-reports", registerBugReports(r, db, dbName, s3conn))
+	r.Post("/api/bug-reports", registerBugReports(r, db, dbName, apiFileS3conn))
 
 }
 
