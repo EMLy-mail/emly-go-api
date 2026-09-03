@@ -133,13 +133,16 @@ func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, hwid, hostname, adDom
 			return 0, err
 		}
 
-		// No row owns this hwid yet - adopt a legacy row for the same
-		// hostname/ad_domain if one exists and isn't already claimed by a
-		// different hwid, so it picks up identification going forward
-		// instead of forking into a second row.
+		// No row owns this hwid yet - adopt whichever row currently owns
+		// this hostname/ad_domain, if any, and update it to the new hwid.
+		// This also covers a hostname reused with a rotated hwid (reimage,
+		// hardware swap): uniq_client only allows one row per
+		// (hostname, ad_domain) anyway, so that pair was already the
+		// authoritative "same machine" signal pre-HWID, and leaving the old
+		// hwid in place here would just re-collide with uniq_client below.
 		if hostname != "" {
 			err = db.GetContext(ctx, &id,
-				`SELECT id FROM updater_clients WHERE hostname = ? AND ad_domain = ? AND hwid IS NULL`,
+				`SELECT id FROM updater_clients WHERE hostname = ? AND ad_domain = ?`,
 				hostname, adDomain,
 			)
 			switch {
