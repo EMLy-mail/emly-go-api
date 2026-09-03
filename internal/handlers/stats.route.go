@@ -14,7 +14,28 @@ import (
 
 var validEventBuckets = map[string]bool{"day": true, "hour": true}
 
+var validEventProducts = map[string]bool{"emly": true, "updater": true, "all": true}
+
 const defaultConnectedWindowMinutes = 15
+
+// eventProductFilter reads the optional ?product= query param and returns the
+// SQL fragment + arg constraining updater_events. It defaults to "emly" so
+// existing dashboards keep counting EMLy client traffic only, unaffected by
+// the updater's own self-update checks; pass product=updater for those, or
+// product=all for both.
+func eventProductFilter(r *http.Request) (product, clause string, args []interface{}, ok bool) {
+	product = r.URL.Query().Get("product")
+	if product == "" {
+		product = "emly"
+	}
+	if !validEventProducts[product] {
+		return product, "", nil, false
+	}
+	if product == "all" {
+		return product, "", nil, true
+	}
+	return product, " AND product = ?", []interface{}{product}, true
+}
 
 // GetStatsSummary returns fleet-wide EMLy Updater stats: total/connected
 // client counts, event volume over the last 24h, and version adoption.
@@ -25,6 +46,12 @@ func GetStatsSummary(db *sqlx.DB) http.HandlerFunc {
 			if v, err := strconv.Atoi(wm); err == nil && v > 0 {
 				windowMinutes = v
 			}
+		}
+
+		product, productClause, productArgs, ok := eventProductFilter(r)
+		if !ok {
+			jsonError(w, http.StatusBadRequest, "product must be one of: emly, updater, all")
+			return
 		}
 
 		var totalClients int
@@ -49,8 +76,9 @@ func GetStatsSummary(db *sqlx.DB) http.HandlerFunc {
 		var eventsLast24h []eventCount
 		if err := db.SelectContext(r.Context(), &eventsLast24h,
 			`SELECT event_type, COUNT(*) AS count FROM updater_events
-			 WHERE created_at >= NOW() - INTERVAL 24 HOUR
+			 WHERE created_at >= NOW() - INTERVAL 24 HOUR`+productClause+`
 			 GROUP BY event_type`,
+			productArgs...,
 		); err != nil {
 			jsonError(w, http.StatusInternalServerError, "failed to count events")
 			return
@@ -72,6 +100,7 @@ func GetStatsSummary(db *sqlx.DB) http.HandlerFunc {
 			"total_clients":      totalClients,
 			"connected_clients":  connectedClients,
 			"window_minutes":     windowMinutes,
+			"product":            product,
 			"events_last_24h":    eventsLast24h,
 			"clients_by_version": clientsByVersion,
 		})
@@ -179,6 +208,12 @@ func GetStatsEvents(db *sqlx.DB) http.HandlerFunc {
 
 		eventType := r.URL.Query().Get("event_type")
 
+		product, productClause, productArgs, ok := eventProductFilter(r)
+		if !ok {
+			jsonError(w, http.StatusBadRequest, "product must be one of: emly, updater, all")
+			return
+		}
+
 		from := time.Now().UTC().AddDate(0, 0, -30)
 		if f := r.URL.Query().Get("from"); f != "" {
 			if t, err := time.Parse(time.RFC3339, f); err == nil {
@@ -208,6 +243,8 @@ func GetStatsEvents(db *sqlx.DB) http.HandlerFunc {
 		          FROM updater_events
 		          WHERE created_at BETWEEN ? AND ?`
 		args := []interface{}{from, to}
+		query += productClause
+		args = append(args, productArgs...)
 		if eventType != "" {
 			query += ` AND event_type = ?`
 			args = append(args, eventType)
@@ -226,10 +263,11 @@ func GetStatsEvents(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		jsonOK(w, map[string]interface{}{
-			"bucket": bucket,
-			"from":   from,
-			"to":     to,
-			"data":   counts,
+			"bucket":  bucket,
+			"product": product,
+			"from":    from,
+			"to":      to,
+			"data":    counts,
 		})
 	}
 }

@@ -13,10 +13,14 @@ type UpdaterClient struct {
 	LastSeenAt     time.Time `db:"last_seen_at"     json:"last_seen_at"`
 }
 
+// UpdaterEvent is one client-facing update operation. Product tells apart
+// traffic for the EMLy app itself ("emly") from the updater's own self-update
+// ("updater"), since both flow through the same endpoints shape.
 type UpdaterEvent struct {
 	ID        int64     `db:"id"          json:"id"`
 	ClientID  int       `db:"client_id"   json:"client_id"`
 	EventType string    `db:"event_type"  json:"event_type"`
+	Product   string    `db:"product"     json:"product"`
 	Version   *string   `db:"version"     json:"version,omitempty"`
 	IPAddress *string   `db:"ip_address"  json:"ip_address,omitempty"`
 	CreatedAt time.Time `db:"created_at"  json:"created_at"`

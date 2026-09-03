@@ -52,6 +52,7 @@ type Config struct {
 	ConnMaxLifetime        int
 	UpdatesEnabled         bool
 	UpdatesS3Prefix        string
+	UpdaterS3Prefix        string
 	UseS3APIFileStorage    bool
 	UseS3UpdatesStorage    bool
 	RateLimit              RateLimitConfig
@@ -139,6 +140,7 @@ func load() *Config {
 		ConnMaxLifetime:        connMaxLifetime,
 		UpdatesEnabled:         strings.ToLower(strings.TrimSpace(os.Getenv("UPDATES_ENABLED"))) == "true",
 		UpdatesS3Prefix:        strings.Trim(os.Getenv("S3_UPDATES_PREFIX"), "/"),
+		UpdaterS3Prefix:        strings.Trim(envString("S3_UPDATER_PREFIX", "updater"), "/"),
 		UseS3APIFileStorage:    strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_API_FILE_STORAGE"))) == "true",
 		UseS3UpdatesStorage:    strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_UPDATES_STORAGE"))) == "true",
 		Otel: OtelConfig{

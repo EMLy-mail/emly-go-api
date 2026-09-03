@@ -40,6 +40,8 @@ tags:
     description: CRUD operations on bug reports (v2 canonical paths)
   - name: Updates
     description: Software update manifest and release management (v2 only)
+  - name: Updater
+    description: Self-update of the EMLy Updater itself — its own manifest, installer and release management (v2 only)
 
 # ─────────────────────────────────────────────────────────────
 # Security schemes
@@ -302,6 +304,99 @@ components:
           additionalProperties:
             $ref: '#/components/schemas/DetailedNote'
           nullable: true
+
+    UpdaterManifest:
+      type: object
+      description: |
+        Self-update contract for the EMLy Updater. Deliberately poorer than
+        `UpdateManifest`: no channels, no `isCritical`/`minRequiredVersion` and
+        no downgrade — a self-update has nothing to interrupt, so it is always
+        silent and always applied as soon as it is seen. Unknown fields are
+        ignored by the client, so new ones can be added without breaking
+        updaters already in the field.
+      required: [version]
+      properties:
+        version:
+          type: string
+          description: |
+            Semver with no `v` prefix, matching the published installer's
+            `ApplicationVersion` exactly — after restarting, the client compares
+            its own version against this to declare the update successful.
+            An empty string means "nothing to distribute" (see the endpoint).
+          example: "1.5.0"
+        download:
+          type: string
+          format: uri
+          description: |
+            Absolute URL of the installer. Built from the request's
+            `Host`/`X-Forwarded-*` headers, so an internal site mirror serves a
+            link pointing at itself. HTTP redirects are allowed and it may point
+            at a different host.
+          example: "https://api.emly.ffois.it/v2/updates/download/updater/1.5.0"
+        sha256:
+          type: string
+          description: Hex SHA-256 of the whole file (64 chars). Compared case-insensitively; a mismatch always aborts the update.
+          example: "3f786850e387550fdab836ed7e6dc881de23001b1f8b9a3d6e5c4a2b0f9e8d7c"
+        size:
+          type: integer
+          format: int64
+          description: File size in bytes; logging/diagnostics only
+          example: 4812345
+        publishedAt:
+          type: string
+          format: date-time
+          description: RFC 3339 UTC; logging only
+          example: "2026-08-28T09:00:00Z"
+        releaseNotes:
+          type: object
+          description: lang → text. Goes to the log and the Event Log, never shown to the user.
+          additionalProperties:
+            type: string
+          example:
+            it: "Corretta la gestione dei mapping DC/subnet multipli."
+            en: "Fixed handling of multiple DC/subnet mappings."
+
+    UpdaterRelease:
+      type: object
+      properties:
+        version:
+          type: string
+          example: "1.5.0"
+        is_current:
+          type: boolean
+          description: |
+            Whether this is the build served by the manifest. At most one
+            release holds it — promoting one demotes the other. Clearing it
+            everywhere is the kill-switch: the manifest falls back to
+            `{"version": ""}`.
+          example: true
+        download_filename:
+          type: string
+          example: "EMLyUpdater_Installer_1.5.0.exe"
+        sha256_checksum:
+          type: string
+          description: Computed server-side at upload, so it always describes the bytes actually served
+          example: "3f786850e387550fdab836ed7e6dc881de23001b1f8b9a3d6e5c4a2b0f9e8d7c"
+        file_size:
+          type: integer
+          format: int64
+          example: 4812345
+        notes_it:
+          type: string
+          nullable: true
+          example: "Corretta la gestione dei mapping DC/subnet multipli."
+        notes_en:
+          type: string
+          nullable: true
+          example: "Fixed handling of multiple DC/subnet mappings."
+        published_at:
+          type: string
+          format: date-time
+          example: "2026-08-28T09:00:00Z"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-08-28T09:00:00Z"
 
     Release:
       type: object
@@ -1558,6 +1653,307 @@ paths:
                 $ref: '#/components/schemas/Error'
         "404":
           description: Version not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ── Updater self-update ───────────────────────────────────
+
+  /v2/updates/manifest/updater:
+    get:
+      tags: [Updater]
+      summary: Get the EMLy Updater's self-update manifest
+      description: |
+        Returns the updater build the requesting machine should install. Served
+        with an identical contract by the public API and by every internal site
+        mirror, so a site with no internet access can still update its updaters
+        from its own mirror.
+
+        The `download` link is derived from the request's `Host` /
+        `X-Forwarded-Proto` / `X-Forwarded-Host` headers, so a mirror
+        automatically hands out a link pointing at itself — no per-site
+        configuration.
+
+        **Nothing to distribute:** a `200` with an empty (or absent) `version`
+        is a silent no-op client-side — no error, no retry, no toast, no event.
+        It is also the kill-switch: if a release turns out to be broken, clear
+        its `is_current` flag and the manifest reverts to `{"version": ""}`.
+        Clients never downgrade, so rolling back means publishing a *higher*
+        version carrying the previous code.
+
+        **`404` is never returned by this implementation.** The client reads a
+        404 as "this mirror does not implement the endpoint yet" and stops
+        silently, which is what lets not-yet-upgraded internal mirrors coexist.
+        An empty catalogue is therefore a `200`, not a `404`.
+
+        The client also sends `X-EMLy-Hostname`, `X-EMLy-HWID`,
+        `X-EMLy-ADDomain` and `X-EMLy-IntIP`, plus a
+        `EMLy-Updater/<version> (contact)` User-Agent carrying the version
+        currently installed on the machine. A staged rollout can be done
+        entirely server-side by keying off those headers and returning
+        `{"version": ""}` to machines not yet in the ring — no client change.
+      security:
+        - ApiKey: []
+      responses:
+        "200":
+          description: 'Manifest, or `{"version": ""}` when there is nothing to distribute'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdaterManifest'
+        "401":
+          description: Missing or wrong API key — the client logs it and retries next cycle
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "500":
+          description: Database error — the client retries with exponential backoff
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v2/updates/download/updater/{version}:
+    get:
+      tags: [Updater]
+      summary: Download the EMLy Updater installer
+      description: |
+        Public endpoint — no authentication required, matching the EMLy release
+        download: the manifest's `download` link may legitimately be served
+        through a mirror or CDN that does not forward the API key.
+
+        Proxies the CI-signed `EMLyUpdater_Installer_<version>.exe` from private
+        S3 storage byte for byte, so the bucket never needs to be public. The
+        client verifies the SHA-256 from the manifest and refuses to run the
+        file on a mismatch.
+      parameters:
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "1.5.0"
+      responses:
+        "200":
+          description: Installer binary stream
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: 'attachment; filename="EMLyUpdater_Installer_1.5.0.exe"'
+            Content-Length:
+              schema:
+                type: integer
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Version not found or file missing from storage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "503":
+          description: S3 storage not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v2/updates/updater/releases:
+    get:
+      tags: [Updater]
+      summary: List updater releases
+      description: Returns updater releases ordered by `published_at` descending.
+      security:
+        - AdminKey: []
+      responses:
+        "200":
+          description: Updater releases
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UpdaterRelease'
+        "500":
+          description: Database error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags: [Updater]
+      summary: Publish an updater release
+      description: |
+        Uploads the signed installer to the updates bucket under
+        `S3_UPDATER_PREFIX` and records the release. SHA-256 and size are
+        computed server-side from the uploaded bytes, so the manifest checksum
+        always describes what is actually served — compare it against
+        `Get-FileHash -Algorithm SHA256` on the CI artefact.
+
+        With `is_current=true` the release is served immediately and whichever
+        release previously held the slot is demoted, atomically.
+      security:
+        - AdminKey: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [version, file]
+              properties:
+                version:
+                  type: string
+                  description: Semver with no `v` prefix; must equal the installer's `ApplicationVersion`
+                  example: "1.5.0"
+                file:
+                  type: string
+                  format: binary
+                  description: The signed `EMLyUpdater_Installer_<version>.exe`
+                is_current:
+                  type: string
+                  description: "`true`/`1` to serve this build from the manifest right away"
+                  example: "true"
+                notes_it:
+                  type: string
+                  example: "Corretta la gestione dei mapping DC/subnet multipli."
+                notes_en:
+                  type: string
+                  example: "Fixed handling of multiple DC/subnet mappings."
+                published_at:
+                  type: string
+                  format: date-time
+                  description: RFC 3339; defaults to now
+      responses:
+        "201":
+          description: Release published
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                    example: "1.5.0"
+                  is_current:
+                    type: boolean
+                    example: true
+                  download_filename:
+                    type: string
+                    example: "EMLyUpdater_Installer_1.5.0.exe"
+                  sha256_checksum:
+                    type: string
+                    example: "3f786850e387550fdab836ed7e6dc881de23001b1f8b9a3d6e5c4a2b0f9e8d7c"
+                  file_size:
+                    type: integer
+                    example: 4812345
+        "400":
+          description: Missing file, missing version, or a version that is not bare semver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "503":
+          description: S3 storage not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v2/updates/updater/releases/{version}:
+    patch:
+      tags: [Updater]
+      summary: Update an updater release
+      description: |
+        Partial update — only the fields present in the body are changed.
+        `{"is_current": false}` on the released build is the kill-switch: the
+        manifest immediately reverts to `{"version": ""}`. Setting it to `true`
+        demotes whichever release held the slot.
+      security:
+        - AdminKey: []
+      parameters:
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "1.5.0"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                is_current:
+                  type: boolean
+                  example: false
+                notes_it:
+                  type: string
+                  description: Empty string clears the note
+                notes_en:
+                  type: string
+                  description: Empty string clears the note
+                published_at:
+                  type: string
+                  format: date-time
+      responses:
+        "200":
+          description: Updated release
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdaterRelease'
+        "400":
+          description: Invalid JSON, no fields to update, or a non-RFC3339 `published_at`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: Version not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Updater]
+      summary: Delete an updater release
+      description: Removes both the stored installer and the release row.
+      security:
+        - AdminKey: []
+      parameters:
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "1.5.0"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+                    example: true
+        "404":
+          description: Version not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "503":
+          description: S3 storage not configured
           content:
             application/json:
               schema:
