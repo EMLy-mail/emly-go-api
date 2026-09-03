@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -78,47 +79,15 @@ func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, event
 	uaVersion, contact := parseUpdaterUserAgent(r.UserAgent())
 	ip := clientIPFromRequest(r)
 
-	var res sql.Result
-	var err error
-	if hwid != "" {
-		res, err = db.ExecContext(ctx,
-			`INSERT INTO updater_clients (hwid, hostname, ad_domain, updater_version, contact, last_ip)
-			 VALUES (?, ?, ?, ?, ?, ?)
-			 ON DUPLICATE KEY UPDATE
-			     hwid = VALUES(hwid),
-			     hostname = VALUES(hostname),
-			     ad_domain = VALUES(ad_domain),
-			     updater_version = VALUES(updater_version),
-			     contact = VALUES(contact),
-			     last_ip = VALUES(last_ip),
-			     last_seen_at = CURRENT_TIMESTAMP,
-			     id = LAST_INSERT_ID(id)`,
-			hwid, hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
-		)
-	} else {
+	if hwid == "" {
 		// Legacy fallback: no HWID header, identify by hostname + ad_domain
 		// as before.
 		slog.WarnContext(ctx, "updater stats: missing X-EMLy-HWID header; using legacy hostname/ad_domain identification", "ip", nullableString(ip), "hostname", nullableString(hostname), "ad_domain", nullableString(adDomain))
-		res, err = db.ExecContext(ctx,
-			`INSERT INTO updater_clients (hostname, ad_domain, updater_version, contact, last_ip)
-			 VALUES (?, ?, ?, ?, ?)
-			 ON DUPLICATE KEY UPDATE
-			     updater_version = VALUES(updater_version),
-			     contact = VALUES(contact),
-			     last_ip = VALUES(last_ip),
-			     last_seen_at = CURRENT_TIMESTAMP,
-			     id = LAST_INSERT_ID(id)`,
-			hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
-		)
-	}
-	if err != nil {
-		slog.WarnContext(ctx, "updater stats: failed to upsert client", "error", err)
-		return
 	}
 
-	clientID, err := res.LastInsertId()
+	clientID, err := upsertUpdaterClient(ctx, db, hwid, hostname, adDomain, uaVersion, contact, ip)
 	if err != nil {
-		slog.WarnContext(ctx, "updater stats: failed to resolve client id", "error", err)
+		slog.WarnContext(ctx, "updater stats: failed to upsert client", "error", err)
 		return
 	}
 
@@ -128,6 +97,88 @@ func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, event
 	); err != nil {
 		slog.WarnContext(ctx, "updater stats: failed to record event", "error", err)
 	}
+}
+
+// upsertUpdaterClient records one client sighting and returns its row id.
+//
+// updater_clients carries two independent unique keys - uniq_hwid and the
+// legacy uniq_client (hostname, ad_domain) - so a single blind
+// INSERT ... ON DUPLICATE KEY UPDATE is unsafe here: if the incoming row
+// matches one existing row via one key while the values it would write
+// collide with a *different* row via the other key, MySQL updates the first
+// match and then fails the write with a duplicate-key error instead of
+// merging anything (this happens for real during the HWID rollout, e.g. a
+// machine reported under an incomplete header set before, now reports with
+// the same hwid but a hostname/ad_domain pair already owned by that older
+// row). Explicit lookups sidestep that: every write targets one row by id.
+func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, hwid, hostname, adDomain, uaVersion, contact, ip string) (int64, error) {
+	updateByID := func(id int64) (int64, error) {
+		_, err := db.ExecContext(ctx,
+			`UPDATE updater_clients
+			 SET hwid = COALESCE(NULLIF(?, ''), hwid), hostname = ?, ad_domain = ?,
+			     updater_version = ?, contact = ?, last_ip = ?, last_seen_at = CURRENT_TIMESTAMP
+			 WHERE id = ?`,
+			hwid, hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip), id,
+		)
+		return id, err
+	}
+
+	if hwid != "" {
+		var id int64
+		err := db.GetContext(ctx, &id, `SELECT id FROM updater_clients WHERE hwid = ?`, hwid)
+		switch {
+		case err == nil:
+			return updateByID(id)
+		case !errors.Is(err, sql.ErrNoRows):
+			return 0, err
+		}
+
+		// No row owns this hwid yet - adopt a legacy row for the same
+		// hostname/ad_domain if one exists and isn't already claimed by a
+		// different hwid, so it picks up identification going forward
+		// instead of forking into a second row.
+		if hostname != "" {
+			err = db.GetContext(ctx, &id,
+				`SELECT id FROM updater_clients WHERE hostname = ? AND ad_domain = ? AND hwid IS NULL`,
+				hostname, adDomain,
+			)
+			switch {
+			case err == nil:
+				return updateByID(id)
+			case !errors.Is(err, sql.ErrNoRows):
+				return 0, err
+			}
+		}
+
+		res, err := db.ExecContext(ctx,
+			`INSERT INTO updater_clients (hwid, hostname, ad_domain, updater_version, contact, last_ip)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			hwid, hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
+		)
+		if err != nil {
+			return 0, err
+		}
+		return res.LastInsertId()
+	}
+
+	// Legacy path: no hwid, identify by hostname + ad_domain as before. This
+	// key pair is untouched by the hwid branch above, so a plain
+	// ON DUPLICATE KEY UPDATE on it alone is safe.
+	res, err := db.ExecContext(ctx,
+		`INSERT INTO updater_clients (hostname, ad_domain, updater_version, contact, last_ip)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON DUPLICATE KEY UPDATE
+		     updater_version = VALUES(updater_version),
+		     contact = VALUES(contact),
+		     last_ip = VALUES(last_ip),
+		     last_seen_at = CURRENT_TIMESTAMP,
+		     id = LAST_INSERT_ID(id)`,
+		hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
 func nullableString(s string) *string {
