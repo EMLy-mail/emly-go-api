@@ -35,6 +35,21 @@ func (logBridge) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// parseLogLevel maps the LOG_LEVEL env var to a slog.Level, defaulting to
+// Info for an empty or unrecognized value.
+func parseLogLevel(s string) slog.Level {
+	switch s {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
 func main() {
 	_ = godotenv.Load()
 
@@ -44,9 +59,17 @@ func main() {
 
 	cfg := config.Load()
 
+	logLevel := parseLogLevel(cfg.LogLevel)
+	if !cfg.Otel.Enabled {
+		// Without OTel, slog would otherwise fall back to its built-in
+		// default handler (text on stderr, fixed at LevelInfo) — set one
+		// explicitly so LOG_LEVEL is honored here too.
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
+	}
+
 	// OTel setup — runs early so all subsequent logs flow through the pipeline.
 	if cfg.Otel.Enabled {
-		stdoutHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+		stdoutHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
 		otelShutdown, err := telemetry.Setup(context.Background(), cfg.Otel.Endpoint, stdoutHandler)
 		if err != nil {
 			log.Fatalf("otel setup failed: %v", err)
@@ -65,6 +88,8 @@ func main() {
 
 		slog.Info("OpenTelemetry enabled", "endpoint", cfg.Otel.Endpoint)
 	}
+
+	slog.Info("log level set", "level", logLevel.String())
 
 	db, err := database.Connect(cfg)
 	if err != nil {

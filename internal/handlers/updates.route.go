@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -55,31 +56,61 @@ func clientIPFromRequest(r *http.Request) string {
 
 // recordUpdaterEvent best-effort persists an EMLy Updater client sighting and
 // operation event. It never fails the caller's HTTP response - a client
-// missing the identifying header is silently skipped, and DB errors are only
-// logged, since this is telemetry on a client-facing path.
+// missing every identifying header is silently skipped, and DB errors are
+// only logged, since this is telemetry on a client-facing path.
+//
+// Clients are identified by the X-EMLy-HWID header when present - it survives
+// hostname renames/AD domain changes better than the old (hostname, ad_domain)
+// pair. Clients that don't send it yet (not upgraded, or HWID unavailable on
+// the machine) fall back to that old hostname-based identification, so both
+// coexist during the rollout; a legacy row picks up its hwid the first time
+// that same hostname/ad_domain shows up with the header set.
 //
 // product is productEMLy for traffic about the EMLy app and productUpdater for
 // the updater's own self-update, so the two never get mixed in fleet stats.
 func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, eventType, product, version string) {
+	hwid := r.Header.Get("X-EMLy-HWID")
 	hostname := r.Header.Get("X-EMLy-Hostname")
-	if hostname == "" {
+	if hwid == "" && hostname == "" {
 		return
 	}
 	adDomain := r.Header.Get("X-EMLy-ADDomain")
 	uaVersion, contact := parseUpdaterUserAgent(r.UserAgent())
 	ip := clientIPFromRequest(r)
 
-	res, err := db.ExecContext(ctx,
-		`INSERT INTO updater_clients (hostname, ad_domain, updater_version, contact, last_ip)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON DUPLICATE KEY UPDATE
-		     updater_version = VALUES(updater_version),
-		     contact = VALUES(contact),
-		     last_ip = VALUES(last_ip),
-		     last_seen_at = CURRENT_TIMESTAMP,
-		     id = LAST_INSERT_ID(id)`,
-		hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
-	)
+	var res sql.Result
+	var err error
+	if hwid != "" {
+		res, err = db.ExecContext(ctx,
+			`INSERT INTO updater_clients (hwid, hostname, ad_domain, updater_version, contact, last_ip)
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON DUPLICATE KEY UPDATE
+			     hwid = VALUES(hwid),
+			     hostname = VALUES(hostname),
+			     ad_domain = VALUES(ad_domain),
+			     updater_version = VALUES(updater_version),
+			     contact = VALUES(contact),
+			     last_ip = VALUES(last_ip),
+			     last_seen_at = CURRENT_TIMESTAMP,
+			     id = LAST_INSERT_ID(id)`,
+			hwid, hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
+		)
+	} else {
+		// Legacy fallback: no HWID header, identify by hostname + ad_domain
+		// as before.
+		slog.WarnContext(ctx, "updater stats: missing X-EMLy-HWID header; using legacy hostname/ad_domain identification", "ip", nullableString(ip), "hostname", nullableString(hostname), "ad_domain", nullableString(adDomain))
+		res, err = db.ExecContext(ctx,
+			`INSERT INTO updater_clients (hostname, ad_domain, updater_version, contact, last_ip)
+			 VALUES (?, ?, ?, ?, ?)
+			 ON DUPLICATE KEY UPDATE
+			     updater_version = VALUES(updater_version),
+			     contact = VALUES(contact),
+			     last_ip = VALUES(last_ip),
+			     last_seen_at = CURRENT_TIMESTAMP,
+			     id = LAST_INSERT_ID(id)`,
+			hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
+		)
+	}
 	if err != nil {
 		slog.WarnContext(ctx, "updater stats: failed to upsert client", "error", err)
 		return

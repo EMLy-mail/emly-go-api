@@ -47,6 +47,7 @@ type Config struct {
 	APIKey                 string
 	AdminKey               string
 	DashboardKey           string
+	LogLevel               string
 	MaxOpenConns           int
 	MaxIdleConns           int
 	ConnMaxLifetime        int
@@ -135,6 +136,7 @@ func load() *Config {
 		APIKey:                 apiKey,
 		AdminKey:               adminKey,
 		DashboardKey:           os.Getenv("DASHBOARD_KEY"),
+		LogLevel:               strings.ToLower(strings.TrimSpace(envString("LOG_LEVEL", "info"))),
 		MaxOpenConns:           maxOpenConns,
 		MaxIdleConns:           maxIdleConns,
 		ConnMaxLifetime:        connMaxLifetime,
