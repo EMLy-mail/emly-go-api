@@ -102,81 +102,86 @@ func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, event
 // upsertUpdaterClient records one client sighting and returns its row id.
 //
 // updater_clients carries two independent unique keys - uniq_hwid and the
-// legacy uniq_client (hostname, ad_domain) - so a single blind
-// INSERT ... ON DUPLICATE KEY UPDATE is unsafe here: if the incoming row
-// matches one existing row via one key while the values it would write
-// collide with a *different* row via the other key, MySQL updates the first
-// match and then fails the write with a duplicate-key error instead of
-// merging anything (this happens for real during the HWID rollout, e.g. a
-// machine reported under an incomplete header set before, now reports with
-// the same hwid but a hostname/ad_domain pair already owned by that older
-// row). Explicit lookups sidestep that: every write targets one row by id.
+// legacy uniq_client (hostname, ad_domain) - so a blind
+// INSERT/UPDATE ... ON DUPLICATE KEY UPDATE is unsafe here: whenever a
+// single statement writes both a hwid and a (hostname, ad_domain) pair,
+// either one can belong to a *different*, already-existing row (a hostname
+// reused after reimage with a rotated hwid; a machine that reports under an
+// incomplete header set once and the full set the next time; hand-testing
+// with mismatched headers). MySQL then fails the whole statement with a
+// duplicate-key error instead of merging anything.
+//
+// This resolves it in three explicit steps instead of one implicit one:
+//  1. find the target row - by hwid if given, else by (hostname, ad_domain);
+//  2. delete any *other* row that currently squats on the (hostname,
+//     ad_domain) pair we're about to write into the target (or into a fresh
+//     row) - hwid is the authoritative identity once present, so a stale row
+//     merely holding that hostname is superseded and its (best-effort,
+//     non-authoritative) history can be dropped along with it;
+//  3. update the target row by id, or insert a fresh one.
+// Every write after step 2 targets a single row with no remaining unique
+// value collision possible.
 func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, hwid, hostname, adDomain, uaVersion, contact, ip string) (int64, error) {
-	updateByID := func(id int64) (int64, error) {
-		_, err := db.ExecContext(ctx,
+	lookup := func(query string, args ...interface{}) (int64, bool, error) {
+		var id int64
+		err := db.GetContext(ctx, &id, query, args...)
+		switch {
+		case err == nil:
+			return id, true, nil
+		case errors.Is(err, sql.ErrNoRows):
+			return 0, false, nil
+		default:
+			return 0, false, err
+		}
+	}
+
+	var targetID int64
+	var haveTarget bool
+	var err error
+
+	if hwid != "" {
+		targetID, haveTarget, err = lookup(`SELECT id FROM updater_clients WHERE hwid = ?`, hwid)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if !haveTarget && hostname != "" {
+		targetID, haveTarget, err = lookup(
+			`SELECT id FROM updater_clients WHERE hostname = ? AND ad_domain = ?`, hostname, adDomain)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	if hostname != "" {
+		deleteQuery := `DELETE FROM updater_clients WHERE hostname = ? AND ad_domain = ?`
+		deleteArgs := []interface{}{hostname, adDomain}
+		if haveTarget {
+			deleteQuery += ` AND id != ?`
+			deleteArgs = append(deleteArgs, targetID)
+		}
+		if _, err := db.ExecContext(ctx, deleteQuery, deleteArgs...); err != nil {
+			return 0, err
+		}
+	}
+
+	if haveTarget {
+		if _, err := db.ExecContext(ctx,
 			`UPDATE updater_clients
 			 SET hwid = COALESCE(NULLIF(?, ''), hwid), hostname = ?, ad_domain = ?,
 			     updater_version = ?, contact = ?, last_ip = ?, last_seen_at = CURRENT_TIMESTAMP
 			 WHERE id = ?`,
-			hwid, hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip), id,
-		)
-		return id, err
-	}
-
-	if hwid != "" {
-		var id int64
-		err := db.GetContext(ctx, &id, `SELECT id FROM updater_clients WHERE hwid = ?`, hwid)
-		switch {
-		case err == nil:
-			return updateByID(id)
-		case !errors.Is(err, sql.ErrNoRows):
+			hwid, hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip), targetID,
+		); err != nil {
 			return 0, err
 		}
-
-		// No row owns this hwid yet - adopt whichever row currently owns
-		// this hostname/ad_domain, if any, and update it to the new hwid.
-		// This also covers a hostname reused with a rotated hwid (reimage,
-		// hardware swap): uniq_client only allows one row per
-		// (hostname, ad_domain) anyway, so that pair was already the
-		// authoritative "same machine" signal pre-HWID, and leaving the old
-		// hwid in place here would just re-collide with uniq_client below.
-		if hostname != "" {
-			err = db.GetContext(ctx, &id,
-				`SELECT id FROM updater_clients WHERE hostname = ? AND ad_domain = ?`,
-				hostname, adDomain,
-			)
-			switch {
-			case err == nil:
-				return updateByID(id)
-			case !errors.Is(err, sql.ErrNoRows):
-				return 0, err
-			}
-		}
-
-		res, err := db.ExecContext(ctx,
-			`INSERT INTO updater_clients (hwid, hostname, ad_domain, updater_version, contact, last_ip)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
-			hwid, hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
-		)
-		if err != nil {
-			return 0, err
-		}
-		return res.LastInsertId()
+		return targetID, nil
 	}
 
-	// Legacy path: no hwid, identify by hostname + ad_domain as before. This
-	// key pair is untouched by the hwid branch above, so a plain
-	// ON DUPLICATE KEY UPDATE on it alone is safe.
 	res, err := db.ExecContext(ctx,
-		`INSERT INTO updater_clients (hostname, ad_domain, updater_version, contact, last_ip)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON DUPLICATE KEY UPDATE
-		     updater_version = VALUES(updater_version),
-		     contact = VALUES(contact),
-		     last_ip = VALUES(last_ip),
-		     last_seen_at = CURRENT_TIMESTAMP,
-		     id = LAST_INSERT_ID(id)`,
-		hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
+		`INSERT INTO updater_clients (hwid, hostname, ad_domain, updater_version, contact, last_ip)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		nullableString(hwid), hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
 	)
 	if err != nil {
 		return 0, err
