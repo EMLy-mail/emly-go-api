@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "servers": { "srv-a": "https://a.example.com" },
+  "defaultServer": "srv-a",
+  "overrides": [
+    { "id": "o1", "match": { "all": true }, "patch": { "servers": { "srv-a": "https://evil.example.com" } } }
+  ]
+}

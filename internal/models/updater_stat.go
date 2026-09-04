@@ -3,15 +3,17 @@ package models
 import "time"
 
 type UpdaterClient struct {
-	ID             int       `db:"id"              json:"id"`
-	HWID           *string   `db:"hwid"            json:"hwid,omitempty"`
-	Hostname       string    `db:"hostname"        json:"hostname"`
-	ADDomain       string    `db:"ad_domain"        json:"ad_domain"`
-	UpdaterVersion *string   `db:"updater_version"  json:"updater_version,omitempty"`
-	Contact        *string   `db:"contact"          json:"contact,omitempty"`
-	LastIP         *string   `db:"last_ip"          json:"last_ip,omitempty"`
-	FirstSeenAt    time.Time `db:"first_seen_at"    json:"first_seen_at"`
-	LastSeenAt     time.Time `db:"last_seen_at"     json:"last_seen_at"`
+	ID              int        `db:"id"                json:"id"`
+	HWID            *string    `db:"hwid"              json:"hwid,omitempty"`
+	Hostname        string     `db:"hostname"          json:"hostname"`
+	ADDomain        string     `db:"ad_domain"         json:"ad_domain"`
+	UpdaterVersion  *string    `db:"updater_version"   json:"updater_version,omitempty"`
+	ConfigRevision  *int64     `db:"config_revision"   json:"config_revision,omitempty"`
+	ConfigFetchedAt *time.Time `db:"config_fetched_at" json:"config_fetched_at,omitempty"`
+	Contact         *string    `db:"contact"           json:"contact,omitempty"`
+	LastIP          *string    `db:"last_ip"           json:"last_ip,omitempty"`
+	FirstSeenAt     time.Time  `db:"first_seen_at"     json:"first_seen_at"`
+	LastSeenAt      time.Time  `db:"last_seen_at"      json:"last_seen_at"`
 }
 
 // UpdaterEvent is one client-facing update operation. Product tells apart

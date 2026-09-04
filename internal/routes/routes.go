@@ -19,7 +19,9 @@ import (
 // RegisterAll mounts every versioned API onto the root router. apiFileS3conn
 // and updatesS3conn are independent connectors — each may be nil, and each
 // may point at a bucket on a different S3-compatible host/service/provider.
-func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector) {
+// configMirror is non-nil only on a site mirror (CONFIG_UPSTREAM_URL set);
+// pass nil on the cloud/primary instance.
+func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror handlers.ConfigMirrorReporter) {
 	dbName := config.Load().Database
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -30,7 +32,7 @@ func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storag
 	})
 
 	r.Mount("/v1", v1.NewRouter(db, apiFileS3conn))
-	r.Mount("/v2", v2.NewRouter(db, apiFileS3conn, updatesS3conn))
+	r.Mount("/v2", v2.NewRouter(db, apiFileS3conn, updatesS3conn, configMirror))
 	// Redirect /health to /v1/health
 	r.Get("/health", handlers.Health(db))
 

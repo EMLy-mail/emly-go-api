@@ -54,6 +54,9 @@ type Config struct {
 	UpdatesEnabled         bool
 	UpdatesS3Prefix        string
 	UpdaterS3Prefix        string
+	ConfigUpstreamURL      string
+	ConfigUpstreamInterval time.Duration
+	ConfigUpstreamAPIKey   string
 	UseS3APIFileStorage    bool
 	UseS3UpdatesStorage    bool
 	RateLimit              RateLimitConfig
@@ -143,6 +146,15 @@ func load() *Config {
 		UpdatesEnabled:         strings.ToLower(strings.TrimSpace(os.Getenv("UPDATES_ENABLED"))) == "true",
 		UpdatesS3Prefix:        strings.Trim(os.Getenv("S3_UPDATES_PREFIX"), "/"),
 		UpdaterS3Prefix:        strings.Trim(envString("S3_UPDATER_PREFIX", "updater"), "/"),
+		// ConfigUpstreamURL, empty on the cloud instance, marks this instance
+		// as a site mirror for /v2/config: its admin routes refuse writes and
+		// a background loop replicates the published document from upstream
+		// instead (API design doc §9). ConfigUpstreamAPIKey defaults to this
+		// instance's own API_KEY, since a mirror's upstream fetch typically
+		// authenticates with the same shared secret its own clients use.
+		ConfigUpstreamURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("CONFIG_UPSTREAM_URL")), "/"),
+		ConfigUpstreamInterval: envDuration("CONFIG_UPSTREAM_INTERVAL", 5*time.Minute),
+		ConfigUpstreamAPIKey:   envString("CONFIG_UPSTREAM_API_KEY", apiKey),
 		UseS3APIFileStorage:    strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_API_FILE_STORAGE"))) == "true",
 		UseS3UpdatesStorage:    strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_UPDATES_STORAGE"))) == "true",
 		Otel: OtelConfig{

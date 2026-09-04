@@ -75,5 +75,21 @@
         { "type": "column_not_exists", "table": "updater_clients", "column": "hwid" }
       ]
     }
+    ,{
+      "id": "10_remote_config",
+      "sql_file": "10_remote_config.sql",
+      "description": "Create remote_config_revisions table backing GET /v2/config and its admin routes.",
+      "conditions": [
+        { "type": "table_not_exists", "table": "remote_config_revisions" }
+      ]
+    }
+    ,{
+      "id": "11_updater_clients_config",
+      "sql_file": "11_updater_clients_config.sql",
+      "description": "Add config_revision/config_fetched_at columns to updater_clients so the fleet's remote-config rollout can be tracked without new telemetry rows.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "updater_clients", "column": "config_revision" }
+      ]
+    }
   ]
 }

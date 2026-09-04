@@ -17,8 +17,11 @@ go run .
 # One-off: migrate report files from DB blobs to S3 (requires USE_S3_API_FILE_STORAGE=true)
 go run . --migrate-files
 
-# Tests (only the updater self-update contract is covered: routing in
-# internal/routes/v2, manifest wire format + input sanitizing in internal/handlers)
+# Tests: the updater self-update contract (routing in internal/routes/v2,
+# manifest wire format + input sanitizing in internal/handlers) and the
+# remote-config document (validation, override matching, canonical form in
+# internal/remoteconfig; auth gating + a nil-DB-safe subset of handlers in
+# internal/routes/v2 and internal/handlers)
 go test ./...
 go test ./internal/... -run TestName -v
 ```
@@ -64,7 +67,7 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - `admin/auth`: session login/validate/logout (`/login` is rate-limited; `/validate` + `/logout` require a session token).
 - `admin/users`: admin-key-protected user CRUD + password reset.
 
-**v2** (`/v2/...`): everything in v1 plus `updates/` — public update manifest + release download, and admin-key-protected release management (`update_releases` table). The same `updates/` group also carries the EMLy Updater's **self-update** surface (`updater.route.go`, `updater_releases` table): an API-key-protected manifest (`GET /manifest/updater`), a public installer download (`GET /download/updater/{version}`), and admin-key-protected release management (`updater/releases`).
+**v2** (`/v2/...`): everything in v1 plus `updates/` — public update manifest + release download, and admin-key-protected release management (`update_releases` table). The same `updates/` group also carries the EMLy Updater's **self-update** surface (`updater.route.go`, `updater_releases` table): an API-key-protected manifest (`GET /manifest/updater`), a public installer download (`GET /download/updater/{version}`), and admin-key-protected release management (`updater/releases`). v2 also carries `config/` (`config.route.go`, `remote_config_revisions` table) — the fleet-wide policy document served to the EMLy Updater and EMLy: an API-key-protected `GET /config`, and admin-key-protected `validate`/`preview`/`revisions` (list/get/create/delete)/`revisions/{revision}/publish`/`rollback`. See `docs/superpowers/specs/2026-09-04-remote-config-api-design.md`.
 
 ### Rate limiting — two layers
 
@@ -82,6 +85,8 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - `internal/telemetry/` — OTel provider setup (trace/metric/log exporters, W3C propagators).
 - `internal/timing/` — Per-request timing checkpoints carried on the context.
 - `internal/models/` — Structs with `db:` and `json:` tags. Sensitive fields use `json:"-"`.
+- `internal/remoteconfig/` — HTTP- and DB-free: the `/v2/config` document type, `Parse` (validation, same rules the EMLy Updater client applies), `Match`/`Effective`/`ResolveSite` (override evaluation), `Canonical` (deterministic serialization + `ETag`). No dependency on `internal/handlers` or `internal/models`; `internal/handlers/config.route.go` and `internal/configmirror` are its only callers.
+- `internal/configmirror/` — Background loop for a site mirror (`CONFIG_UPSTREAM_URL` set): polls upstream `/v2/config`, validates with `remoteconfig.Parse`, and stores the bytes as received under the upstream's own revision/etag. A no-op `State` (nothing started) when `CONFIG_UPSTREAM_URL` is empty.
 
 ### Handler conventions
 
@@ -91,7 +96,9 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - File uploads use `r.ParseMultipartForm(32 << 20)`; close file streams explicitly.
 - ZIP downloads: in-memory `archive/zip` with template-rendered report text via `internal/handlers/templates/report.txt.tmpl`.
 - The updater self-update manifest answers 200 in every non-error case: an empty catalogue serializes as `{"version": ""}`, which the client treats as a silent no-op. **Never return 404 there** — the client reads 404 as "this mirror does not implement the endpoint yet" and stops without retrying, which is what lets not-yet-upgraded internal site mirrors coexist. At most one `updater_releases` row holds `is_current`; clearing it everywhere is the kill-switch.
+- The same reasoning extends to `GET /v2/config`: **never return 404** for "nothing published yet" — answer **204** instead. A client that already treats any `4xx` as an outage would log one on every machine, every cycle, until the first publish; `204` means "reachable, nothing to give you, keep what you have" and logs nothing.
 - Update releases have independent `is_stable`/`is_beta` boolean flags (a release can be both at once — setting either to `true` clears that flag from whichever other release previously held it) and validate `severity_type` against `validSeverity` (`none`/`security`/`bugfix`/`feature`).
+- Remote-config revisions are append-only: `remote_config_revisions.document` never changes after insert. Publishing supersedes the previous `published` row in the same transaction; rolling back clones an old revision's content into a **new**, higher-numbered revision rather than republishing the old one (a lower number would be ignored by every client). `POST /v2/config/revisions`, `/revisions/{revision}/publish`, `/rollback` and `DELETE /revisions/{revision}` all answer `405` on a site mirror (`CONFIG_UPSTREAM_URL` set) — a mirror only replicates, it never accepts writes.
 
 ### Database migrations
 
@@ -118,6 +125,7 @@ Other notable vars (see `.env.example` for full list + defaults):
 - Storage — updates bucket: `USE_S3_UPDATES_STORAGE`, `S3_UPDATES_ACCESS_KEY_ID`, `S3_UPDATES_SECRET_ACCESS_KEY`, `S3_UPDATES_BUCKET`, `S3_UPDATES_REGION`, `S3_UPDATES_ENDPOINT`, `S3_UPDATES_ACCOUNT_ID` (optional, R2 endpoint shortcut). The two buckets are fully independent and may sit on different S3-compatible providers.
 - Telemetry: `OTEL_ENABLED`, `OTEL_ENDPOINT`
 - Updates: `UPDATES_ENABLED`, `S3_UPDATES_PREFIX` (path prefix inside the updates bucket; manifest download links are built from the request's `Host`/`X-Forwarded-*` headers, not an env var), `S3_UPDATER_PREFIX` (default `updater`; separate prefix in the same updates bucket for the EMLy Updater's own installers)
+- Remote config: `CONFIG_UPSTREAM_URL` (empty on the cloud/primary instance; set on a site mirror to replicate `/v2/config` from upstream instead of accepting writes), `CONFIG_UPSTREAM_INTERVAL` (default `5m`), `CONFIG_UPSTREAM_API_KEY` (defaults to this instance's own `API_KEY`)
 
 ### Adding new environment variables
 

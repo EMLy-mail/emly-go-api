@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 2,
+  "servers": { "srv-a": "https://a.example.com" },
+  "defaultServer": "srv-a"
+}

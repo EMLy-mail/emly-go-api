@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "servers": { "srv-a": "https://a.example.com" },
+  "defaultServer": "srv-a",
+  "dcLookupMap": {
+    "DC-1": { "internalSubnets": ["not-a-cidr"], "baseServer": "srv-a", "backupServer": [], "enabled": true }
+  }
+}

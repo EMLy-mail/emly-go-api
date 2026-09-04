@@ -42,6 +42,8 @@ tags:
     description: Software update manifest and release management (v2 only)
   - name: Updater
     description: Self-update of the EMLy Updater itself — its own manifest, installer and release management (v2 only)
+  - name: Config
+    description: Remote configuration document served to the EMLy Updater and EMLy (`/v2/config`) — publish, rollback, preview and revision history (v2 only)
 
 # ─────────────────────────────────────────────────────────────
 # Security schemes
@@ -449,6 +451,103 @@ components:
         created_at:
           type: string
           format: date-time
+
+    # ── Remote Config ────────────────────────────────────────
+
+    Problem:
+      type: object
+      description: One validation failure or warning, with a JSON-pointer-style location.
+      properties:
+        path:
+          type: string
+          example: "/overrides/1/patch/servers"
+        message:
+          type: string
+          example: "patch may only touch control, updater, logging, defaultServer"
+
+    RemoteConfigDocument:
+      type: object
+      description: |
+        The whole `/v2/config` policy document. See
+        `emly-updater/docs/superpowers/specs/2026-09-04-remote-config-design.md`
+        §7 for the normative field-by-field reference (`servers`,
+        `defaultServer`, `ipcProtocol`, `dcLookupMap`, `hostIntegrity`,
+        `control`, `updater`, `logging`, `overrides`) — kept as a free-form
+        object here rather than fully modeled, since additive fields on
+        either side never require a schema change (only `schemaVersion`
+        gates compatibility).
+      required: [schemaVersion, revision, generatedAt, servers, defaultServer]
+      properties:
+        schemaVersion:
+          type: integer
+          example: 1
+        revision:
+          type: integer
+          format: int64
+          description: Assigned by the server; ignored (with a warning) if present in a submitted document
+          example: 42
+        generatedAt:
+          type: string
+          format: date-time
+          description: Assigned by the server; ignored (with a warning) if present in a submitted document
+        servers:
+          type: object
+          additionalProperties:
+            type: string
+          example: { "srv-cloud": "https://api.emly.ffois.it" }
+        defaultServer:
+          type: string
+          example: "srv-cloud"
+      additionalProperties: true
+
+    RemoteConfigRevisionStatus:
+      type: string
+      enum: [draft, published, superseded]
+
+    RemoteConfigRevisionSummary:
+      type: object
+      description: Metadata-only projection of a revision (no document body) - the rollout list.
+      properties:
+        revision:
+          type: integer
+          format: int64
+        schema_version:
+          type: integer
+        status:
+          $ref: '#/components/schemas/RemoteConfigRevisionStatus'
+        etag:
+          type: string
+        notes:
+          type: string
+          nullable: true
+        created_by:
+          type: string
+          nullable: true
+        based_on:
+          type: integer
+          format: int64
+          nullable: true
+        generated_at:
+          type: string
+          format: date-time
+        published_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        clients_on_revision:
+          type: integer
+          description: "`COUNT(*)` of updater_clients currently reporting this revision"
+
+    RemoteConfigRevision:
+      allOf:
+        - $ref: '#/components/schemas/RemoteConfigRevisionSummary'
+        - type: object
+          properties:
+            document:
+              $ref: '#/components/schemas/RemoteConfigDocument'
 
 # ─────────────────────────────────────────────────────────────
 # Paths
@@ -1958,3 +2057,478 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /v2/config:
+    get:
+      tags: [Config]
+      summary: Get the published remote configuration document
+      description: |
+        Fetched by the EMLy Updater and by EMLy on the same hosts and the same
+        auth as the updater manifest. Returns the currently published
+        `remote_config_revisions` row byte for byte (the body is written
+        straight from the stored column, never re-encoded, so it always
+        matches the `ETag`).
+
+        204, never 404, when nothing has been published yet. The
+        client treats any 4xx as an outage worth logging; 204 says
+        "reachable, nothing to give you, keep what you have" instead - the
+        same reasoning behind the updater manifest's 200 {"version": ""}.
+
+        Cache-Control:no-cache means every fetch revalidates via
+        If-None-Match; a weak validator (W/"...") or a comma-separated
+        list is accepted, since a proxy in front of a mirror may merge or
+        weaken validators.
+      security:
+        - ApiKey: []
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+          example: '"a1b2c3..."'
+      responses:
+        "200":
+          description: The published document
+          headers:
+            ETag:
+              schema:
+                type: string
+            X-Config-Revision:
+              schema:
+                type: integer
+              description: Convenience for logs/curl; not part of the client contract
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoteConfigDocument'
+        "304":
+          description: Cache is current (If-None-Match matched)
+        "204":
+          description: Reachable, nothing published yet
+        "401":
+          description: Missing or wrong API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "500":
+          description: Database error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v2/config/validate:
+    post:
+      tags: [Config]
+      summary: Validate a document without storing it
+      description: Runs the same validation a publish would (structural typing, referential integrity, override dry-run) and stores nothing. For CI pipelines and a dashboard's check button.
+      security:
+        - AdminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [document]
+              properties:
+                document:
+                  $ref: '#/components/schemas/RemoteConfigDocument'
+      responses:
+        "200":
+          description: Valid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid:
+                    type: boolean
+                    example: true
+                  warnings:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Problem'
+        "422":
+          description: Invalid - every problem found, not just the first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  problems:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Problem'
+        "401":
+          description: Missing or wrong admin key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v2/config/preview:
+    post:
+      tags: [Config]
+      summary: Preview the effective policy for a given host
+      description: |
+        Exactly one of revision (a stored revision) or document (inline,
+        validated first, never stored) is required. Returns the effective
+        document for host (global document with matching overrides
+        applied), the ids of the overrides that applied, the dcLookupMap
+        site matched (or null meaning defaultServer) and its resolver chain.
+        host.now defaults to the server clock.
+      security:
+        - AdminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                revision:
+                  type: integer
+                  format: int64
+                  nullable: true
+                document:
+                  $ref: '#/components/schemas/RemoteConfigDocument'
+                host:
+                  type: object
+                  properties:
+                    hwid:
+                      type: string
+                    hostname:
+                      type: string
+                    dc:
+                      type: string
+                    ips:
+                      type: array
+                      items:
+                        type: string
+                    domain:
+                      type: string
+                    now:
+                      type: string
+                      format: date-time
+                      nullable: true
+      responses:
+        "200":
+          description: Effective policy for the given host
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  revision:
+                    type: integer
+                    format: int64
+                  effective_document:
+                    $ref: '#/components/schemas/RemoteConfigDocument'
+                  applied_override_ids:
+                    type: array
+                    items:
+                      type: string
+                  matched_site:
+                    type: string
+                    nullable: true
+                  resolver_chain:
+                    type: array
+                    items:
+                      type: string
+        "400":
+          description: Neither or both of revision/document were given
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: Revision not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "422":
+          description: Inline document is invalid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  problems:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Problem'
+
+  /v2/config/revisions:
+    get:
+      tags: [Config]
+      summary: List revisions (metadata only, newest first)
+      security:
+        - AdminKey: []
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/RemoteConfigRevisionStatus'
+      responses:
+        "200":
+          description: Paginated revision list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  page: { type: integer }
+                  page_size: { type: integer }
+                  total: { type: integer }
+                  revisions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RemoteConfigRevisionSummary'
+    post:
+      tags: [Config]
+      summary: Create a new draft revision (optionally publishing it immediately)
+      description: |
+        document must not carry revision/generatedAt - both are
+        assigned here; a submitted value is reported as a warning, not an
+        error. Fields the schema doesn't recognize are dropped by the
+        canonical round-trip and reported as warnings too, so a typo in a
+        field name isn't silently lost. 405 on a site mirror
+        (CONFIG_UPSTREAM_URL set) - publish upstream instead.
+      security:
+        - AdminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [document]
+              properties:
+                document:
+                  $ref: '#/components/schemas/RemoteConfigDocument'
+                notes:
+                  type: string
+                  nullable: true
+                publish:
+                  type: boolean
+                  default: false
+      responses:
+        "201":
+          description: Created (and published, if requested)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RemoteConfigRevision'
+                  - type: object
+                    properties:
+                      warnings:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Problem'
+        "405":
+          description: This instance is a site mirror; publish upstream
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "413":
+          description: Document exceeds the 1 MiB size cap
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "422":
+          description: Invalid document - every problem found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  problems:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Problem'
+
+  /v2/config/revisions/{revision}:
+    get:
+      tags: [Config]
+      summary: Get one revision with its full document
+      security:
+        - AdminKey: []
+      parameters:
+        - name: revision
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: The revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoteConfigRevision'
+        "404":
+          description: Revision not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Config]
+      summary: Delete a draft revision
+      description: Only draft rows can be deleted (409 otherwise); it does not free the revision number. 405 on a site mirror.
+      security:
+        - AdminKey: []
+      parameters:
+        - name: revision
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean, example: true }
+        "404":
+          description: Revision not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "405":
+          description: This instance is a site mirror
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "409":
+          description: Only draft revisions can be deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v2/config/revisions/{revision}/publish:
+    post:
+      tags: [Config]
+      summary: Publish a draft revision
+      description: Supersedes whatever is currently published. 409 if the revision isn't a draft, or if a newer revision has been published since it was created. 405 on a site mirror.
+      security:
+        - AdminKey: []
+      parameters:
+        - name: revision
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoteConfigRevision'
+        "404":
+          description: Revision not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "405":
+          description: This instance is a site mirror
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "409":
+          description: Already published, superseded, or overtaken by a newer publish
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v2/config/rollback:
+    post:
+      tags: [Config]
+      summary: Roll back by republishing an old revision's content under a new, higher revision
+      description: |
+        The only rollback mechanism - republishing the old revision itself
+        would hand the fleet a lower number than what it already has, and
+        every client ignores it. The source content is re-validated on the
+        way, so a rule tightened since it was written surfaces here as 422
+        rather than as a fleet-wide rejection. 405 on a site mirror.
+      security:
+        - AdminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to]
+              properties:
+                to:
+                  type: integer
+                  format: int64
+                  description: Revision to clone content from (any status except draft)
+                notes:
+                  type: string
+                  nullable: true
+      responses:
+        "201":
+          description: New revision created and published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoteConfigRevision'
+        "400":
+          description: "to is required"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: Source revision not found, or is still a draft
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "405":
+          description: This instance is a site mirror
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "422":
+          description: Source revision no longer validates under the current rules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  problems:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Problem'

@@ -856,6 +856,73 @@ indietro si pubblica una versione superiore contenente il codice precedente.
 
 ---
 
+### Configurazione remota — `/v2/config` (solo v2)
+
+Un unico documento JSON, condiviso da EMLy Updater ed EMLy, che porta ogni decisione
+operativa che oggi richiederebbe una nuova release: quali server esistono, la mappa
+DC → subnet, freeze di sito, logging debug su una macchina, canale beta pilota. Vedi
+`docs/superpowers/specs/2026-09-04-remote-config-api-design.md` (questo repo) e
+`emly-updater/docs/superpowers/specs/2026-09-04-remote-config-design.md` (schema e
+regole del client) per il design completo.
+
+#### `GET /v2/config` — `X-API-Key`
+
+Ritorna il documento attualmente pubblicato, byte per byte, con un `ETag` forte
+(SHA-256 esadecimale del contenuto). Onora `If-None-Match` (anche `W/"..."`, anche una
+lista separata da virgole) rispondendo `304`.
+
+**Niente pubblicato — `204`, mai `404`**: stesso ragionamento del manifest updater. Un
+`404` per il client significa "questa rotta non esiste qui", mentre `204` significa
+"raggiungibile, niente da darti, tieni quello che hai" — nessun evento di outage lato
+fleet.
+
+#### `POST /v2/config/validate` — `X-Admin-Key`
+
+Valida un documento (stesse regole di un publish) senza salvarlo nulla. Risponde
+`200 {"valid": true, "warnings": [...]}` oppure `422` con la lista completa dei problemi
+(non solo il primo), ciascuno con un `path` in stile JSON-pointer.
+
+#### `GET|POST /v2/config/revisions` — `X-Admin-Key`
+
+`GET` lista le revisioni (solo metadati, non il documento) in ordine decrescente,
+paginata (`page`, `page_size`, opzionale `status=draft|published|superseded`), con
+`clients_on_revision` per vedere il rollout senza una telemetria dedicata.
+
+`POST` crea una nuova revisione in stato `draft`. Il documento **non deve** contenere
+`revision`/`generatedAt` — sono assegnati dal server; se presenti vengono ignorati e
+segnalati come warning (non un errore). `{"publish": true}` la pubblica nella stessa
+transazione. `405` se questa istanza è un mirror di sede (`CONFIG_UPSTREAM_URL`
+impostata) — in quel caso si pubblica sull'istanza a monte.
+
+#### `GET|DELETE /v2/config/revisions/{revision}` — `X-Admin-Key`
+
+`GET` ritorna la revisione con il documento completo. `DELETE` funziona solo su una
+`draft` (`409` altrimenti) e non libera il numero di revisione.
+
+#### `POST /v2/config/revisions/{revision}/publish` — `X-Admin-Key`
+
+Pubblica una draft, retrocedendo atomicamente quella corrente. `409` se non è una draft,
+o se nel frattempo è stata pubblicata una revisione più recente.
+
+#### `POST /v2/config/rollback` — `X-Admin-Key`
+
+```json
+{ "to": 41, "notes": "2.1.3 verificata, tolgo il freeze" }
+```
+
+Unico modo per tornare indietro: clona il contenuto della revisione 41 in una **nuova**
+revisione (numero più alto) e la pubblica. Ripubblicare la 41 stessa darebbe alla fleet
+un numero più basso di quello che ha già, e ogni client lo ignorerebbe.
+
+#### `POST /v2/config/preview` — `X-Admin-Key`
+
+Dato un host (hwid, hostname, dc, ips, domain, opzionale `now`), ritorna il documento
+effettivo (globale + override applicati), gli id degli override che hanno contribuito, il
+sito di `dcLookupMap` risolto e la sua catena di server. Utile per rispondere "se
+pubblico questo, cosa vede davvero la sede X" prima di premere publish.
+
+---
+
 ### Modello `BugReport`
 
 ```json

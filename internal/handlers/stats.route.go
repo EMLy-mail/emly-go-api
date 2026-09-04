@@ -96,13 +96,29 @@ func GetStatsSummary(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
+		// clients_by_config_revision answers "has the fleet picked up
+		// revision N yet" from the same client rows GET /v2/config already
+		// updates on every fetch (API design doc §8) - no new telemetry.
+		type revisionCount struct {
+			ConfigRevision *int64 `db:"config_revision" json:"config_revision"`
+			Count          int    `db:"count"           json:"count"`
+		}
+		var clientsByConfigRevision []revisionCount
+		if err := db.SelectContext(r.Context(), &clientsByConfigRevision,
+			`SELECT config_revision, COUNT(*) AS count FROM updater_clients GROUP BY config_revision`,
+		); err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to group clients by config revision")
+			return
+		}
+
 		jsonOK(w, map[string]interface{}{
-			"total_clients":      totalClients,
-			"connected_clients":  connectedClients,
-			"window_minutes":     windowMinutes,
-			"product":            product,
-			"events_last_24h":    eventsLast24h,
-			"clients_by_version": clientsByVersion,
+			"total_clients":              totalClients,
+			"connected_clients":          connectedClients,
+			"window_minutes":             windowMinutes,
+			"product":                    product,
+			"events_last_24h":            eventsLast24h,
+			"clients_by_version":         clientsByVersion,
+			"clients_by_config_revision": clientsByConfigRevision,
 		})
 	}
 }

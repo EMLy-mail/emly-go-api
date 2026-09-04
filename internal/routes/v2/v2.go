@@ -15,8 +15,10 @@ import (
 // NewRouter returns a chi.Router with all /v2 routes mounted. apiFileS3conn
 // backs bug-report file attachments and updatesS3conn backs update-release
 // installers; the two are independent connectors and may live on different
-// S3-compatible providers.
-func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector) http.Handler {
+// S3-compatible providers. configMirror is non-nil only on a site mirror
+// (CONFIG_UPSTREAM_URL set) and adds its replication state to /v2/health;
+// pass nil on the cloud/primary instance and in tests.
+func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror handlers.ConfigMirrorReporter) http.Handler {
 	r := chi.NewRouter()
 
 	rl := emlyMiddleware.NewRateLimiter(config.Load())
@@ -31,10 +33,11 @@ func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector) h
 		})
 	})
 
-	r.Get("/health", handlers.Health(db))
+	r.Get("/health", handlers.HealthWithConfigMirror(db, configMirror))
 
 	registerUpdates(r, db, updatesS3conn, config.Load().UpdatesS3Prefix, config.Load().UpdaterS3Prefix)
 	registerStats(r, db)
+	registerConfig(r, db, config.Load())
 
 	r.Route("/api", func(r chi.Router) {
 		registerAdmin(r, db)

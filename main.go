@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"emly-api-go/internal/config"
+	"emly-api-go/internal/configmirror"
 	"emly-api-go/internal/database"
 	"emly-api-go/internal/database/schema"
 	emlyMiddleware "emly-api-go/internal/middleware"
@@ -153,6 +154,14 @@ func main() {
 		}
 	}
 
+	// Background loop that replicates /v2/config from CONFIG_UPSTREAM_URL
+	// when this instance is a site mirror; a no-op State on the cloud/
+	// primary instance (config.Load().ConfigUpstreamURL == ""). Stopped via
+	// backgroundCancel during graceful shutdown below.
+	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
+	defer backgroundCancel()
+	configMirrorState := configmirror.Start(backgroundCtx, db, cfg)
+
 	r := chi.NewRouter()
 
 	r.Use(chiMiddleware.RequestID)
@@ -172,7 +181,7 @@ func main() {
 	rl := emlyMiddleware.NewRateLimiter(cfg)
 	r.Use(rl.Handler)
 
-	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn)
+	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
@@ -193,6 +202,8 @@ func main() {
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	sig := <-quit
 	slog.Info("shutdown signal received", "signal", sig.String())
+
+	backgroundCancel()
 
 	ctxShut, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
