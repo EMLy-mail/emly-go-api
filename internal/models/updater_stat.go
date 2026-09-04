@@ -4,6 +4,7 @@ import "time"
 
 type UpdaterClient struct {
 	ID             int       `db:"id"              json:"id"`
+	HWID           *string   `db:"hwid"            json:"hwid,omitempty"`
 	Hostname       string    `db:"hostname"        json:"hostname"`
 	ADDomain       string    `db:"ad_domain"        json:"ad_domain"`
 	UpdaterVersion *string   `db:"updater_version"  json:"updater_version,omitempty"`

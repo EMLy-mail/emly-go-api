@@ -45,6 +45,7 @@ func AccessLog(next http.Handler) http.Handler {
 
 		adDomain := r.Header.Get("X-EMLy-ADDomain")
 		hostName := r.Header.Get("X-EMLy-Hostname")
+		hwid := r.Header.Get("X-EMLy-HWID")
 
 		// Log AD domain and hostname as separate fields to avoid escaping
 		// characters like backslashes inside the user_agent field.
@@ -62,6 +63,9 @@ func AccessLog(next http.Handler) http.Handler {
 		}
 		if hostName != "" {
 			args = append(args, "host_name", hostName)
+		}
+		if hwid != "" {
+			args = append(args, "hwid", hwid)
 		}
 		slog.InfoContext(r.Context(), "request", args...)
 	})

@@ -67,5 +67,13 @@
         { "type": "column_not_exists", "table": "updater_events", "column": "product" }
       ]
     }
+    ,{
+      "id": "9_updater_clients_hwid",
+      "sql_file": "9_updater_clients_hwid.sql",
+      "description": "Add hwid column to updater_clients so clients sending X-EMLy-HWID are identified by that instead of hostname/ad_domain, with the old hostname-based identification kept as a fallback for clients that don't send it yet.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "updater_clients", "column": "hwid" }
+      ]
+    }
   ]
 }

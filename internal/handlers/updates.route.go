@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -55,39 +57,37 @@ func clientIPFromRequest(r *http.Request) string {
 
 // recordUpdaterEvent best-effort persists an EMLy Updater client sighting and
 // operation event. It never fails the caller's HTTP response - a client
-// missing the identifying header is silently skipped, and DB errors are only
-// logged, since this is telemetry on a client-facing path.
+// missing every identifying header is silently skipped, and DB errors are
+// only logged, since this is telemetry on a client-facing path.
+//
+// Clients are identified by the X-EMLy-HWID header when present - it survives
+// hostname renames/AD domain changes better than the old (hostname, ad_domain)
+// pair. Clients that don't send it yet (not upgraded, or HWID unavailable on
+// the machine) fall back to that old hostname-based identification, so both
+// coexist during the rollout; a legacy row picks up its hwid the first time
+// that same hostname/ad_domain shows up with the header set.
 //
 // product is productEMLy for traffic about the EMLy app and productUpdater for
 // the updater's own self-update, so the two never get mixed in fleet stats.
 func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, eventType, product, version string) {
+	hwid := r.Header.Get("X-EMLy-HWID")
 	hostname := r.Header.Get("X-EMLy-Hostname")
-	if hostname == "" {
+	if hwid == "" && hostname == "" {
 		return
 	}
 	adDomain := r.Header.Get("X-EMLy-ADDomain")
 	uaVersion, contact := parseUpdaterUserAgent(r.UserAgent())
 	ip := clientIPFromRequest(r)
 
-	res, err := db.ExecContext(ctx,
-		`INSERT INTO updater_clients (hostname, ad_domain, updater_version, contact, last_ip)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON DUPLICATE KEY UPDATE
-		     updater_version = VALUES(updater_version),
-		     contact = VALUES(contact),
-		     last_ip = VALUES(last_ip),
-		     last_seen_at = CURRENT_TIMESTAMP,
-		     id = LAST_INSERT_ID(id)`,
-		hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
-	)
-	if err != nil {
-		slog.WarnContext(ctx, "updater stats: failed to upsert client", "error", err)
-		return
+	if hwid == "" {
+		// Legacy fallback: no HWID header, identify by hostname + ad_domain
+		// as before.
+		slog.WarnContext(ctx, "updater stats: missing X-EMLy-HWID header; using legacy hostname/ad_domain identification", "ip", nullableString(ip), "hostname", nullableString(hostname), "ad_domain", nullableString(adDomain))
 	}
 
-	clientID, err := res.LastInsertId()
+	clientID, err := upsertUpdaterClient(ctx, db, hwid, hostname, adDomain, uaVersion, contact, ip)
 	if err != nil {
-		slog.WarnContext(ctx, "updater stats: failed to resolve client id", "error", err)
+		slog.WarnContext(ctx, "updater stats: failed to upsert client", "error", err)
 		return
 	}
 
@@ -97,6 +97,96 @@ func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, event
 	); err != nil {
 		slog.WarnContext(ctx, "updater stats: failed to record event", "error", err)
 	}
+}
+
+// upsertUpdaterClient records one client sighting and returns its row id.
+//
+// updater_clients carries two independent unique keys - uniq_hwid and the
+// legacy uniq_client (hostname, ad_domain) - so a blind
+// INSERT/UPDATE ... ON DUPLICATE KEY UPDATE is unsafe here: whenever a
+// single statement writes both a hwid and a (hostname, ad_domain) pair,
+// either one can belong to a *different*, already-existing row (a hostname
+// reused after reimage with a rotated hwid; a machine that reports under an
+// incomplete header set once and the full set the next time; hand-testing
+// with mismatched headers). MySQL then fails the whole statement with a
+// duplicate-key error instead of merging anything.
+//
+// This resolves it in three explicit steps instead of one implicit one:
+//  1. find the target row - by hwid if given, else by (hostname, ad_domain);
+//  2. delete any *other* row that currently squats on the (hostname,
+//     ad_domain) pair we're about to write into the target (or into a fresh
+//     row) - hwid is the authoritative identity once present, so a stale row
+//     merely holding that hostname is superseded and its (best-effort,
+//     non-authoritative) history can be dropped along with it;
+//  3. update the target row by id, or insert a fresh one.
+// Every write after step 2 targets a single row with no remaining unique
+// value collision possible.
+func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, hwid, hostname, adDomain, uaVersion, contact, ip string) (int64, error) {
+	lookup := func(query string, args ...interface{}) (int64, bool, error) {
+		var id int64
+		err := db.GetContext(ctx, &id, query, args...)
+		switch {
+		case err == nil:
+			return id, true, nil
+		case errors.Is(err, sql.ErrNoRows):
+			return 0, false, nil
+		default:
+			return 0, false, err
+		}
+	}
+
+	var targetID int64
+	var haveTarget bool
+	var err error
+
+	if hwid != "" {
+		targetID, haveTarget, err = lookup(`SELECT id FROM updater_clients WHERE hwid = ?`, hwid)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if !haveTarget && hostname != "" {
+		targetID, haveTarget, err = lookup(
+			`SELECT id FROM updater_clients WHERE hostname = ? AND ad_domain = ?`, hostname, adDomain)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	if hostname != "" {
+		deleteQuery := `DELETE FROM updater_clients WHERE hostname = ? AND ad_domain = ?`
+		deleteArgs := []interface{}{hostname, adDomain}
+		if haveTarget {
+			deleteQuery += ` AND id != ?`
+			deleteArgs = append(deleteArgs, targetID)
+		}
+		if _, err := db.ExecContext(ctx, deleteQuery, deleteArgs...); err != nil {
+			return 0, err
+		}
+	}
+
+	if haveTarget {
+		if _, err := db.ExecContext(ctx,
+			`UPDATE updater_clients
+			 SET hwid = COALESCE(NULLIF(?, ''), hwid), hostname = ?, ad_domain = ?,
+			     updater_version = ?, contact = ?, last_ip = ?, last_seen_at = CURRENT_TIMESTAMP
+			 WHERE id = ?`,
+			hwid, hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip), targetID,
+		); err != nil {
+			return 0, err
+		}
+		return targetID, nil
+	}
+
+	res, err := db.ExecContext(ctx,
+		`INSERT INTO updater_clients (hwid, hostname, ad_domain, updater_version, contact, last_ip)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		nullableString(hwid), hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
 func nullableString(s string) *string {

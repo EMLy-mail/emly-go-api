@@ -111,6 +111,7 @@ DB_DSN=root:secret@tcp(127.0.0.1:3306)/emly?parseTime=true&loc=UTC
 
 Other notable vars (see `.env.example` for full list + defaults):
 - DB pool: `DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_CONNS`, `DB_CONN_MAX_LIFETIME`
+- Logging: `LOG_LEVEL` (`debug`/`info`/`warn`/`error`, default `info`) — sets the `slog` handler level for both the plain and OTel-forwarded log paths
 - Auth extras: `DASHBOARD_KEY` (rate-limit bypass)
 - Rate limiting: `RL_UNAUTH_*` and `RL_AUTH_*` (`MAX_REQS`, `WINDOW`, `MAX_FAILS`, `BAN_DUR`)
 - Storage — API file bucket: `USE_S3_API_FILE_STORAGE`, `S3_API_FILE_ACCESS_KEY_ID`, `S3_API_FILE_SECRET_ACCESS_KEY`, `S3_API_FILE_BUCKET`, `S3_API_FILE_REGION`, `S3_API_FILE_ENDPOINT`, `S3_API_FILE_ACCOUNT_ID` (optional, R2 endpoint shortcut)
