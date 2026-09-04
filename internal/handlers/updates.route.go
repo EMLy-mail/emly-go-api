@@ -480,7 +480,13 @@ func DownloadRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) 
 
 		io.Copy(w, rc) //nolint:errcheck
 
-		recordUpdaterEvent(r.Context(), db, r, "download", productEMLy, version)
+		// See the identical comment in DownloadUpdater: the client closing the
+		// connection right after the last byte races r.Context()'s
+		// cancellation against this bookkeeping write, so it must not depend
+		// on that context living past the response.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer cancel()
+		recordUpdaterEvent(ctx, db, r, "download", productEMLy, version)
 	}
 }
 

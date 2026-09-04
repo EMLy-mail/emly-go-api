@@ -152,7 +152,15 @@ func DownloadUpdater(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) 
 
 		io.Copy(w, rc) //nolint:errcheck
 
-		recordUpdaterEvent(r.Context(), db, r, "download", productUpdater, version)
+		// The client typically closes the connection the instant it has read
+		// the last byte, which cancels r.Context() concurrently with (or just
+		// before) this bookkeeping call - r.Context() would then fail every
+		// write with "context canceled" and this download would never be
+		// recorded. Detach from that cancellation but keep a bound so a stuck
+		// DB doesn't leak the goroutine.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer cancel()
+		recordUpdaterEvent(ctx, db, r, "download", productUpdater, version)
 	}
 }
 
