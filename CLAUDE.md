@@ -18,10 +18,13 @@ go run .
 go run . --migrate-files
 
 # Tests: the updater self-update contract (routing in internal/routes/v2,
-# manifest wire format + input sanitizing in internal/handlers) and the
+# manifest wire format + input sanitizing in internal/handlers), the
 # remote-config document (validation, override matching, canonical form in
 # internal/remoteconfig; auth gating + a nil-DB-safe subset of handlers in
-# internal/routes/v2 and internal/handlers)
+# internal/routes/v2 and internal/handlers), the stats event bus
+# (internal/statshub), and the stats WS stream (routing + admin-key gating
+# in internal/routes/v2; auth gating, the query-string key fallback, and a
+# full ping/pong handshake over a real listener in internal/handlers)
 go test ./...
 go test ./internal/... -run TestName -v
 ```
@@ -67,7 +70,7 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - `admin/auth`: session login/validate/logout (`/login` is rate-limited; `/validate` + `/logout` require a session token).
 - `admin/users`: admin-key-protected user CRUD + password reset.
 
-**v2** (`/v2/...`): everything in v1 plus `updates/` — public update manifest + release download, and admin-key-protected release management (`update_releases` table). The same `updates/` group also carries the EMLy Updater's **self-update** surface (`updater.route.go`, `updater_releases` table): an API-key-protected manifest (`GET /manifest/updater`), a public installer download (`GET /download/updater/{version}`), and admin-key-protected release management (`updater/releases`). v2 also carries `config/` (`config.route.go`, `remote_config_revisions` table) — the fleet-wide policy document served to the EMLy Updater and EMLy: an API-key-protected `GET /config`, and admin-key-protected `validate`/`preview`/`revisions` (list/get/create/delete)/`revisions/{revision}/publish`/`rollback`. See `docs/superpowers/specs/2026-09-04-remote-config-api-design.md`.
+**v2** (`/v2/...`): everything in v1 plus `updates/` — public update manifest + release download, and admin-key-protected release management (`update_releases` table). The same `updates/` group also carries the EMLy Updater's **self-update** surface (`updater.route.go`, `updater_releases` table): an API-key-protected manifest (`GET /manifest/updater`), a public installer download (`GET /download/updater/{version}`), and admin-key-protected release management (`updater/releases`). v2 also carries `config/` (`config.route.go`, `remote_config_revisions` table) — the fleet-wide policy document served to the EMLy Updater and EMLy: an API-key-protected `GET /config`, and admin-key-protected `validate`/`preview`/`revisions` (list/get/create/delete)/`revisions/{revision}/publish`/`rollback`. See `docs/superpowers/specs/2026-09-04-remote-config-api-design.md`. v2 also carries `stats/` (`stats.route.go`): admin-key-protected `summary`/`clients`/`clients/{id}`/`events`, plus their real-time counterpart `GET /stats/stream` (`stats_stream.route.go`) — a WebSocket upgrade that checks `X-Admin-Key` itself (with a `?admin_key=` query fallback) before completing the handshake, then pushes `stats:summary`/`stats:clients`/`stats:events` snapshots and updates as `updater_events` are ingested and on a periodic tick. See `docs/superpowers/specs/2026-09-04-websocket-stats-stream-design.md`.
 
 ### Rate limiting — two layers
 
@@ -87,6 +90,7 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - `internal/models/` — Structs with `db:` and `json:` tags. Sensitive fields use `json:"-"`.
 - `internal/remoteconfig/` — HTTP- and DB-free: the `/v2/config` document type, `Parse` (validation, same rules the EMLy Updater client applies), `Match`/`Effective`/`ResolveSite` (override evaluation), `Canonical` (deterministic serialization + `ETag`). No dependency on `internal/handlers` or `internal/models`; `internal/handlers/config.route.go` and `internal/configmirror` are its only callers.
 - `internal/configmirror/` — Background loop for a site mirror (`CONFIG_UPSTREAM_URL` set): polls upstream `/v2/config`, validates with `remoteconfig.Parse`, and stores the bytes as received under the upstream's own revision/etag. A no-op `State` (nothing started) when `CONFIG_UPSTREAM_URL` is empty.
+- `internal/statshub/` — HTTP- and DB-free like `internal/remoteconfig`: an in-process `Hub` (pub/sub, `Subscribe`/`Publish`/`Active`) that fans updater-event and periodic-tick notifications out to every open `GET /v2/stats/stream` connection. Single-instance only by design (no Postgres LISTEN/NOTIFY or Redis in this stack) — see the package doc. `internal/handlers` (`recordUpdaterEvent`, `stats_stream.route.go`) is its only caller; `main.go` constructs the one `Hub` and runs its tick loop.
 
 ### Handler conventions
 
@@ -126,6 +130,7 @@ Other notable vars (see `.env.example` for full list + defaults):
 - Telemetry: `OTEL_ENABLED`, `OTEL_ENDPOINT`
 - Updates: `UPDATES_ENABLED`, `S3_UPDATES_PREFIX` (path prefix inside the updates bucket; manifest download links are built from the request's `Host`/`X-Forwarded-*` headers, not an env var), `S3_UPDATER_PREFIX` (default `updater`; separate prefix in the same updates bucket for the EMLy Updater's own installers)
 - Remote config: `CONFIG_UPSTREAM_URL` (empty on the cloud/primary instance; set on a site mirror to replicate `/v2/config` from upstream instead of accepting writes), `CONFIG_UPSTREAM_INTERVAL` (default `5m`), `CONFIG_UPSTREAM_API_KEY` (defaults to this instance's own `API_KEY`)
+- Real-time stats: `STATS_STREAM_TICK_INTERVAL` (default `30s`) — how often `GET /v2/stats/stream` pushes a resync tick to connected dashboards independent of any new `updater_events` row
 
 ### Adding new environment variables
 

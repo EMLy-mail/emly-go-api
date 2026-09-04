@@ -21,6 +21,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"emly-api-go/internal/models"
+	"emly-api-go/internal/statshub"
 	"emly-api-go/internal/storage"
 	"emly-api-go/internal/timing"
 )
@@ -69,7 +70,13 @@ func clientIPFromRequest(r *http.Request) string {
 //
 // product is productEMLy for traffic about the EMLy app and productUpdater for
 // the updater's own self-update, so the two never get mixed in fleet stats.
-func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, eventType, product, version string) {
+//
+// hub may be nil (tests, or a caller that doesn't care about the stats WS
+// stream); when non-nil, a successfully recorded event is also published for
+// GET /v2/stats/stream (docs/superpowers/specs/2026-09-04-websocket-stats-stream-design.md
+// §6.1). The extra client-row fetch that publish needs only runs when
+// hub.Active() - a quiet server with no dashboard connected pays nothing.
+func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, hub *statshub.Hub, eventType, product, version string) {
 	hwid := r.Header.Get("X-EMLy-HWID")
 	hostname := r.Header.Get("X-EMLy-Hostname")
 	if hwid == "" && hostname == "" {
@@ -91,12 +98,42 @@ func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, event
 		return
 	}
 
-	if _, err := db.ExecContext(ctx,
+	eventVersion := nullableString(version)
+	eventIP := nullableString(ip)
+	res, err := db.ExecContext(ctx,
 		`INSERT INTO updater_events (client_id, event_type, product, version, ip_address) VALUES (?, ?, ?, ?, ?)`,
-		clientID, eventType, product, nullableString(version), nullableString(ip),
-	); err != nil {
+		clientID, eventType, product, eventVersion, eventIP,
+	)
+	if err != nil {
 		slog.WarnContext(ctx, "updater stats: failed to record event", "error", err)
+		return
 	}
+
+	if hub == nil || !hub.Active() {
+		return
+	}
+	eventID, err := res.LastInsertId()
+	if err != nil {
+		return
+	}
+	var client models.UpdaterClient
+	if err := db.GetContext(ctx, &client, `SELECT * FROM updater_clients WHERE id = ?`, clientID); err != nil {
+		slog.WarnContext(ctx, "updater stats: failed to fetch client for stream publish", "error", err)
+		return
+	}
+	hub.Publish(statshub.Event{
+		Kind:   statshub.EventKindUpdaterEvent,
+		Client: &client,
+		EventEntry: &models.UpdaterEvent{
+			ID:        eventID,
+			ClientID:  int(clientID),
+			EventType: eventType,
+			Product:   product,
+			Version:   eventVersion,
+			IPAddress: eventIP,
+			CreatedAt: time.Now().UTC(),
+		},
+	})
 }
 
 // upsertUpdaterClient records one client sighting and returns its row id.
@@ -119,6 +156,7 @@ func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, event
 //     merely holding that hostname is superseded and its (best-effort,
 //     non-authoritative) history can be dropped along with it;
 //  3. update the target row by id, or insert a fresh one.
+//
 // Every write after step 2 targets a single row with no remaining unique
 // value collision possible.
 func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, hwid, hostname, adDomain, uaVersion, contact, ip string) (int64, error) {
@@ -238,7 +276,7 @@ func requestBaseURL(r *http.Request) string {
 	return scheme + "://" + host
 }
 
-func GetUpdateManifest(db *sqlx.DB) http.HandlerFunc {
+func GetUpdateManifest(db *sqlx.DB, hub *statshub.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		slog.DebugContext(r.Context(), "manifest request",
 			"method", r.Method,
@@ -261,7 +299,7 @@ func GetUpdateManifest(db *sqlx.DB) http.HandlerFunc {
 		jsonOK(w, manifest)
 
 		uaVersion, _ := parseUpdaterUserAgent(r.UserAgent())
-		recordUpdaterEvent(r.Context(), db, r, "manifest_check", productEMLy, uaVersion)
+		recordUpdaterEvent(r.Context(), db, r, hub, "manifest_check", productEMLy, uaVersion)
 	}
 }
 
@@ -441,7 +479,7 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 	}
 }
 
-func DownloadRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) http.HandlerFunc {
+func DownloadRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string, hub *statshub.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s3conn == nil {
 			jsonError(w, http.StatusServiceUnavailable, "S3 storage is not configured")
@@ -486,7 +524,7 @@ func DownloadRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) 
 		// on that context living past the response.
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 		defer cancel()
-		recordUpdaterEvent(ctx, db, r, "download", productEMLy, version)
+		recordUpdaterEvent(ctx, db, r, hub, "download", productEMLy, version)
 	}
 }
 

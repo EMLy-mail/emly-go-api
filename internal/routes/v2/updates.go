@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"emly-api-go/internal/handlers"
+	"emly-api-go/internal/statshub"
 	"emly-api-go/internal/storage"
 
 	"github.com/go-chi/chi/v5"
@@ -14,13 +15,15 @@ import (
 
 // registerUpdates mounts both update surfaces on the shared updates bucket:
 // the EMLy client manifest/releases under s3Prefix, and the EMLy Updater's own
-// self-update manifest/installer under updaterPrefix.
-func registerUpdates(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix, updaterPrefix string) {
+// self-update manifest/installer under updaterPrefix. hub may be nil; it is
+// only used to publish updater_events for /v2/stats/stream (recordUpdaterEvent
+// tolerates nil).
+func registerUpdates(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix, updaterPrefix string, hub *statshub.Hub) {
 	r.Route("/updates", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(httprate.LimitByIP(30, time.Minute))
-			r.Get("/manifest", handlers.GetUpdateManifest(db))
-			r.Get("/releases/{version}/download", handlers.DownloadRelease(db, s3conn, s3Prefix))
+			r.Get("/manifest", handlers.GetUpdateManifest(db, hub))
+			r.Get("/releases/{version}/download", handlers.DownloadRelease(db, s3conn, s3Prefix, hub))
 		})
 
 		r.Group(func(r chi.Router) {
@@ -42,7 +45,7 @@ func registerUpdates(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, s3P
 			r.Use(apimw.APIKeyAuth(db))
 			r.Use(httprate.LimitByIP(30, time.Minute))
 
-			r.Get("/manifest/updater", handlers.GetUpdaterManifest(db))
+			r.Get("/manifest/updater", handlers.GetUpdaterManifest(db, hub))
 		})
 
 		// The installer download stays public, like the EMLy release download:
@@ -51,7 +54,7 @@ func registerUpdates(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, s3P
 		r.Group(func(r chi.Router) {
 			r.Use(httprate.LimitByIP(30, time.Minute))
 
-			r.Get("/download/updater/{version}", handlers.DownloadUpdater(db, s3conn, updaterPrefix))
+			r.Get("/download/updater/{version}", handlers.DownloadUpdater(db, s3conn, updaterPrefix, hub))
 		})
 
 		r.Group(func(r chi.Router) {

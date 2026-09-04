@@ -26,7 +26,7 @@ func TestUpdaterRoutesResolve(t *testing.T) {
 	// nil db and nil S3 connectors: auth middleware reads keys from config,
 	// and the download/management handlers reject a nil connector with 503
 	// before touching either dependency.
-	router := NewRouter(nil, nil, nil, nil)
+	router := NewRouter(nil, nil, nil, nil, nil)
 
 	cases := []struct {
 		name    string
@@ -100,7 +100,7 @@ func TestUpdaterRoutesResolve(t *testing.T) {
 // implement the endpoint yet" and makes it stop silently. An authenticated
 // request must therefore never be answered with 404 by the router itself.
 func TestUpdaterManifestRouteIsNot404(t *testing.T) {
-	router := NewRouter(nil, nil, nil, nil)
+	router := NewRouter(nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/updates/manifest/updater", nil)
 	req.Header.Set("X-API-Key", "test-api-key")

@@ -41,28 +41,29 @@ type OtelConfig struct {
 }
 
 type Config struct {
-	Port                   string
-	DSN                    string
-	Database               string
-	APIKey                 string
-	AdminKey               string
-	DashboardKey           string
-	LogLevel               string
-	MaxOpenConns           int
-	MaxIdleConns           int
-	ConnMaxLifetime        int
-	UpdatesEnabled         bool
-	UpdatesS3Prefix        string
-	UpdaterS3Prefix        string
-	ConfigUpstreamURL      string
-	ConfigUpstreamInterval time.Duration
-	ConfigUpstreamAPIKey   string
-	UseS3APIFileStorage    bool
-	UseS3UpdatesStorage    bool
-	RateLimit              RateLimitConfig
-	S3APIFile              S3BucketConfig
-	S3Updates              S3BucketConfig
-	Otel                   OtelConfig
+	Port                    string
+	DSN                     string
+	Database                string
+	APIKey                  string
+	AdminKey                string
+	DashboardKey            string
+	LogLevel                string
+	MaxOpenConns            int
+	MaxIdleConns            int
+	ConnMaxLifetime         int
+	UpdatesEnabled          bool
+	UpdatesS3Prefix         string
+	UpdaterS3Prefix         string
+	ConfigUpstreamURL       string
+	ConfigUpstreamInterval  time.Duration
+	ConfigUpstreamAPIKey    string
+	StatsStreamTickInterval time.Duration
+	UseS3APIFileStorage     bool
+	UseS3UpdatesStorage     bool
+	RateLimit               RateLimitConfig
+	S3APIFile               S3BucketConfig
+	S3Updates               S3BucketConfig
+	Otel                    OtelConfig
 }
 
 var (
@@ -133,19 +134,19 @@ func load() *Config {
 	}
 
 	return &Config{
-		Port:                   port,
-		DSN:                    os.Getenv("DB_DSN"),
-		Database:               dbName,
-		APIKey:                 apiKey,
-		AdminKey:               adminKey,
-		DashboardKey:           os.Getenv("DASHBOARD_KEY"),
-		LogLevel:               strings.ToLower(strings.TrimSpace(envString("LOG_LEVEL", "info"))),
-		MaxOpenConns:           maxOpenConns,
-		MaxIdleConns:           maxIdleConns,
-		ConnMaxLifetime:        connMaxLifetime,
-		UpdatesEnabled:         strings.ToLower(strings.TrimSpace(os.Getenv("UPDATES_ENABLED"))) == "true",
-		UpdatesS3Prefix:        strings.Trim(os.Getenv("S3_UPDATES_PREFIX"), "/"),
-		UpdaterS3Prefix:        strings.Trim(envString("S3_UPDATER_PREFIX", "updater"), "/"),
+		Port:            port,
+		DSN:             os.Getenv("DB_DSN"),
+		Database:        dbName,
+		APIKey:          apiKey,
+		AdminKey:        adminKey,
+		DashboardKey:    os.Getenv("DASHBOARD_KEY"),
+		LogLevel:        strings.ToLower(strings.TrimSpace(envString("LOG_LEVEL", "info"))),
+		MaxOpenConns:    maxOpenConns,
+		MaxIdleConns:    maxIdleConns,
+		ConnMaxLifetime: connMaxLifetime,
+		UpdatesEnabled:  strings.ToLower(strings.TrimSpace(os.Getenv("UPDATES_ENABLED"))) == "true",
+		UpdatesS3Prefix: strings.Trim(os.Getenv("S3_UPDATES_PREFIX"), "/"),
+		UpdaterS3Prefix: strings.Trim(envString("S3_UPDATER_PREFIX", "updater"), "/"),
 		// ConfigUpstreamURL, empty on the cloud instance, marks this instance
 		// as a site mirror for /v2/config: its admin routes refuse writes and
 		// a background loop replicates the published document from upstream
@@ -155,8 +156,13 @@ func load() *Config {
 		ConfigUpstreamURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("CONFIG_UPSTREAM_URL")), "/"),
 		ConfigUpstreamInterval: envDuration("CONFIG_UPSTREAM_INTERVAL", 5*time.Minute),
 		ConfigUpstreamAPIKey:   envString("CONFIG_UPSTREAM_API_KEY", apiKey),
-		UseS3APIFileStorage:    strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_API_FILE_STORAGE"))) == "true",
-		UseS3UpdatesStorage:    strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_UPDATES_STORAGE"))) == "true",
+		// StatsStreamTickInterval is the periodic resync tick for
+		// GET /v2/stats/stream (design doc §6.2/§7): independent of any
+		// updater_events ingest, it keeps time-derived fields like
+		// connected_clients fresh on a connection that's been open a while.
+		StatsStreamTickInterval: envDuration("STATS_STREAM_TICK_INTERVAL", 30*time.Second),
+		UseS3APIFileStorage:     strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_API_FILE_STORAGE"))) == "true",
+		UseS3UpdatesStorage:     strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_UPDATES_STORAGE"))) == "true",
 		Otel: OtelConfig{
 			Enabled:  strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_ENABLED"))) == "true",
 			Endpoint: envString("OTEL_ENDPOINT", "http://localhost:4318"),

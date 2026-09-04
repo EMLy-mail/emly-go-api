@@ -4,6 +4,7 @@ import (
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/handlers"
 	apimw "emly-api-go/internal/middleware"
+	"emly-api-go/internal/statshub"
 	"net/http"
 	"time"
 
@@ -20,8 +21,10 @@ import (
 // and updatesS3conn are independent connectors — each may be nil, and each
 // may point at a bucket on a different S3-compatible host/service/provider.
 // configMirror is non-nil only on a site mirror (CONFIG_UPSTREAM_URL set);
-// pass nil on the cloud/primary instance.
-func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror handlers.ConfigMirrorReporter) {
+// pass nil on the cloud/primary instance. statsHub feeds /v2/stats/stream;
+// pass nil to run without the real-time stats stream (it degrades to
+// snapshots-only, see statshub).
+func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror handlers.ConfigMirrorReporter, statsHub *statshub.Hub) {
 	dbName := config.Load().Database
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +35,7 @@ func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storag
 	})
 
 	r.Mount("/v1", v1.NewRouter(db, apiFileS3conn))
-	r.Mount("/v2", v2.NewRouter(db, apiFileS3conn, updatesS3conn, configMirror))
+	r.Mount("/v2", v2.NewRouter(db, apiFileS3conn, updatesS3conn, configMirror, statsHub))
 	// Redirect /health to /v1/health
 	r.Get("/health", handlers.Health(db))
 

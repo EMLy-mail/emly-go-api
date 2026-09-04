@@ -12,7 +12,7 @@ import (
 // admin route is admin-key gated, and none of it 404s for lack of a DB -
 // nil db and nil configMirror are enough to prove routing/auth alone.
 func TestConfigRoutesAuthGating(t *testing.T) {
-	router := NewRouter(nil, nil, nil, nil)
+	router := NewRouter(nil, nil, nil, nil, nil)
 
 	cases := []struct {
 		name   string
@@ -51,7 +51,7 @@ func TestConfigRoutesAuthGating(t *testing.T) {
 // handler's own 204/200 decision, not routing, is what tells the client
 // "nothing published" apart from "not implemented here".
 func TestConfigRouteIsNot404(t *testing.T) {
-	router := NewRouter(nil, nil, nil, nil)
+	router := NewRouter(nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/config", nil)
 	req.Header.Set("X-API-Key", "test-api-key")
@@ -75,7 +75,7 @@ func TestConfigRouteIsNot404(t *testing.T) {
 // routes whose "document" form of input never touches storage, so they must
 // answer correctly even with a nil db.
 func TestConfigValidateAndPreviewDoNotNeedADatabase(t *testing.T) {
-	router := NewRouter(nil, nil, nil, nil)
+	router := NewRouter(nil, nil, nil, nil, nil)
 
 	t.Run("validate accepts a well-formed document", func(t *testing.T) {
 		body := `{"document": {"schemaVersion":1,"servers":{"a":"https://a.example.com"},"defaultServer":"a"}}`

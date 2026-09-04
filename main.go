@@ -23,6 +23,7 @@ import (
 	"emly-api-go/internal/database/schema"
 	emlyMiddleware "emly-api-go/internal/middleware"
 	"emly-api-go/internal/routes"
+	"emly-api-go/internal/statshub"
 	"emly-api-go/internal/storage"
 	"emly-api-go/internal/telemetry"
 )
@@ -162,6 +163,14 @@ func main() {
 	defer backgroundCancel()
 	configMirrorState := configmirror.Start(backgroundCtx, db, cfg)
 
+	// In-process event bus behind GET /v2/stats/stream (see internal/statshub
+	// package doc for why this is in-process rather than Postgres LISTEN/NOTIFY
+	// or Redis pub/sub). Run's tick keeps time-derived fields (connected
+	// client counts) fresh for connections that have been open a while with
+	// no new updater event.
+	statsHub := statshub.New()
+	go statsHub.Run(backgroundCtx, cfg.StatsStreamTickInterval)
+
 	r := chi.NewRouter()
 
 	r.Use(chiMiddleware.RequestID)
@@ -181,7 +190,7 @@ func main() {
 	rl := emlyMiddleware.NewRateLimiter(cfg)
 	r.Use(rl.Handler)
 
-	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState)
+	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
