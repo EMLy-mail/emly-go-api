@@ -5,6 +5,7 @@ import (
 
 	apimw "emly-api-go/internal/middleware"
 
+	"emly-api-go/internal/config"
 	"emly-api-go/internal/handlers"
 	"emly-api-go/internal/statshub"
 
@@ -17,13 +18,15 @@ import (
 // like the rest of this group) and their real-time counterpart,
 // /stats/stream. hub may be nil (tests, or a build with the WS stream
 // unused); handlers.StatsStream and recordUpdaterEvent both tolerate that.
-func registerStats(r chi.Router, db *sqlx.DB, hub *statshub.Hub) {
+// cfg carries StatsCacheTTL, which bounds how stale the polled /summary may
+// be - see handlers.GetStatsSummary.
+func registerStats(r chi.Router, db *sqlx.DB, cfg *config.Config, hub *statshub.Hub) {
 	r.Route("/stats", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.AdminKeyAuth(db))
 			r.Use(httprate.LimitByIP(30, time.Minute))
 
-			r.Get("/summary", handlers.GetStatsSummary(db))
+			r.Get("/summary", handlers.GetStatsSummary(db, cfg))
 			r.Get("/clients", handlers.ListStatsClients(db))
 			r.Get("/clients/{id}", handlers.GetStatsClientDetail(db))
 			r.Get("/events", handlers.GetStatsEvents(db))

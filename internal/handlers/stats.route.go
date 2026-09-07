@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 
+	"emly-api-go/internal/config"
 	"emly-api-go/internal/models"
 )
 
@@ -18,6 +19,11 @@ var validEventBuckets = map[string]bool{"day": true, "hour": true}
 var validEventProducts = map[string]bool{"emly": true, "updater": true, "all": true}
 
 const defaultConnectedWindowMinutes = 15
+
+// maxConnectedWindowMinutes caps ?window_minutes=. A week is already far past
+// any useful reading of "currently connected", and the cap keeps the summary
+// cache's key space small - the param is part of its key.
+const maxConnectedWindowMinutes = 7 * 24 * 60
 
 // eventProductFilter reads the optional ?product= query param and returns the
 // SQL fragment + arg constraining updater_events. It defaults to "emly" so
@@ -123,12 +129,20 @@ func fetchStatsSummary(ctx context.Context, db *sqlx.DB, windowMinutes int, prod
 
 // GetStatsSummary returns fleet-wide EMLy Updater stats: total/connected
 // client counts, event volume over the last 24h, and version adoption.
-func GetStatsSummary(db *sqlx.DB) http.HandlerFunc {
+//
+// The payload is memoized for cfg.StatsCacheTTL, keyed by the two query
+// params that shape it. Dashboards poll this endpoint continuously and none
+// of these figures - a 24h event total, a version histogram - move on a
+// per-request timescale, so serving a slightly stale copy costs the reader
+// nothing while sparing the database five queries per poll.
+func GetStatsSummary(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
+	cache := newTTLCache[StatsSummary](cfg.StatsCacheTTL)
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		windowMinutes := defaultConnectedWindowMinutes
 		if wm := r.URL.Query().Get("window_minutes"); wm != "" {
 			if v, err := strconv.Atoi(wm); err == nil && v > 0 {
-				windowMinutes = v
+				windowMinutes = min(v, maxConnectedWindowMinutes)
 			}
 		}
 
@@ -138,12 +152,21 @@ func GetStatsSummary(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		summary, err := fetchStatsSummary(r.Context(), db, windowMinutes, product)
+		summary, err := cache.get(product+"|"+strconv.Itoa(windowMinutes), func() (StatsSummary, error) {
+			return fetchStatsSummary(r.Context(), db, windowMinutes, product)
+		})
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "failed to fetch stats summary")
 			return
 		}
 
+		// Let the browser's own cache absorb the polling too, so a dashboard
+		// left open doesn't even reach the process between refreshes. Private
+		// because the response is admin-key gated and must not be held by a
+		// shared proxy.
+		if cfg.StatsCacheTTL > 0 {
+			w.Header().Set("Cache-Control", "private, max-age="+strconv.Itoa(int(cfg.StatsCacheTTL.Seconds())))
+		}
 		jsonOK(w, summary)
 	}
 }

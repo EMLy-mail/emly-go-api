@@ -39,7 +39,7 @@ func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, c
 	r.Get("/health", handlers.HealthWithConfigMirror(db, configMirror))
 
 	registerUpdates(r, db, updatesS3conn, config.Load().UpdatesS3Prefix, config.Load().UpdaterS3Prefix, hub)
-	registerStats(r, db, hub)
+	registerStats(r, db, config.Load(), hub)
 	registerConfig(r, db, config.Load())
 
 	r.Route("/api", func(r chi.Router) {

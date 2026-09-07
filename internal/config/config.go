@@ -58,6 +58,7 @@ type Config struct {
 	ConfigUpstreamInterval  time.Duration
 	ConfigUpstreamAPIKey    string
 	StatsStreamTickInterval time.Duration
+	StatsCacheTTL           time.Duration
 	UseS3APIFileStorage     bool
 	UseS3UpdatesStorage     bool
 	RateLimit               RateLimitConfig
@@ -161,8 +162,13 @@ func load() *Config {
 		// updater_events ingest, it keeps time-derived fields like
 		// connected_clients fresh on a connection that's been open a while.
 		StatsStreamTickInterval: envDuration("STATS_STREAM_TICK_INTERVAL", 30*time.Second),
-		UseS3APIFileStorage:     strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_API_FILE_STORAGE"))) == "true",
-		UseS3UpdatesStorage:     strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_UPDATES_STORAGE"))) == "true",
+		// StatsCacheTTL bounds how stale the polled GET /v2/stats/summary may
+		// be. It is the REST path's counterpart to the stream's tick: clients
+		// that poll instead of subscribing get the same figures, recomputed
+		// once per TTL rather than once per request.
+		StatsCacheTTL:       envDuration("STATS_CACHE_TTL", 30*time.Second),
+		UseS3APIFileStorage: strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_API_FILE_STORAGE"))) == "true",
+		UseS3UpdatesStorage: strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_UPDATES_STORAGE"))) == "true",
 		Otel: OtelConfig{
 			Enabled:  strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_ENABLED"))) == "true",
 			Endpoint: envString("OTEL_ENDPOINT", "http://localhost:4318"),

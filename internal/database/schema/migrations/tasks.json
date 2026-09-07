@@ -91,5 +91,21 @@
         { "type": "column_not_exists", "table": "updater_clients", "column": "config_revision" }
       ]
     }
+    ,{
+      "id": "12_updater_events_summary_index",
+      "sql_file": "12_updater_events_summary_index.sql",
+      "description": "Add a covering (product, event_type, created_at) index to updater_events so the /v2/stats/summary rollup stops full-scanning an index and looking up every candidate row.",
+      "conditions": [
+        { "type": "index_not_exists", "table": "updater_events", "index": "idx_product_event_created" }
+      ]
+    }
+    ,{
+      "id": "13_drop_updater_events_product_created",
+      "sql_file": "13_drop_updater_events_product_created.sql",
+      "description": "Drop updater_events.idx_product_created, now redundant against the covering index from task 12, to cut write amplification on the insert-heavy event path. Runs after task 12 in file order, so the replacement index always exists first.",
+      "conditions": [
+        { "type": "index_exists", "table": "updater_events", "index": "idx_product_created" }
+      ]
+    }
   ]
 }
