@@ -20,6 +20,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"emly-api-go/internal/models"
+	"emly-api-go/internal/statshub"
 	"emly-api-go/internal/storage"
 	"emly-api-go/internal/timing"
 )
@@ -62,7 +63,7 @@ func updaterInstallerFilename(uploaded, version string) string {
 // mirror does not implement the endpoint yet" and stops without retrying, so
 // using it for an empty catalogue would be indistinguishable from an
 // out-of-date mirror.
-func GetUpdaterManifest(db *sqlx.DB) http.HandlerFunc {
+func GetUpdaterManifest(db *sqlx.DB, hub *statshub.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var rel models.UpdaterRelease
 		err := db.GetContext(r.Context(), &rel,
@@ -105,7 +106,7 @@ func GetUpdaterManifest(db *sqlx.DB) http.HandlerFunc {
 		jsonOK(w, manifest)
 
 		uaVersion, _ := parseUpdaterUserAgent(r.UserAgent())
-		recordUpdaterEvent(r.Context(), db, r, "manifest_check", productUpdater, uaVersion)
+		recordUpdaterEvent(r.Context(), db, r, hub, "manifest_check", productUpdater, uaVersion)
 	}
 }
 
@@ -113,7 +114,7 @@ func GetUpdaterManifest(db *sqlx.DB) http.HandlerFunc {
 // the signed installer byte for byte. It stays unauthenticated like the EMLy
 // release download: the manifest's download link may legitimately be fetched
 // through a mirror or CDN that does not forward the API key.
-func DownloadUpdater(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) http.HandlerFunc {
+func DownloadUpdater(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string, hub *statshub.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s3conn == nil {
 			jsonError(w, http.StatusServiceUnavailable, "S3 storage is not configured")
@@ -160,7 +161,7 @@ func DownloadUpdater(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) 
 		// DB doesn't leak the goroutine.
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 		defer cancel()
-		recordUpdaterEvent(ctx, db, r, "download", productUpdater, version)
+		recordUpdaterEvent(ctx, db, r, hub, "download", productUpdater, version)
 	}
 }
 

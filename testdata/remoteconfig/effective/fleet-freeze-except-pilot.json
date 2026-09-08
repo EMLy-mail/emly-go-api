@@ -1,0 +1,21 @@
+{
+  "document": {
+    "schemaVersion": 1,
+    "servers": { "srv-a": "https://a.example.com" },
+    "defaultServer": "srv-a",
+    "overrides": [
+      {
+        "id": "fleet-freeze-except-pilot",
+        "match": { "all": true },
+        "except": { "hwids": ["9A3F1C77-0000-0000-0000-000000000001"] },
+        "until": "2026-09-12T08:00:00Z",
+        "patch": { "control": { "updater": { "enabled": false, "reason": "release under verification" } } }
+      }
+    ]
+  },
+  "host": {
+    "HWID": "some-other-machine",
+    "Now": "2026-09-05T09:00:00Z"
+  },
+  "expectedOverrideIds": ["fleet-freeze-except-pilot"]
+}

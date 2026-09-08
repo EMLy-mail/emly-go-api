@@ -14,14 +14,18 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/httprate"
 	"github.com/joho/godotenv"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"emly-api-go/internal/config"
+	"emly-api-go/internal/configmirror"
 	"emly-api-go/internal/database"
 	"emly-api-go/internal/database/schema"
+	"emly-api-go/internal/handlers"
 	emlyMiddleware "emly-api-go/internal/middleware"
 	"emly-api-go/internal/routes"
+	"emly-api-go/internal/statshub"
 	"emly-api-go/internal/storage"
 	"emly-api-go/internal/telemetry"
 )
@@ -153,6 +157,22 @@ func main() {
 		}
 	}
 
+	// Background loop that replicates /v2/config from CONFIG_UPSTREAM_URL
+	// when this instance is a site mirror; a no-op State on the cloud/
+	// primary instance (config.Load().ConfigUpstreamURL == ""). Stopped via
+	// backgroundCancel during graceful shutdown below.
+	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
+	defer backgroundCancel()
+	configMirrorState := configmirror.Start(backgroundCtx, db, cfg)
+
+	// In-process event bus behind GET /v2/stats/stream (see internal/statshub
+	// package doc for why this is in-process rather than Postgres LISTEN/NOTIFY
+	// or Redis pub/sub). Run's tick keeps time-derived fields (connected
+	// client counts) fresh for connections that have been open a while with
+	// no new updater event.
+	statsHub := statshub.New()
+	go statsHub.Run(backgroundCtx, cfg.StatsStreamTickInterval)
+
 	r := chi.NewRouter()
 
 	r.Use(chiMiddleware.RequestID)
@@ -172,12 +192,39 @@ func main() {
 	rl := emlyMiddleware.NewRateLimiter(cfg)
 	r.Use(rl.Handler)
 
-	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn)
+	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub)
+
+	// GET /v2/stats/stream hijacks the connection to complete its WebSocket
+	// upgrade (coder/websocket.Accept requires the ResponseWriter to
+	// implement http.Hijacker). r's middleware stack is incompatible with
+	// that: chiMiddleware.Timeout wraps every response in net/http's
+	// TimeoutHandler, whose ResponseWriter never implements http.Hijacker -
+	// a stdlib limitation, not something wrapping it further can fix - which
+	// is exactly what broke this route in production ("failed to accept
+	// WebSocket connection: http.ResponseWriter does not implement
+	// http.Hijacker"). AccessLog and otelhttp are also a poor fit for a
+	// connection that can stay open for hours as a single logged request.
+	//
+	// v2.NewRouter still mounts this same route on r too (see
+	// internal/routes/v2/stats_stream_routing_test.go), so it stays directly
+	// testable there - but in production the mux below intercepts this exact
+	// path before it ever reaches r's middleware, and serves it with this
+	// smaller, hijack-safe stack instead. Every other path still goes
+	// through r unchanged.
+	wsHandler := httprate.LimitByIP(30, time.Minute)(handlers.StatsStream(db, statsHub))
+	wsHandler = rl.Handler(wsHandler)
+	wsHandler = chiMiddleware.Recoverer(wsHandler)
+	wsHandler = chiMiddleware.RealIP(wsHandler)
+	wsHandler = chiMiddleware.RequestID(wsHandler)
+
+	mux := http.NewServeMux()
+	mux.Handle("/v2/stats/stream", wsHandler)
+	mux.Handle("/", r)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: r,
+		Handler: mux,
 	}
 
 	// Start server in a goroutine so we can listen for shutdown signals
@@ -193,6 +240,8 @@ func main() {
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	sig := <-quit
 	slog.Info("shutdown signal received", "signal", sig.String())
+
+	backgroundCancel()
 
 	ctxShut, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

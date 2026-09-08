@@ -6,6 +6,7 @@ import (
 
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/handlers"
+	"emly-api-go/internal/statshub"
 	"emly-api-go/internal/storage"
 
 	"github.com/go-chi/chi/v5"
@@ -15,8 +16,12 @@ import (
 // NewRouter returns a chi.Router with all /v2 routes mounted. apiFileS3conn
 // backs bug-report file attachments and updatesS3conn backs update-release
 // installers; the two are independent connectors and may live on different
-// S3-compatible providers.
-func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector) http.Handler {
+// S3-compatible providers. configMirror is non-nil only on a site mirror
+// (CONFIG_UPSTREAM_URL set) and adds its replication state to /v2/health;
+// pass nil on the cloud/primary instance and in tests. hub feeds
+// /v2/stats/stream (nil is fine - the route degrades to snapshots-only, no
+// pushed updates; see statshub and handlers.StatsStream).
+func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror handlers.ConfigMirrorReporter, hub *statshub.Hub) http.Handler {
 	r := chi.NewRouter()
 
 	rl := emlyMiddleware.NewRateLimiter(config.Load())
@@ -31,10 +36,11 @@ func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector) h
 		})
 	})
 
-	r.Get("/health", handlers.Health(db))
+	r.Get("/health", handlers.HealthWithConfigMirror(db, configMirror))
 
-	registerUpdates(r, db, updatesS3conn, config.Load().UpdatesS3Prefix, config.Load().UpdaterS3Prefix)
-	registerStats(r, db)
+	registerUpdates(r, db, updatesS3conn, config.Load().UpdatesS3Prefix, config.Load().UpdaterS3Prefix, hub)
+	registerStats(r, db, config.Load(), hub)
+	registerConfig(r, db, config.Load())
 
 	r.Route("/api", func(r chi.Router) {
 		registerAdmin(r, db)

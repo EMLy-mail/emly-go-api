@@ -75,5 +75,37 @@
         { "type": "column_not_exists", "table": "updater_clients", "column": "hwid" }
       ]
     }
+    ,{
+      "id": "10_remote_config",
+      "sql_file": "10_remote_config.sql",
+      "description": "Create remote_config_revisions table backing GET /v2/config and its admin routes.",
+      "conditions": [
+        { "type": "table_not_exists", "table": "remote_config_revisions" }
+      ]
+    }
+    ,{
+      "id": "11_updater_clients_config",
+      "sql_file": "11_updater_clients_config.sql",
+      "description": "Add config_revision/config_fetched_at columns to updater_clients so the fleet's remote-config rollout can be tracked without new telemetry rows.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "updater_clients", "column": "config_revision" }
+      ]
+    }
+    ,{
+      "id": "12_updater_events_summary_index",
+      "sql_file": "12_updater_events_summary_index.sql",
+      "description": "Add a covering (product, event_type, created_at) index to updater_events so the /v2/stats/summary rollup stops full-scanning an index and looking up every candidate row.",
+      "conditions": [
+        { "type": "index_not_exists", "table": "updater_events", "index": "idx_product_event_created" }
+      ]
+    }
+    ,{
+      "id": "13_drop_updater_events_product_created",
+      "sql_file": "13_drop_updater_events_product_created.sql",
+      "description": "Drop updater_events.idx_product_created, now redundant against the covering index from task 12, to cut write amplification on the insert-heavy event path. Runs after task 12 in file order, so the replacement index always exists first.",
+      "conditions": [
+        { "type": "index_exists", "table": "updater_events", "index": "idx_product_created" }
+      ]
+    }
   ]
 }
