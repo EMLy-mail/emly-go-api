@@ -189,10 +189,19 @@ func main() {
 		))
 	}
 
+	// Permanent, operator-set blocks. Ahead of the rate limiter on purpose:
+	// rejecting a banned client is an RLock and three map lookups, cheaper
+	// than the limiter's locked per-IP bookkeeping, so a banned client
+	// hammering the API costs less this way round. AccessLog still sits
+	// above both, so the rejected requests stay visible in the log.
+	bans := emlyMiddleware.NewBanList(db, cfg)
+	go bans.Run(backgroundCtx)
+	r.Use(bans.Handler)
+
 	rl := emlyMiddleware.NewRateLimiter(cfg)
 	r.Use(rl.Handler)
 
-	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub)
+	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub, bans)
 
 	// GET /v2/stats/stream hijacks the connection to complete its WebSocket
 	// upgrade (coder/websocket.Accept requires the ResponseWriter to

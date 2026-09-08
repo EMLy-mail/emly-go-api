@@ -115,5 +115,13 @@
         { "type": "column_not_exists", "table": "updater_clients", "column": "logged_user" }
       ]
     }
+    ,{
+      "id": "15_bans",
+      "sql_file": "15_bans.sql",
+      "description": "Create the bans table backing the permanent IP/HWID/hostname blocks and their admin routes.",
+      "conditions": [
+        { "type": "table_not_exists", "table": "bans" }
+      ]
+    }
   ]
 }

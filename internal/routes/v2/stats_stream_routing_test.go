@@ -13,7 +13,7 @@ import (
 // apimw.AdminKeyAuth, so this pins down the routing wire-up rather than
 // duplicating internal/handlers' own auth-gating tests.
 func TestStatsStreamRouteRequiresAdminKey(t *testing.T) {
-	router := NewRouter(nil, nil, nil, nil, nil)
+	router := NewRouter(nil, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/stats/stream", nil)
 	rec := httptest.NewRecorder()

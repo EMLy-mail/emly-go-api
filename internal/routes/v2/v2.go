@@ -20,8 +20,10 @@ import (
 // (CONFIG_UPSTREAM_URL set) and adds its replication state to /v2/health;
 // pass nil on the cloud/primary instance and in tests. hub feeds
 // /v2/stats/stream (nil is fine - the route degrades to snapshots-only, no
-// pushed updates; see statshub and handlers.StatsStream).
-func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror handlers.ConfigMirrorReporter, hub *statshub.Hub) http.Handler {
+// pushed updates; see statshub and handlers.StatsStream). bans is the live
+// block-list snapshot the admin routes refresh after a write; nil is fine in
+// tests, where the write lands in the table and nothing needs to enforce it.
+func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror handlers.ConfigMirrorReporter, hub *statshub.Hub, bans handlers.BanReloader) http.Handler {
 	r := chi.NewRouter()
 
 	rl := emlyMiddleware.NewRateLimiter(config.Load())
@@ -41,6 +43,7 @@ func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, c
 	registerUpdates(r, db, updatesS3conn, config.Load().UpdatesS3Prefix, config.Load().UpdaterS3Prefix, hub)
 	registerStats(r, db, config.Load(), hub)
 	registerConfig(r, db, config.Load())
+	registerBans(r, db, bans)
 
 	r.Route("/api", func(r chi.Router) {
 		registerAdmin(r, db)

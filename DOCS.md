@@ -636,6 +636,37 @@ Base URL: `http://localhost:8080`
 | `X-Admin-Key`     | Endpoint admin bug-reports + `/v1/api/admin/users/*`  |
 | `X-Session-Token` | `/v1/api/admin/auth/validate` e `/logout`             |
 
+### Ban permanenti (`bans`)
+
+Blocchi decisi a mano da un operatore, **senza scadenza**: si tolgono a mano.
+Sono una cosa diversa dai ban automatici del rate limiter, che stanno in
+memoria e scadono da soli.
+
+Una riga = un identificatore. Per bloccare una macchina sia per HWID che per
+hostname servono due righe, non una riga con due colonne.
+
+| `ban_type` | Confronta con        | Note                                                                 |
+|------------|----------------------|----------------------------------------------------------------------|
+| `ip`       | IP del chiamante     | Esatto. Su DHCP la macchina puo' spostarsi su un altro IP            |
+| `hwid`     | `X-EMLy-HWID`        | Il piu' robusto: sopravvive a rinomine, cambi IP e cambi dominio AD  |
+| `hostname` | `X-EMLy-Hostname`    | Case-insensitive. Smette di valere se la macchina viene rinominata   |
+
+Endpoint (tutti `X-Admin-Key`): `GET /v2/bans`, `POST /v2/bans`,
+`DELETE /v2/bans/{id}`.
+
+Tre cose da sapere prima di usarli:
+
+- **Il ban vale su tutta l'API**, non solo sulle statistiche: la macchina
+  bannata prende `403` anche su manifest e `/v2/config`, quindi smette di
+  aggiornarsi e di ricevere configurazione.
+- **Chi ha una admin key valida e' esente.** Serve a non chiudersi fuori: se
+  banni l'IP dell'ufficio, la dashboard (e la rotta per togliere il ban)
+  continuano a funzionare.
+- **Ribannare qualcosa gia' bannato risponde `200`**, non `409`, restituendo
+  la riga esistente.
+
+---
+
 ### Header di identita' macchina (`X-EMLy-*`)
 
 Sono gli header che l'EMLy Updater allega a **ogni** richiesta che fa
