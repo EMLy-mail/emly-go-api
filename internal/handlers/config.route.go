@@ -113,16 +113,12 @@ func sessionUsername(r *http.Request, db *sqlx.DB) *string {
 // tracked, same as recordUpdaterEvent.
 func trackConfigFetch(r *http.Request, db *sqlx.DB, revision int64) {
 	ctx := r.Context()
-	hwid := r.Header.Get("X-EMLy-HWID")
-	hostname := r.Header.Get("X-EMLy-Hostname")
-	if hwid == "" && hostname == "" {
+	id := clientIdentityFromRequest(r)
+	if !id.identified() {
 		return
 	}
-	adDomain := r.Header.Get("X-EMLy-ADDomain")
-	uaVersion, contact := parseUpdaterUserAgent(r.UserAgent())
-	ip := clientIPFromRequest(r)
 
-	clientID, err := upsertUpdaterClient(ctx, db, hwid, hostname, adDomain, uaVersion, contact, ip)
+	clientID, err := upsertUpdaterClient(ctx, db, id)
 	if err != nil {
 		slog.WarnContext(ctx, "config fetch: failed to upsert client", "error", err)
 		return

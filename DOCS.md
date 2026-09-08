@@ -636,6 +636,34 @@ Base URL: `http://localhost:8080`
 | `X-Admin-Key`     | Endpoint admin bug-reports + `/v1/api/admin/users/*`  |
 | `X-Session-Token` | `/v1/api/admin/auth/validate` e `/logout`             |
 
+### Header di identita' macchina (`X-EMLy-*`)
+
+Sono gli header che l'EMLy Updater allega a **ogni** richiesta che fa
+(manifest, self-update, `GET /v2/config`). Nessuno e' obbligatorio: quando
+l'Updater non riesce a determinare un valore **omette l'header**, non lo manda
+vuoto. Popolano la tabella `updater_clients`.
+
+| Header               | Colonna         | Descrizione                                                                                     |
+|----------------------|-----------------|-------------------------------------------------------------------------------------------------|
+| `X-EMLy-Hostname`    | `hostname`      | Hostname della macchina                                                                          |
+| `X-EMLy-HWID`        | `hwid`          | UUID SMBIOS (o fallback da MachineGuid). E' la chiave primaria del client                        |
+| `X-EMLy-ADDomain`    | `ad_domain`     | Dominio AD, o nome del workgroup se non e' in dominio                                            |
+| `X-EMLy-IntIP`       | —               | Primo IPv4 non-loopback su interfaccia attiva (solo access log)                                  |
+| `X-EMLy-LoggedUser`  | `logged_user`   | Utente interattivo collegato in quel momento, da console **o RDP**, come `DOMINIO\utente`        |
+| `X-EMLy-Serial`      | `serial`        | Numero di serie dello chassis dal BIOS (`Win32_BIOS.SerialNumber`)                               |
+| `X-EMLy-Product`     | `product`       | Product number / SKU del produttore — su HP il `8XXXXXXX#ABZ` stampato sull'etichetta            |
+
+Due regole da tenere a mente:
+
+- **Un header assente non cancella il valore gia' salvato.** L'upsert usa
+  `COALESCE(NULLIF(?, ''), colonna)`, quindi un Updater troppo vecchio per
+  mandare i nuovi header — o una macchina ferma al lock screen, senza nessuno
+  loggato — non azzera quello che le richieste precedenti avevano registrato.
+- **`logged_user` e' un'istantanea, non uno storico**: viene sovrascritto a
+  ogni richiesta che porta l'header, quindi va letto insieme a `last_seen_at`
+  per sapere quanto e' recente. Serial e product number invece sono fissi per
+  la macchina.
+
 ---
 
 ### Pubblici

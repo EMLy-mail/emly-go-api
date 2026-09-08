@@ -56,6 +56,57 @@ func clientIPFromRequest(r *http.Request) string {
 	return host
 }
 
+// clientIdentity is everything one request tells us about the machine behind
+// it: the X-EMLy-* headers the EMLy Updater sends, plus what the User-Agent
+// and the connection add. Both telemetry paths (recordUpdaterEvent and
+// trackConfigFetch) read the exact same set, so they read it here - a header
+// wired into one and forgotten in the other is how a client ends up with a
+// field that only updates on config fetches.
+type clientIdentity struct {
+	HWID       string
+	Hostname   string
+	ADDomain   string
+	LoggedUser string
+	Serial     string
+	Product    string
+	UAVersion  string
+	Contact    string
+	IP         string
+}
+
+// identified reports whether the request carries enough to key a client row
+// on. Everything else is optional detail.
+func (c clientIdentity) identified() bool { return c.HWID != "" || c.Hostname != "" }
+
+func clientIdentityFromRequest(r *http.Request) clientIdentity {
+	uaVersion, contact := parseUpdaterUserAgent(r.UserAgent())
+	return clientIdentity{
+		HWID:       r.Header.Get("X-EMLy-HWID"),
+		Hostname:   r.Header.Get("X-EMLy-Hostname"),
+		ADDomain:   r.Header.Get("X-EMLy-ADDomain"),
+		LoggedUser: truncate(r.Header.Get("X-EMLy-LoggedUser"), 255),
+		Serial:     truncate(r.Header.Get("X-EMLy-Serial"), 128),
+		Product:    truncate(r.Header.Get("X-EMLy-Product"), 128),
+		UAVersion:  uaVersion,
+		Contact:    contact,
+		IP:         clientIPFromRequest(r),
+	}
+}
+
+// truncate caps a header value at its column width, counting runes so a
+// multi-byte account name is never cut mid-character. The three values it
+// guards are free-form strings from firmware and from Windows account names,
+// with no protocol bound on their length; an over-long one would fail the
+// whole upsert and cost this client its telemetry row, which is a poor trade
+// for a value nobody reads past the first few dozen characters.
+func truncate(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
+}
+
 // recordUpdaterEvent best-effort persists an EMLy Updater client sighting and
 // operation event. It never fails the caller's HTTP response - a client
 // missing every identifying header is silently skipped, and DB errors are
@@ -77,29 +128,25 @@ func clientIPFromRequest(r *http.Request) string {
 // §6.1). The extra client-row fetch that publish needs only runs when
 // hub.Active() - a quiet server with no dashboard connected pays nothing.
 func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, hub *statshub.Hub, eventType, product, version string) {
-	hwid := r.Header.Get("X-EMLy-HWID")
-	hostname := r.Header.Get("X-EMLy-Hostname")
-	if hwid == "" && hostname == "" {
+	id := clientIdentityFromRequest(r)
+	if !id.identified() {
 		return
 	}
-	adDomain := r.Header.Get("X-EMLy-ADDomain")
-	uaVersion, contact := parseUpdaterUserAgent(r.UserAgent())
-	ip := clientIPFromRequest(r)
 
-	if hwid == "" {
+	if id.HWID == "" {
 		// Legacy fallback: no HWID header, identify by hostname + ad_domain
 		// as before.
-		slog.WarnContext(ctx, "updater stats: missing X-EMLy-HWID header; using legacy hostname/ad_domain identification", "ip", nullableString(ip), "hostname", nullableString(hostname), "ad_domain", nullableString(adDomain))
+		slog.WarnContext(ctx, "updater stats: missing X-EMLy-HWID header; using legacy hostname/ad_domain identification", "ip", nullableString(id.IP), "hostname", nullableString(id.Hostname), "ad_domain", nullableString(id.ADDomain))
 	}
 
-	clientID, err := upsertUpdaterClient(ctx, db, hwid, hostname, adDomain, uaVersion, contact, ip)
+	clientID, err := upsertUpdaterClient(ctx, db, id)
 	if err != nil {
 		slog.WarnContext(ctx, "updater stats: failed to upsert client", "error", err)
 		return
 	}
 
 	eventVersion := nullableString(version)
-	eventIP := nullableString(ip)
+	eventIP := nullableString(id.IP)
 	res, err := db.ExecContext(ctx,
 		`INSERT INTO updater_events (client_id, event_type, product, version, ip_address) VALUES (?, ?, ?, ?, ?)`,
 		clientID, eventType, product, eventVersion, eventIP,
@@ -159,7 +206,17 @@ func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, hub *
 //
 // Every write after step 2 targets a single row with no remaining unique
 // value collision possible.
-func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, hwid, hostname, adDomain, uaVersion, contact, ip string) (int64, error) {
+//
+// A header the request does not carry leaves the stored value alone rather
+// than clearing it (the COALESCE/NULLIF pairs below). "Not reported" and
+// "reported as empty" are the same thing on the wire - the updater omits a
+// header it has no value for - and for logged_user/serial/product the last
+// known answer is worth more than a NULL: an updater too old to send them,
+// or a machine sitting at the lock screen with nobody logged on, must not
+// erase what earlier sightings established. last_seen_at is what says how
+// current the row is.
+func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, id clientIdentity) (int64, error) {
+	hwid, hostname, adDomain := id.HWID, id.Hostname, id.ADDomain
 	lookup := func(query string, args ...interface{}) (int64, bool, error) {
 		var id int64
 		err := db.GetContext(ctx, &id, query, args...)
@@ -207,9 +264,13 @@ func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, hwid, hostname, adDom
 		if _, err := db.ExecContext(ctx,
 			`UPDATE updater_clients
 			 SET hwid = COALESCE(NULLIF(?, ''), hwid), hostname = ?, ad_domain = ?,
+			     logged_user = COALESCE(NULLIF(?, ''), logged_user),
+			     serial = COALESCE(NULLIF(?, ''), serial),
+			     product = COALESCE(NULLIF(?, ''), product),
 			     updater_version = ?, contact = ?, last_ip = ?, last_seen_at = CURRENT_TIMESTAMP
 			 WHERE id = ?`,
-			hwid, hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip), targetID,
+			hwid, hostname, adDomain, id.LoggedUser, id.Serial, id.Product,
+			nullableString(id.UAVersion), nullableString(id.Contact), nullableString(id.IP), targetID,
 		); err != nil {
 			return 0, err
 		}
@@ -217,9 +278,11 @@ func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, hwid, hostname, adDom
 	}
 
 	res, err := db.ExecContext(ctx,
-		`INSERT INTO updater_clients (hwid, hostname, ad_domain, updater_version, contact, last_ip)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		nullableString(hwid), hostname, adDomain, nullableString(uaVersion), nullableString(contact), nullableString(ip),
+		`INSERT INTO updater_clients (hwid, hostname, ad_domain, logged_user, serial, product, updater_version, contact, last_ip)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		nullableString(hwid), hostname, adDomain,
+		nullableString(id.LoggedUser), nullableString(id.Serial), nullableString(id.Product),
+		nullableString(id.UAVersion), nullableString(id.Contact), nullableString(id.IP),
 	)
 	if err != nil {
 		return 0, err

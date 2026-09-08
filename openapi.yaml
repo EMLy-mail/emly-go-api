@@ -64,6 +64,97 @@ components:
       name: X-Session-Token
 
   # ─────────────────────────────────────────────────────────────
+  # Shared parameters
+  # ─────────────────────────────────────────────────────────────
+  parameters:
+
+    # The machine-identity headers the EMLy Updater attaches to every request
+    # it makes. All are optional: a client that cannot determine a value omits
+    # the header rather than sending it empty, and the API reads a missing
+    # header as "unknown" — it never clears a value an earlier sighting
+    # established. They are what populates `updater_clients`.
+
+    EMLyHostname:
+      name: X-EMLy-Hostname
+      in: header
+      required: false
+      description: NetBIOS/DNS hostname of the machine.
+      schema:
+        type: string
+      example: "PC-01"
+
+    EMLyHWID:
+      name: X-EMLy-HWID
+      in: header
+      required: false
+      description: >-
+        Hardware ID: the SMBIOS UUID when the firmware reports a usable one,
+        otherwise a MachineGuid-derived fallback. Survives hostname renames
+        and AD domain changes, and is the primary client key.
+      schema:
+        type: string
+      example: "36CC511A-F0DE-EA11-8106-842AFDCE34D0"
+
+    EMLyADDomain:
+      name: X-EMLy-ADDomain
+      in: header
+      required: false
+      description: Active Directory domain, or the workgroup name when not domain-joined.
+      schema:
+        type: string
+      example: "contoso.local"
+
+    EMLyIntIP:
+      name: X-EMLy-IntIP
+      in: header
+      required: false
+      description: First non-loopback IPv4 address on an up interface.
+      schema:
+        type: string
+      example: "10.0.0.5"
+
+    EMLyLoggedUser:
+      name: X-EMLy-LoggedUser
+      in: header
+      required: false
+      description: >-
+        The interactive user on the machine at request time, console or RDP
+        alike, as `DOMAIN\user` (bare `user` on a workgroup machine). Resolved
+        per request rather than at service start, so it tracks who is actually
+        at the machine; absent when nobody is logged on. Stored in
+        `updater_clients.logged_user`, which is a snapshot to read against
+        `last_seen_at`, not a history.
+      schema:
+        type: string
+      example: 'CONTOSO\mario.rossi'
+
+    EMLySerial:
+      name: X-EMLy-Serial
+      in: header
+      required: false
+      description: >-
+        Chassis serial number from the BIOS (`Win32_BIOS.SerialNumber`). OEM
+        placeholders such as "To Be Filled By O.E.M." are filtered out
+        client-side, so a value present here is a real one.
+      schema:
+        type: string
+      example: "CND0342SLW"
+
+    EMLyProduct:
+      name: X-EMLy-Product
+      in: header
+      required: false
+      description: >-
+        Vendor product/SKU number identifying the exact model configuration —
+        on HP the `8XXXXXXX#ABZ` printed on the chassis label. Read from
+        `Win32_ComputerSystemProduct.SKUNumber`, falling back to
+        `Win32_ComputerSystem.SystemSKUNumber`. Same placeholder filtering as
+        the serial.
+      schema:
+        type: string
+      example: "1F3N0EA#ABZ"
+
+  # ─────────────────────────────────────────────────────────────
   # Shared schemas
   # ─────────────────────────────────────────────────────────────
   schemas:
@@ -1786,14 +1877,23 @@ paths:
         silently, which is what lets not-yet-upgraded internal mirrors coexist.
         An empty catalogue is therefore a `200`, not a `404`.
 
-        The client also sends `X-EMLy-Hostname`, `X-EMLy-HWID`,
-        `X-EMLy-ADDomain` and `X-EMLy-IntIP`, plus a
+        The client also sends the `X-EMLy-*` machine-identity headers
+        (`Hostname`, `HWID`, `ADDomain`, `IntIP`, `LoggedUser`, `Serial`,
+        `Product` — see `components/parameters`), plus a
         `EMLy-Updater/<version> (contact)` User-Agent carrying the version
         currently installed on the machine. A staged rollout can be done
         entirely server-side by keying off those headers and returning
         `{"version": ""}` to machines not yet in the ring — no client change.
       security:
         - ApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/EMLyHostname'
+        - $ref: '#/components/parameters/EMLyHWID'
+        - $ref: '#/components/parameters/EMLyADDomain'
+        - $ref: '#/components/parameters/EMLyIntIP'
+        - $ref: '#/components/parameters/EMLyLoggedUser'
+        - $ref: '#/components/parameters/EMLySerial'
+        - $ref: '#/components/parameters/EMLyProduct'
       responses:
         "200":
           description: 'Manifest, or `{"version": ""}` when there is nothing to distribute'
@@ -2087,6 +2187,13 @@ paths:
           schema:
             type: string
           example: '"a1b2c3..."'
+        - $ref: '#/components/parameters/EMLyHostname'
+        - $ref: '#/components/parameters/EMLyHWID'
+        - $ref: '#/components/parameters/EMLyADDomain'
+        - $ref: '#/components/parameters/EMLyIntIP'
+        - $ref: '#/components/parameters/EMLyLoggedUser'
+        - $ref: '#/components/parameters/EMLySerial'
+        - $ref: '#/components/parameters/EMLyProduct'
       responses:
         "200":
           description: The published document

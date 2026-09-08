@@ -46,6 +46,7 @@ func AccessLog(next http.Handler) http.Handler {
 		adDomain := r.Header.Get("X-EMLy-ADDomain")
 		hostName := r.Header.Get("X-EMLy-Hostname")
 		hwid := r.Header.Get("X-EMLy-HWID")
+		loggedUser := r.Header.Get("X-EMLy-LoggedUser")
 
 		// Log AD domain and hostname as separate fields to avoid escaping
 		// characters like backslashes inside the user_agent field.
@@ -66,6 +67,12 @@ func AccessLog(next http.Handler) http.Handler {
 		}
 		if hwid != "" {
 			args = append(args, "hwid", hwid)
+		}
+		// Its own field for the same reason ad_domain has one: a Windows
+		// account name embeds a backslash, and folding one into the
+		// user_agent field is exactly what that split exists to avoid.
+		if loggedUser != "" {
+			args = append(args, "logged_user", loggedUser)
 		}
 		slog.InfoContext(r.Context(), "request", args...)
 	})
