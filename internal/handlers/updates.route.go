@@ -579,7 +579,7 @@ func DownloadRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string, 
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size))
 		}
 
-		io.Copy(w, rc) //nolint:errcheck
+		streamInstaller(w, r, rc, productEMLy, version, filename, info.Size)
 
 		// See the identical comment in DownloadUpdater: the client closing the
 		// connection right after the last byte races r.Context()'s
