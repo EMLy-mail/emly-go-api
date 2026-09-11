@@ -3,20 +3,25 @@ package models
 import "time"
 
 type UpdaterClient struct {
-	ID              int        `db:"id"                json:"id"`
-	HWID            *string    `db:"hwid"              json:"hwid,omitempty"`
-	Hostname        string     `db:"hostname"          json:"hostname"`
-	ADDomain        string     `db:"ad_domain"         json:"ad_domain"`
+	ID       int     `db:"id"                json:"id"`
+	HWID     *string `db:"hwid"              json:"hwid,omitempty"`
+	Hostname string  `db:"hostname"          json:"hostname"`
+	ADDomain string  `db:"ad_domain"         json:"ad_domain"`
 	// LoggedUser is the interactive user (console or RDP) seen on the machine
 	// at the last sighting that reported one, as `DOMAIN\user`. It is a
 	// snapshot rather than history - overwritten on every request carrying
 	// X-EMLy-LoggedUser - so it should be read against LastSeenAt. Serial and
 	// Product are the firmware's chassis serial and vendor product/SKU
 	// number. All three are nil for a client that has never reported one.
-	LoggedUser      *string    `db:"logged_user"       json:"logged_user,omitempty"`
-	Serial          *string    `db:"serial"            json:"serial,omitempty"`
-	Product         *string    `db:"product"           json:"product,omitempty"`
+	LoggedUser *string `db:"logged_user"       json:"logged_user,omitempty"`
+	Serial     *string `db:"serial"            json:"serial,omitempty"`
+	Product    *string `db:"product"           json:"product,omitempty"`
+	// UpdaterVersion is the version of the EMLy Updater that made the request
+	// (read off its User-Agent); EMLyVersion is the version of the EMLy app it
+	// maintains (X-EMLy-AppVersion). The two move independently, so a fleet on
+	// one current updater can still be spread across several EMLy releases.
 	UpdaterVersion  *string    `db:"updater_version"   json:"updater_version,omitempty"`
+	EMLyVersion     *string    `db:"emly_version"      json:"emly_version,omitempty"`
 	ConfigRevision  *int64     `db:"config_revision"   json:"config_revision,omitempty"`
 	ConfigFetchedAt *time.Time `db:"config_fetched_at" json:"config_fetched_at,omitempty"`
 	Contact         *string    `db:"contact"           json:"contact,omitempty"`

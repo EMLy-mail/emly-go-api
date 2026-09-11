@@ -69,9 +69,14 @@ type clientIdentity struct {
 	LoggedUser string
 	Serial     string
 	Product    string
-	UAVersion  string
-	Contact    string
-	IP         string
+	// EMLyVersion is the version of the EMLy app (X-EMLy-AppVersion),
+	// UAVersion the version of the updater that reported it (User-Agent).
+	// They move independently: the updater self-updates on its own schedule,
+	// the app only when a release is rolled out to this machine.
+	EMLyVersion string
+	UAVersion   string
+	Contact     string
+	IP          string
 }
 
 // identified reports whether the request carries enough to key a client row
@@ -81,24 +86,26 @@ func (c clientIdentity) identified() bool { return c.HWID != "" || c.Hostname !=
 func clientIdentityFromRequest(r *http.Request) clientIdentity {
 	uaVersion, contact := parseUpdaterUserAgent(r.UserAgent())
 	return clientIdentity{
-		HWID:       r.Header.Get("X-EMLy-HWID"),
-		Hostname:   r.Header.Get("X-EMLy-Hostname"),
-		ADDomain:   r.Header.Get("X-EMLy-ADDomain"),
-		LoggedUser: truncate(r.Header.Get("X-EMLy-LoggedUser"), 255),
-		Serial:     truncate(r.Header.Get("X-EMLy-Serial"), 128),
-		Product:    truncate(r.Header.Get("X-EMLy-Product"), 128),
-		UAVersion:  uaVersion,
-		Contact:    contact,
-		IP:         clientIPFromRequest(r),
+		HWID:        r.Header.Get("X-EMLy-HWID"),
+		Hostname:    r.Header.Get("X-EMLy-Hostname"),
+		ADDomain:    r.Header.Get("X-EMLy-ADDomain"),
+		LoggedUser:  truncate(r.Header.Get("X-EMLy-LoggedUser"), 255),
+		Serial:      truncate(r.Header.Get("X-EMLy-Serial"), 128),
+		Product:     truncate(r.Header.Get("X-EMLy-Product"), 128),
+		EMLyVersion: truncate(r.Header.Get("X-EMLy-AppVersion"), 20),
+		UAVersion:   uaVersion,
+		Contact:     contact,
+		IP:          clientIPFromRequest(r),
 	}
 }
 
 // truncate caps a header value at its column width, counting runes so a
-// multi-byte account name is never cut mid-character. The three values it
-// guards are free-form strings from firmware and from Windows account names,
-// with no protocol bound on their length; an over-long one would fail the
-// whole upsert and cost this client its telemetry row, which is a poor trade
-// for a value nobody reads past the first few dozen characters.
+// multi-byte account name is never cut mid-character. The values it guards
+// are free-form strings from firmware, from Windows account names and from
+// the app's own version string, with no protocol bound on their length; an
+// over-long one would fail the whole upsert and cost this client its
+// telemetry row, which is a poor trade for a value nobody reads past the
+// first few dozen characters.
 func truncate(s string, max int) string {
 	r := []rune(s)
 	if len(r) <= max {
@@ -267,9 +274,10 @@ func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, id clientIdentity) (i
 			     logged_user = COALESCE(NULLIF(?, ''), logged_user),
 			     serial = COALESCE(NULLIF(?, ''), serial),
 			     product = COALESCE(NULLIF(?, ''), product),
+			     emly_version = COALESCE(NULLIF(?, ''), emly_version),
 			     updater_version = ?, contact = ?, last_ip = ?, last_seen_at = CURRENT_TIMESTAMP
 			 WHERE id = ?`,
-			hwid, hostname, adDomain, id.LoggedUser, id.Serial, id.Product,
+			hwid, hostname, adDomain, id.LoggedUser, id.Serial, id.Product, id.EMLyVersion,
 			nullableString(id.UAVersion), nullableString(id.Contact), nullableString(id.IP), targetID,
 		); err != nil {
 			return 0, err
@@ -278,10 +286,11 @@ func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, id clientIdentity) (i
 	}
 
 	res, err := db.ExecContext(ctx,
-		`INSERT INTO updater_clients (hwid, hostname, ad_domain, logged_user, serial, product, updater_version, contact, last_ip)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO updater_clients (hwid, hostname, ad_domain, logged_user, serial, product, emly_version, updater_version, contact, last_ip)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullableString(hwid), hostname, adDomain,
 		nullableString(id.LoggedUser), nullableString(id.Serial), nullableString(id.Product),
+		nullableString(id.EMLyVersion),
 		nullableString(id.UAVersion), nullableString(id.Contact), nullableString(id.IP),
 	)
 	if err != nil {

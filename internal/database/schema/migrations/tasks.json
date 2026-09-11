@@ -122,6 +122,13 @@
       "conditions": [
         { "type": "table_not_exists", "table": "bans" }
       ]
+    }, {
+      "id": "15_updater_clients_add_emly_version",
+      "sql_file": "15_updater_clients_add_emly_version.sql",
+      "description": "Add emly_version column to updater_clients to track the version of the EMLy client.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "updater_clients", "column": "emly_version" }
+      ]
     }
   ]
 }
