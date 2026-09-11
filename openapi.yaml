@@ -64,6 +64,97 @@ components:
       name: X-Session-Token
 
   # ─────────────────────────────────────────────────────────────
+  # Shared parameters
+  # ─────────────────────────────────────────────────────────────
+  parameters:
+
+    # The machine-identity headers the EMLy Updater attaches to every request
+    # it makes. All are optional: a client that cannot determine a value omits
+    # the header rather than sending it empty, and the API reads a missing
+    # header as "unknown" — it never clears a value an earlier sighting
+    # established. They are what populates `updater_clients`.
+
+    EMLyHostname:
+      name: X-EMLy-Hostname
+      in: header
+      required: false
+      description: NetBIOS/DNS hostname of the machine.
+      schema:
+        type: string
+      example: "PC-01"
+
+    EMLyHWID:
+      name: X-EMLy-HWID
+      in: header
+      required: false
+      description: >-
+        Hardware ID: the SMBIOS UUID when the firmware reports a usable one,
+        otherwise a MachineGuid-derived fallback. Survives hostname renames
+        and AD domain changes, and is the primary client key.
+      schema:
+        type: string
+      example: "36CC511A-F0DE-EA11-8106-842AFDCE34D0"
+
+    EMLyADDomain:
+      name: X-EMLy-ADDomain
+      in: header
+      required: false
+      description: Active Directory domain, or the workgroup name when not domain-joined.
+      schema:
+        type: string
+      example: "contoso.local"
+
+    EMLyIntIP:
+      name: X-EMLy-IntIP
+      in: header
+      required: false
+      description: First non-loopback IPv4 address on an up interface.
+      schema:
+        type: string
+      example: "10.0.0.5"
+
+    EMLyLoggedUser:
+      name: X-EMLy-LoggedUser
+      in: header
+      required: false
+      description: >-
+        The interactive user on the machine at request time, console or RDP
+        alike, as `DOMAIN\user` (bare `user` on a workgroup machine). Resolved
+        per request rather than at service start, so it tracks who is actually
+        at the machine; absent when nobody is logged on. Stored in
+        `updater_clients.logged_user`, which is a snapshot to read against
+        `last_seen_at`, not a history.
+      schema:
+        type: string
+      example: 'CONTOSO\mario.rossi'
+
+    EMLySerial:
+      name: X-EMLy-Serial
+      in: header
+      required: false
+      description: >-
+        Chassis serial number from the BIOS (`Win32_BIOS.SerialNumber`). OEM
+        placeholders such as "To Be Filled By O.E.M." are filtered out
+        client-side, so a value present here is a real one.
+      schema:
+        type: string
+      example: "CND0342SLW"
+
+    EMLyProduct:
+      name: X-EMLy-Product
+      in: header
+      required: false
+      description: >-
+        Vendor product/SKU number identifying the exact model configuration —
+        on HP the `8XXXXXXX#ABZ` printed on the chassis label. Read from
+        `Win32_ComputerSystemProduct.SKUNumber`, falling back to
+        `Win32_ComputerSystem.SystemSKUNumber`. Same placeholder filtering as
+        the serial.
+      schema:
+        type: string
+      example: "1F3N0EA#ABZ"
+
+  # ─────────────────────────────────────────────────────────────
   # Shared schemas
   # ─────────────────────────────────────────────────────────────
   schemas:
@@ -74,6 +165,42 @@ components:
         error:
           type: string
           example: "bug report not found"
+
+    # ── Bans ─────────────────────────────────────────────────
+
+    BanType:
+      type: string
+      enum: [ip, hwid, hostname]
+      description: >-
+        Which identifier the ban matches on. `ip` is the exact peer address
+        (a machine on DHCP may move off it); `hwid` is the firmware ID and
+        survives renames, re-IPs and AD domain changes; `hostname` is matched
+        case-insensitively and stops applying if the machine is renamed.
+
+    Ban:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 7
+        ban_type:
+          $ref: '#/components/schemas/BanType'
+        value:
+          type: string
+          example: "203.0.113.9"
+        reason:
+          type: string
+          nullable: true
+          example: "Compromised machine, isolated pending reimage"
+        created_by:
+          type: string
+          nullable: true
+          description: Dashboard user attached to the X-Session-Token, when one was sent.
+          example: "f.fois"
+        created_at:
+          type: string
+          format: date-time
 
     # ── Bug Reports ──────────────────────────────────────────
 
@@ -1786,14 +1913,23 @@ paths:
         silently, which is what lets not-yet-upgraded internal mirrors coexist.
         An empty catalogue is therefore a `200`, not a `404`.
 
-        The client also sends `X-EMLy-Hostname`, `X-EMLy-HWID`,
-        `X-EMLy-ADDomain` and `X-EMLy-IntIP`, plus a
+        The client also sends the `X-EMLy-*` machine-identity headers
+        (`Hostname`, `HWID`, `ADDomain`, `IntIP`, `LoggedUser`, `Serial`,
+        `Product` — see `components/parameters`), plus a
         `EMLy-Updater/<version> (contact)` User-Agent carrying the version
         currently installed on the machine. A staged rollout can be done
         entirely server-side by keying off those headers and returning
         `{"version": ""}` to machines not yet in the ring — no client change.
       security:
         - ApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/EMLyHostname'
+        - $ref: '#/components/parameters/EMLyHWID'
+        - $ref: '#/components/parameters/EMLyADDomain'
+        - $ref: '#/components/parameters/EMLyIntIP'
+        - $ref: '#/components/parameters/EMLyLoggedUser'
+        - $ref: '#/components/parameters/EMLySerial'
+        - $ref: '#/components/parameters/EMLyProduct'
       responses:
         "200":
           description: 'Manifest, or `{"version": ""}` when there is nothing to distribute'
@@ -2058,6 +2194,140 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /v2/bans:
+    get:
+      tags: [Bans]
+      summary: List every permanent ban
+      description: |
+        The operator-set block list. Distinct from the rate limiter's
+        automatic, time-boxed bans, which live in memory and are not
+        represented here.
+      security:
+        - AdminKey: []
+      responses:
+        "200":
+          description: Every ban, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Ban'
+        "401":
+          description: Missing or wrong admin key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags: [Bans]
+      summary: Ban an IP, HWID or hostname permanently
+      description: |
+        Blocks every subsequent request matching the identifier with `403`,
+        on **all** endpoints — updates and configuration included, not only
+        statistics. Requests carrying a valid `X-Admin-Key` are exempt, so
+        banning your own address cannot lock the dashboard (or this route)
+        out.
+
+        Banning something already banned answers `200` with the existing
+        row rather than `409`: the caller asked for a state that already
+        holds, and two operators reacting to the same incident should not
+        have to care who got there first. A genuinely new ban answers `201`.
+
+        Values are canonicalised before storage — an IP is parsed and
+        re-rendered, a hostname is lower-cased, a HWID is kept verbatim
+        because it is matched byte for byte against `X-EMLy-HWID`.
+
+        Enforcement is immediate: the in-memory snapshot every request is
+        checked against is refreshed as part of this call.
+      security:
+        - AdminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ban_type, value]
+              properties:
+                ban_type:
+                  $ref: '#/components/schemas/BanType'
+                value:
+                  type: string
+                  maxLength: 255
+                  description: >-
+                    An IP address, a HWID, or a hostname, matching ban_type.
+                  example: "203.0.113.9"
+                reason:
+                  type: string
+                  maxLength: 500
+                  example: "Compromised machine, isolated pending reimage"
+      responses:
+        "201":
+          description: Ban created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ban'
+        "200":
+          description: That identifier was already banned; the existing ban is returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ban'
+        "400":
+          description: Unknown ban_type, missing value, or a value that is not a valid IP
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "401":
+          description: Missing or wrong admin key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v2/bans/{id}:
+    delete:
+      tags: [Bans]
+      summary: Lift a permanent ban
+      description: |
+        The client can reach the API again from its next request — the
+        in-memory snapshot is refreshed as part of this call.
+      security:
+        - AdminKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: Ban removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: deleted
+        "404":
+          description: No ban with that id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "401":
+          description: Missing or wrong admin key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /v2/config:
     get:
       tags: [Config]
@@ -2087,6 +2357,13 @@ paths:
           schema:
             type: string
           example: '"a1b2c3..."'
+        - $ref: '#/components/parameters/EMLyHostname'
+        - $ref: '#/components/parameters/EMLyHWID'
+        - $ref: '#/components/parameters/EMLyADDomain'
+        - $ref: '#/components/parameters/EMLyIntIP'
+        - $ref: '#/components/parameters/EMLyLoggedUser'
+        - $ref: '#/components/parameters/EMLySerial'
+        - $ref: '#/components/parameters/EMLyProduct'
       responses:
         "200":
           description: The published document

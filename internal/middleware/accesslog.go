@@ -46,6 +46,9 @@ func AccessLog(next http.Handler) http.Handler {
 		adDomain := r.Header.Get("X-EMLy-ADDomain")
 		hostName := r.Header.Get("X-EMLy-Hostname")
 		hwid := r.Header.Get("X-EMLy-HWID")
+		loggedUser := r.Header.Get("X-EMLy-LoggedUser")
+		serial := r.Header.Get("X-EMLy-Serial")
+		product := r.Header.Get("X-EMLy-Product")
 
 		// Log AD domain and hostname as separate fields to avoid escaping
 		// characters like backslashes inside the user_agent field.
@@ -66,6 +69,24 @@ func AccessLog(next http.Handler) http.Handler {
 		}
 		if hwid != "" {
 			args = append(args, "hwid", hwid)
+		}
+		// Its own field for the same reason ad_domain has one: a Windows
+		// account name embeds a backslash, and folding one into the
+		// user_agent field is exactly what that split exists to avoid.
+		if loggedUser != "" {
+			args = append(args, "logged_user", loggedUser)
+		}
+		// Logged for the same reason as logged_user, and worth the two extra
+		// fields: these three are the newest headers, so "is the client
+		// sending them at all" is a live question, and answering it here
+		// costs one API deploy instead of a rollout to the whole fleet. Each
+		// stays absent when the header is, so a client too old to send them
+		// adds nothing to the line.
+		if serial != "" {
+			args = append(args, "serial", serial)
+		}
+		if product != "" {
+			args = append(args, "product", product)
 		}
 		slog.InfoContext(r.Context(), "request", args...)
 	})

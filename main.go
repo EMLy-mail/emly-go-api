@@ -31,12 +31,26 @@ import (
 )
 
 // logBridge redirects the standard log package output to slog so that legacy
-// log.Printf calls are forwarded through the OTel log pipeline.
-type logBridge struct{}
+// log.Printf calls are forwarded through the OTel log pipeline, at the
+// level the writer was built with.
+type logBridge struct{ level slog.Level }
 
-func (logBridge) Write(p []byte) (int, error) {
-	slog.Info(strings.TrimRight(string(p), "\n"))
+func (b logBridge) Write(p []byte) (int, error) {
+	slog.Log(context.Background(), b.level, strings.TrimRight(string(p), "\n"))
 	return len(p), nil
+}
+
+// httpErrorLog is the logger net/http writes its own soft errors to: the
+// ones the server recovers from on its own and only reports, so they never
+// reach a handler and never reach chiMiddleware.Recoverer. "http:
+// superfluous response.WriteHeader call" (a second status written after the
+// body is already on the wire), TLS handshake failures, malformed request
+// lines and the like. net/http hands them to the standard logger with no
+// level attached, which put them in the log as INFO next to ordinary
+// request lines - but they are warnings: the server kept running and a
+// response still went out wrong.
+func httpErrorLog() *log.Logger {
+	return log.New(logBridge{level: slog.LevelWarn}, log.Prefix(), 0)
 }
 
 // parseLogLevel maps the LOG_LEVEL env var to a slog.Level, defaulting to
@@ -87,7 +101,7 @@ func main() {
 		}()
 
 		// Forward standard log package output through slog → OTel.
-		log.SetOutput(logBridge{})
+		log.SetOutput(logBridge{level: slog.LevelInfo})
 		log.SetFlags(0)
 
 		slog.Info("OpenTelemetry enabled", "endpoint", cfg.Otel.Endpoint)
@@ -189,10 +203,19 @@ func main() {
 		))
 	}
 
+	// Permanent, operator-set blocks. Ahead of the rate limiter on purpose:
+	// rejecting a banned client is an RLock and three map lookups, cheaper
+	// than the limiter's locked per-IP bookkeeping, so a banned client
+	// hammering the API costs less this way round. AccessLog still sits
+	// above both, so the rejected requests stay visible in the log.
+	bans := emlyMiddleware.NewBanList(db, cfg)
+	go bans.Run(backgroundCtx)
+	r.Use(bans.Handler)
+
 	rl := emlyMiddleware.NewRateLimiter(cfg)
 	r.Use(rl.Handler)
 
-	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub)
+	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub, bans)
 
 	// GET /v2/stats/stream hijacks the connection to complete its WebSocket
 	// upgrade (coder/websocket.Accept requires the ResponseWriter to
@@ -223,8 +246,9 @@ func main() {
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:     addr,
+		Handler:  mux,
+		ErrorLog: httpErrorLog(),
 	}
 
 	// Start server in a goroutine so we can listen for shutdown signals

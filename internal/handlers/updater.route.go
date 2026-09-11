@@ -151,7 +151,7 @@ func DownloadUpdater(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string, 
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size))
 		}
 
-		io.Copy(w, rc) //nolint:errcheck
+		streamInstaller(w, r, rc, productUpdater, version, filename, info.Size)
 
 		// The client typically closes the connection the instant it has read
 		// the last byte, which cancels r.Context() concurrently with (or just

@@ -107,5 +107,21 @@
         { "type": "index_exists", "table": "updater_events", "index": "idx_product_created" }
       ]
     }
+    ,{
+      "id": "14_updater_clients_identity",
+      "sql_file": "14_updater_clients_identity.sql",
+      "description": "Add logged_user/serial/product columns to updater_clients so the X-EMLy-LoggedUser, X-EMLy-Serial and X-EMLy-Product headers the updater now sends are recorded against the client row.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "updater_clients", "column": "logged_user" }
+      ]
+    }
+    ,{
+      "id": "15_bans",
+      "sql_file": "15_bans.sql",
+      "description": "Create the bans table backing the permanent IP/HWID/hostname blocks and their admin routes.",
+      "conditions": [
+        { "type": "table_not_exists", "table": "bans" }
+      ]
+    }
   ]
 }
