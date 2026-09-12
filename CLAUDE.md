@@ -65,7 +65,8 @@ The custom middleware live in `internal/middleware/`: `AccessLog` (`accesslog.go
 
 Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applies the custom `RateLimiter`, sets `X-Server`/`X-Powered-By` headers, exposes `GET /health`, and mounts route groups defined in sibling files (`bug_reports.go`, `admin.go`, and for v2 `updates.go`).
 
-**v1** (`/v1/api/...`):
+**v1** (`/v1/api/...`) — **deprecated, sunset after 2026-10-31** (`v1.SunsetDate`). `v1.NewRouter` applies `v1.DeprecationWarning` right after the rate limiter, logging one **warn** line per request (`deprecated API version used`) with the caller's method, path, IP, hostname, HWID and User-Agent. The root-level legacy alias `POST /api/bug-reports` is wrapped with it too, since it is a v1 route mounted outside the v1 router. The line is per-request and not sampled on purpose: a sampled warning would hide the rare caller nobody remembers deploying until the sunset breaks it, and the noise ends when `/v1` does. Every v1 route has a v2 equivalent.
+
 - `bug-reports`: API-key-only group (`POST /`, `GET /count`) and API-key + admin-key group (full CRUD, `{id}/status`, `{id}/files`, `{id}/download`, etc.).
 - `admin/auth`: session login/validate/logout (`/login` is rate-limited; `/validate` + `/logout` require a session token).
 - `admin/users`: admin-key-protected user CRUD + password reset.
