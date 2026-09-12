@@ -7,13 +7,12 @@ import (
 	"emly-api-go/internal/handlers"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/httprate"
 	"github.com/jmoiron/sqlx"
 )
 
 func registerAdmin(r chi.Router, db *sqlx.DB) {
 	r.Route("/admin", func(r chi.Router) {
-		r.Use(httprate.LimitByIP(30, time.Minute))
+		r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 		// Auth — public, handles its own credential checks
 		r.Route("/auth", func(r chi.Router) {

@@ -9,7 +9,6 @@ import (
 	"emly-api-go/internal/storage"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/httprate"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -21,14 +20,14 @@ import (
 func registerUpdates(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix, updaterPrefix string, hub *statshub.Hub) {
 	r.Route("/updates", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 			r.Get("/manifest", handlers.GetUpdateManifest(db, hub))
 			r.Get("/releases/{version}/download", handlers.DownloadRelease(db, s3conn, s3Prefix, hub))
 		})
 
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.AdminKeyAuth(db))
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 			r.Get("/releases", handlers.ListReleases(db))
 			r.Post("/releases", handlers.CreateRelease(db, s3conn, s3Prefix))
@@ -43,7 +42,7 @@ func registerUpdates(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, s3P
 		// logs and retries next cycle.
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.APIKeyAuth(db))
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 			r.Get("/manifest/updater", handlers.GetUpdaterManifest(db, hub))
 		})
@@ -52,14 +51,14 @@ func registerUpdates(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, s3P
 		// the manifest's link may be served through a site mirror or CDN that
 		// does not forward the API key.
 		r.Group(func(r chi.Router) {
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 			r.Get("/download/updater/{version}", handlers.DownloadUpdater(db, s3conn, updaterPrefix, hub))
 		})
 
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.AdminKeyAuth(db))
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 			r.Get("/updater/releases", handlers.ListUpdaterReleases(db))
 			r.Post("/updater/releases", handlers.CreateUpdaterRelease(db, s3conn, updaterPrefix))

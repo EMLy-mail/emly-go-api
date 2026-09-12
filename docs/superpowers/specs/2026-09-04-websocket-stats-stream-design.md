@@ -25,9 +25,12 @@ made while implementing:
 - Auth: `X-Admin-Key` validated before the WS upgrade, with a
   `?admin_key=`/`?dashboard_key=` query fallback for the rare proxy that
   strips custom headers on the `Upgrade` request (§4). `X-Dashboard-Key`
-  needs no extra handling here beyond that fallback - it already bypasses the
-  global rate limiter (`internal/middleware/ratelimit.ban.go`), which this
-  route sits behind like every other `/v2` route.
+  needs no extra handling here beyond that fallback - it already bypasses both
+  rate limiters (`internal/middleware/ratelimit.ban.go` globally,
+  `ratelimit.route.go` per route group), which this route sits behind like
+  every other `/v2` route. Both read the header only, not the query fallback:
+  a proxy that strips the header leaves the connection rate-limited but still
+  authenticated.
 
 ---
 

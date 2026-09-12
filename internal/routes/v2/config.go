@@ -9,7 +9,6 @@ import (
 	"emly-api-go/internal/handlers"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/httprate"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -20,14 +19,14 @@ func registerConfig(r chi.Router, db *sqlx.DB, cfg *config.Config) {
 	r.Route("/config", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.APIKeyAuth(db))
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 			r.Get("/", handlers.GetConfig(db))
 		})
 
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.AdminKeyAuth(db))
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 			r.Post("/validate", handlers.ValidateConfig(db))
 			r.Post("/preview", handlers.PreviewConfig(db))

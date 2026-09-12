@@ -7,7 +7,6 @@ import (
 	"emly-api-go/internal/handlers"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/httprate"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -21,7 +20,7 @@ func registerAdmin(r chi.Router, db *sqlx.DB, dbName string) {
 		// applied there.
 		r.Route("/auth", func(r chi.Router) {
 			r.Group(func(r chi.Router) {
-				r.Use(httprate.LimitByIP(30, time.Minute))
+				r.Use(apimw.RouteLimitByIP(30, time.Minute))
 				r.Post("/login", handlers.LoginUser(db))
 			})
 			r.Get("/validate", handlers.ValidateSession(db))
@@ -30,7 +29,7 @@ func registerAdmin(r chi.Router, db *sqlx.DB, dbName string) {
 
 		// User management — protected via Admin Key
 		r.Route("/users", func(r chi.Router) {
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 			r.Use(apimw.AdminKeyAuth(db))
 
 			r.Get("/", handlers.ListUsers(db))
@@ -45,7 +44,7 @@ func registerAdmin(r chi.Router, db *sqlx.DB, dbName string) {
 		r.Route("/bug-reports", func(r chi.Router) {
 			r.Use(apimw.APIKeyAuth(db))
 			r.Use(apimw.AdminKeyAuth(db))
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 			r.Delete("/{id}", handlers.DeleteBugReportByID(db, dbName))
 		})

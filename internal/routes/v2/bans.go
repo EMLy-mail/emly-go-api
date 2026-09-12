@@ -8,7 +8,6 @@ import (
 	"emly-api-go/internal/handlers"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/httprate"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -21,7 +20,7 @@ import (
 func registerBans(r chi.Router, db *sqlx.DB, bans handlers.BanReloader) {
 	r.Route("/bans", func(r chi.Router) {
 		r.Use(apimw.AdminKeyAuth(db))
-		r.Use(httprate.LimitByIP(30, time.Minute))
+		r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 		r.Get("/", handlers.ListBans(db))
 		r.Post("/", handlers.CreateBan(db, bans))

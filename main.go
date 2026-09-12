@@ -14,7 +14,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/httprate"
 	"github.com/joho/godotenv"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -234,7 +233,7 @@ func main() {
 	// path before it ever reaches r's middleware, and serves it with this
 	// smaller, hijack-safe stack instead. Every other path still goes
 	// through r unchanged.
-	wsHandler := httprate.LimitByIP(30, time.Minute)(handlers.StatsStream(db, statsHub))
+	wsHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(handlers.StatsStream(db, statsHub))
 	wsHandler = rl.Handler(wsHandler)
 	wsHandler = chiMiddleware.Recoverer(wsHandler)
 	wsHandler = chiMiddleware.RealIP(wsHandler)

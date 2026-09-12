@@ -76,7 +76,7 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 ### Rate limiting — two layers
 
 1. **Custom `RateLimiter`** (`ratelimit.ban.go`), applied globally and per-version-router. Two tiers keyed by IP: *unauthenticated* (no `X-API-Key`/`X-Admin-Key`, `RL_UNAUTH_*` env) and *authenticated* (`RL_AUTH_*` env). Tracks request counts per window and **bans** an IP (in-memory `sync.Map`) after `MaxFails` window-violations for `BanDur`. Private/loopback IPs and requests bearing a valid `X-Dashboard-Key` bypass it entirely. A goroutine prunes stale visitor + ban entries every 10 min.
-2. **`httprate.LimitByIP(30, time.Minute)`** applied per route group inside v1/v2.
+2. **`apimw.RouteLimitByIP(30, time.Minute)`** (`ratelimit.route.go`) applied per route group inside v1/v2, and to the WebSocket stack in `main.go`. It is `httprate.LimitByIP` plus the same `X-Dashboard-Key` exemption layer 1 has, so the two agree on who is exempt. **Never mount `httprate.LimitByIP` directly** — a route group that does becomes a second, invisible ceiling the dashboard hits while the global limiter waves it through. The exemption is there because the dashboard renders every page server-side: its whole staff shares one source address, so a per-IP budget sized for one caller gets split among all of them. Holding the key is equivalent to holding the admin key in blast radius and it never leaves the dashboard's server. With `DASHBOARD_KEY` unset the exemption is simply off.
 
 ### Package layout
 
@@ -129,7 +129,7 @@ DB_DSN=root:secret@tcp(127.0.0.1:3306)/emly?parseTime=true&loc=UTC
 Other notable vars (see `.env.example` for full list + defaults):
 - DB pool: `DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_CONNS`, `DB_CONN_MAX_LIFETIME`
 - Logging: `LOG_LEVEL` (`debug`/`info`/`warn`/`error`, default `info`) — sets the `slog` handler level for both the plain and OTel-forwarded log paths
-- Auth extras: `DASHBOARD_KEY` (rate-limit bypass)
+- Auth extras: `DASHBOARD_KEY` (bypasses both rate-limit layers)
 - Rate limiting: `RL_UNAUTH_*` and `RL_AUTH_*` (`MAX_REQS`, `WINDOW`, `MAX_FAILS`, `BAN_DUR`)
 - Storage — API file bucket: `USE_S3_API_FILE_STORAGE`, `S3_API_FILE_ACCESS_KEY_ID`, `S3_API_FILE_SECRET_ACCESS_KEY`, `S3_API_FILE_BUCKET`, `S3_API_FILE_REGION`, `S3_API_FILE_ENDPOINT`, `S3_API_FILE_ACCOUNT_ID` (optional, R2 endpoint shortcut)
 - Storage — updates bucket: `USE_S3_UPDATES_STORAGE`, `S3_UPDATES_ACCESS_KEY_ID`, `S3_UPDATES_SECRET_ACCESS_KEY`, `S3_UPDATES_BUCKET`, `S3_UPDATES_REGION`, `S3_UPDATES_ENDPOINT`, `S3_UPDATES_ACCOUNT_ID` (optional, R2 endpoint shortcut). The two buckets are fully independent and may sit on different S3-compatible providers.

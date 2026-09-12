@@ -306,8 +306,14 @@ Questi sono tutti usati in `main.go`:
 r.Use(httprate.LimitByIP(100, time.Minute))
 
 // nelle rotte — per gruppo: max 30 req/min per IP
-r.Use(httprate.LimitByIP(30, time.Minute))
+r.Use(apimw.RouteLimitByIP(30, time.Minute))
 ```
+
+`RouteLimitByIP` (`internal/middleware/ratelimit.route.go`) e' `httprate.LimitByIP`
+con una sola aggiunta: chi presenta un `X-Dashboard-Key` valido passa senza
+essere contato, come gia' faceva il limiter globale. Non usare
+`httprate.LimitByIP` diretto nelle rotte, o la dashboard si ritrova un tetto
+invisibile su quel gruppo.
 
 ---
 
@@ -356,6 +362,7 @@ func APIKeyAuth(_ *sqlx.DB) func(http.Handler) http.Handler {
 | `AdminKeyAuth` | `X-Admin-Key`      | Gestione utenti, bug report in lettura/scrittura, release di update e updater, scritture di `/v2/config`, `/v2/bans`, `/v2/stats/*` |
 | `BanList`      | —                  | Globale. Blocca gli identificatori nella tabella `bans`; chi ha una admin key valida e' esente                     |
 | `RateLimiter`  | `X-Dashboard-Key`  | Globale e su ogni router di versione. L'header non autentica: fa saltare il limite a chi lo presenta valido        |
+| `RouteLimitByIP` | `X-Dashboard-Key` | Ogni gruppo di route, 30 req/min per IP. Stessa esenzione dashboard del `RateLimiter`                            |
 
 I due middleware di auth prendono un `*sqlx.DB` che al momento non usano: le
 chiavi arrivano dalla config, non dal database.
@@ -508,7 +515,7 @@ const (
 
 ## 8. Sistema di autenticazione
 
-L'API ha **tre livelli di autenticazione separati**, tutti header-based (niente cookie, niente JWT per le rotte API), piu' un quarto header che non autentica nulla ma fa saltare il rate limiter.
+L'API ha **tre livelli di autenticazione separati**, tutti header-based (niente cookie, niente JWT per le rotte API), piu' un quarto header che non autentica nulla ma fa saltare i rate limiter.
 
 ### Livello 1: API Key (`X-API-Key`)
 
@@ -581,8 +588,17 @@ Headers: X-Session-Token: <session_id>
 ### Fuori scala: `X-Dashboard-Key`
 
 Non autentica niente e non protegge nessun endpoint. Una richiesta che lo porta
-valido salta il rate limiter custom, cosi' la dashboard puo' fare polling senza
-consumare la quota per IP. Il valore e' in `.env` come `DASHBOARD_KEY`.
+valido salta **entrambi** i rate limiter, quello globale custom e quello per
+gruppo di route, cosi' la dashboard puo' fare polling senza consumare la quota
+per IP. Il valore e' in `.env` come `DASHBOARD_KEY`.
+
+L'esenzione esiste perche' la dashboard rende ogni pagina lato server: tutte le
+sue chiamate partono da un indirizzo solo per conto di qualunque admin stia
+navigando, quindi una quota per IP pensata per un chiamante singolo finirebbe
+divisa fra tutto lo staff. Come raggio d'azione la chiave equivale alla admin
+key, ed e' un segreto che resta sul server: la dashboard non la manda mai al
+browser. Se `DASHBOARD_KEY` non e' impostata l'esenzione e' semplicemente
+spenta.
 
 ---
 
@@ -663,7 +679,7 @@ Base URL: `http://localhost:8080`
 | `X-Admin-Key`      | `/v1/api/admin/users/*` e `/v2/api/admin/users/*`, tutta la gestione release (`/v2/updates/releases`, `/v2/updates/updater/releases`), le scritture di `/v2/config`, `/v2/bans`, `/v2/stats/*` incluso `/stream` | `401`                |
 | `X-API-Key` **e** `X-Admin-Key` | Bug report in lettura e scrittura amministrativa: `GET /`, `GET /{id}`, `{id}/status`, `{id}/files`, `{id}/download`, `PATCH`, `DELETE` | `401`                |
 | `X-Session-Token`  | `/v1/api/admin/auth/validate` e `/logout`, e i loro equivalenti v2                                                                | `401`, o `403` se l'account e' disabilitato |
-| `X-Dashboard-Key`  | Nessun endpoint. Non autentica: fa saltare il rate limiter custom a chi lo presenta                                               | la richiesta prosegue, ma limitata |
+| `X-Dashboard-Key`  | Nessun endpoint. Non autentica: fa saltare i rate limiter, globale e per gruppo di route, a chi lo presenta                       | la richiesta prosegue, ma limitata |
 
 Restano **pubblici**, senza nessun header: `GET /`, `/health` in tutte le
 versioni, `GET /v2/updates/manifest`, `GET /v2/updates/releases/{version}/download`
@@ -1105,7 +1121,7 @@ Aggiungila nel gruppo con le permission corrette:
 r.Group(func(r chi.Router) {
     r.Use(apimw.APIKeyAuth(db))
     r.Use(apimw.AdminKeyAuth(db))
-    r.Use(httprate.LimitByIP(30, time.Minute))
+    r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
     r.Get("/", handlers.GetAllBugReports(db))
     r.Get("/{id}", handlers.GetBugReportByID(db))

@@ -8,7 +8,6 @@ import (
 	"emly-api-go/internal/storage"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/httprate"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -17,7 +16,7 @@ func registerBugReports(r chi.Router, db *sqlx.DB, dbName string, s3conn *storag
 		// API key only: submit a report and check count
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.APIKeyAuth(db))
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 			r.Get("/count", handlers.GetReportsCount(db, dbName))
 			r.Post("/", handlers.CreateBugReport(db, dbName, s3conn))
@@ -27,7 +26,7 @@ func registerBugReports(r chi.Router, db *sqlx.DB, dbName string, s3conn *storag
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.APIKeyAuth(db))
 			r.Use(apimw.AdminKeyAuth(db))
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 			r.Get("/", handlers.GetAllBugReports(db, dbName))
 			r.Get("/{id}", handlers.GetBugReportByID(db, dbName))

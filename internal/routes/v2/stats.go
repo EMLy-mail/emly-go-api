@@ -10,7 +10,6 @@ import (
 	"emly-api-go/internal/statshub"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/httprate"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -24,7 +23,7 @@ func registerStats(r chi.Router, db *sqlx.DB, cfg *config.Config, hub *statshub.
 	r.Route("/stats", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.AdminKeyAuth(db))
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 			r.Get("/summary", handlers.GetStatsSummary(db, cfg))
 			r.Get("/clients", handlers.ListStatsClients(db))
@@ -38,7 +37,7 @@ func registerStats(r chi.Router, db *sqlx.DB, cfg *config.Config, hub *statshub.
 		// through apimw.AdminKeyAuth - see handlers.StatsStream and the
 		// design doc §4.
 		r.Group(func(r chi.Router) {
-			r.Use(httprate.LimitByIP(30, time.Minute))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 			r.Get("/stream", handlers.StatsStream(db, hub))
 		})

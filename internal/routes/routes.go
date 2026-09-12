@@ -13,7 +13,6 @@ import (
 	"emly-api-go/internal/storage"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/httprate"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -52,7 +51,7 @@ func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storag
 func registerBugReports(_ chi.Router, db *sqlx.DB, dbName string, s3conn *storage.S3Connector) http.HandlerFunc {
 	h := handlers.CreateBugReport(db, dbName, s3conn)
 	h = apimw.APIKeyAuth(db)(h).ServeHTTP
-	h = httprate.LimitByIP(30, time.Minute)(h).ServeHTTP
+	h = apimw.RouteLimitByIP(30, time.Minute)(h).ServeHTTP
 	h = v1.DeprecationWarning(h).ServeHTTP
 	return h
 }

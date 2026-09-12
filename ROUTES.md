@@ -41,8 +41,9 @@ La colonna **Auth** usa queste sigle:
 | `SESSION`    | Header `X-Session-Token` valido, verificato dall'handler stesso    |
 | `ADMIN (WS)` | `X-Admin-Key` controllato dall'handler prima dell'upgrade WebSocket, con fallback `?admin_key=` |
 
-Tutti i gruppi applicano anche `httprate.LimitByIP(30, time.Minute)`, oltre al
-rate limiter custom descritto sotto. Tutte le risposte sono JSON tramite
+Tutti i gruppi applicano anche `apimw.RouteLimitByIP(30, time.Minute)`, oltre
+al rate limiter custom descritto sotto. Entrambi esentano chi presenta un
+`X-Dashboard-Key` valido. Tutte le risposte sono JSON tramite
 `jsonOK` / `jsonCreated` / `jsonError`, tranne i download binari.
 
 Il corpo di errore è sempre nella forma:
@@ -70,6 +71,11 @@ RequestID → RealIP → AccessLog → Recoverer → Timeout(30s) → Timing
   non autenticato (`RL_UNAUTH_*`) e autenticato (`RL_AUTH_*`). Dopo `MaxFails`
   violazioni banna l'IP in memoria per `BanDur`. IP privati/loopback e richieste
   con `X-Dashboard-Key` valido lo bypassano.
+- **RouteLimitByIP** (`internal/middleware/ratelimit.route.go`) è il limite per
+  gruppo di route: `httprate.LimitByIP` con la stessa esenzione dashboard. La
+  dashboard rende ogni pagina lato server, quindi tutto il suo traffico esce da
+  un solo indirizzo per conto di qualunque admin stia navigando: un budget per
+  IP pensato per un chiamante solo verrebbe diviso fra tutto lo staff.
 
 I router `/v1` e `/v2` riapplicano il RateLimiter e aggiungono gli header di
 risposta `X-Server` e `X-Powered-By`.
@@ -179,7 +185,8 @@ Valori ammessi `new`, `in_review`, `resolved`, `closed`; `404` se il report non 
 
 Solo `/login` è rate-limitato: è l'unico endpoint esposto al brute force.
 `/validate` e `/logout` richiedono già un token da 256 bit e vengono chiamati
-di frequente dai client autenticati.
+di frequente dai client autenticati. In v2 il limite copre tutto il gruppo, ma
+la dashboard ne è esente (vedi §2).
 
 **`POST /login` — corpo JSON**
 
@@ -253,8 +260,9 @@ autenticazione. Cambia solo il prefisso.
 ### 5.2 Admin — `/v2/api/admin`
 
 Stessi handler della v1. Differenza: in v2 il rate limit è applicato all'intero
-gruppo `/admin`, quindi anche `/auth/validate` e `/auth/logout` sono limitati.
-L'alias legacy `admin/bug-reports` non esiste in v2.
+gruppo `/admin`, quindi anche `/auth/validate` e `/auth/logout` sono limitati —
+per chi non presenta `X-Dashboard-Key`. L'alias legacy `admin/bug-reports` non
+esiste in v2.
 
 | Metodo   | Path                          | Auth      |
 |----------|-------------------------------|-----------|
@@ -632,7 +640,7 @@ stack non ci sono né Postgres LISTEN/NOTIFY né Redis.
 |-------------------|------------------|------------|
 | `X-API-Key`       | Creazione bug report, manifest dell'Updater, `GET /v2/config` | `401` |
 | `X-Admin-Key`     | Tutte le route admin, releases, config writes, bans, stats | `401` |
-| `X-Dashboard-Key` | Bypass del rate limiter custom | nessuno, la richiesta prosegue limitata |
+| `X-Dashboard-Key` | Bypass di entrambi i rate limiter, globale e per gruppo di route | nessuno, la richiesta prosegue limitata |
 | `X-Session-Token` | `auth/validate`, `auth/logout` | `401` o `403` |
 
 `API_KEY` e `ADMIN_KEY` accettano una lista separata da virgole, ma viene usato
