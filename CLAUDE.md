@@ -144,3 +144,36 @@ Other notable vars (see `.env.example` for full list + defaults):
 When you add a var to `internal/config/config.go`, update both of these in the same commit:
 1. **`.env.example`** — add it with a sensible default/placeholder and a comment.
 2. **`docker-compose.yml`** — add it under `services.api.environment` using `${VAR_NAME:-default}` syntax.
+
+## Documentation upkeep
+
+Two documents at the repo root describe the API to humans and must be kept
+current — they are not optional follow-up work, they belong in the same commit
+as the change.
+
+### `DOCS.md` — after any major architectural change
+
+`DOCS.md` is written in **Italian** for developers coming from Node.js
+(Express/Fastify) or PHP (Laravel/Slim) who have never written Go. Every
+concept is introduced by analogy to those stacks: `r.Use(...)` is explained as
+`app.use(...)`, `sqlx` against Eloquent/Knex, `struct` against a TypeScript
+interface, and so on. Keep that voice — it is the only document in the repo a
+non-Go developer can actually read.
+
+Update it whenever a change would make a section of it wrong or incomplete:
+a new package under `internal/`, a new middleware or a change to the global
+middleware order, a new auth mechanism, a change in how handlers are
+constructed or wired, a new external dependency (another S3 bucket, another
+backing service), a change to the migration mechanism, or a new route group.
+A bug fix inside an existing handler does not require a `DOCS.md` change.
+
+When you touch it, follow what is already there: explain the *why* alongside
+the *what*, and prefer the Node/PHP analogy over Go jargon.
+
+### `ROUTES.md` — whenever routes change
+
+`ROUTES.md` is the endpoint-by-endpoint reference (Italian, same audience):
+every route with its auth requirement, query/body parameters and behaviour.
+Adding, removing or renaming a route, changing its auth gating, its accepted
+parameters or its status codes means updating the matching table and prose
+there in the same commit.
