@@ -3,6 +3,7 @@ package middleware
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
@@ -28,8 +29,23 @@ func (w *loggingResponseWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// dashboardUserAgent is the User-Agent prefix the EMLy Dashboard sends. The
+// dashboard polls a handful of endpoints continuously (the stats summary above
+// all), so at info level its traffic drowns out the fleet's own requests in
+// aggregated logs. Matched case-insensitively on the prefix so a version
+// suffix ("EMLy-Dashboard/1.2.0") still counts.
+const dashboardUserAgent = "emly-dashboard"
+
+// isDashboardRequest reports whether ua belongs to the EMLy Dashboard.
+func isDashboardRequest(ua string) bool {
+	return strings.HasPrefix(strings.ToLower(ua), dashboardUserAgent)
+}
+
 // AccessLog logs one structured line per completed request, including the
-// User-Agent header so clients can be identified in aggregated logs.
+// User-Agent header so clients can be identified in aggregated logs. Dashboard
+// requests are logged at debug level instead of info: they are frequent,
+// self-inflicted polling, and keeping them out of the info stream leaves that
+// stream about clients in the field.
 func AccessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
@@ -87,6 +103,10 @@ func AccessLog(next http.Handler) http.Handler {
 		}
 		if product != "" {
 			args = append(args, "product", product)
+		}
+		if isDashboardRequest(UAString) {
+			slog.DebugContext(r.Context(), "request", args...)
+			return
 		}
 		slog.InfoContext(r.Context(), "request", args...)
 	})
