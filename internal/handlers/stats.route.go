@@ -2,6 +2,9 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
@@ -273,6 +276,73 @@ func GetStatsClientDetail(db *sqlx.DB) http.HandlerFunc {
 		jsonOK(w, map[string]interface{}{
 			"client": client,
 			"events": events,
+		})
+	}
+}
+
+// DeleteStatsClient removes one row from updater_clients, along with its
+// whole event history: updater_events.client_id is declared ON DELETE
+// CASCADE, so the rows go with it and the response reports how many did.
+//
+// Not mounted on any route yet - registerStats does not reference it. Wiring
+// it up means adding a DELETE under the admin-key group in
+// internal/routes/v2/stats.go, next to GetStatsClientDetail, and documenting
+// it in ROUTES.md.
+//
+// Deleting a client is not a way to keep a machine out. The next request
+// carrying its headers recreates the row through upsertUpdaterClient, with
+// the counters back at zero - this only forgets what was seen so far, which
+// is what makes it useful for clearing a decommissioned machine or a test
+// rig out of the dashboard. To actually block one, ban its HWID
+// (internal/middleware/ban.go), which survives renames and IP changes.
+func DeleteStatsClient(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, "invalid client id")
+			return
+		}
+
+		// Read the row first: it turns "no such client" into a clean 404,
+		// and the identity is what makes the audit line worth reading once
+		// the row itself is gone.
+		var client models.UpdaterClient
+		err = db.GetContext(r.Context(), &client, `SELECT * FROM updater_clients WHERE id = ?`, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, http.StatusNotFound, "client not found")
+			return
+		}
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to fetch client")
+			return
+		}
+
+		var eventCount int
+		if err := db.GetContext(r.Context(), &eventCount,
+			`SELECT COUNT(*) FROM updater_events WHERE client_id = ?`, id,
+		); err != nil {
+			// The count is for the report, not for the delete - a failure
+			// here must not block the operation.
+			slog.WarnContext(r.Context(), "failed to count client events before delete",
+				"client_id", id, "error", err)
+			eventCount = -1
+		}
+
+		if _, err := db.ExecContext(r.Context(), `DELETE FROM updater_clients WHERE id = ?`, id); err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to delete client")
+			return
+		}
+
+		slog.WarnContext(r.Context(), "updater client deleted",
+			"client_id", client.ID,
+			"hwid", derefString(client.HWID),
+			"hostname", client.Hostname,
+			"events_deleted", eventCount)
+
+		jsonOK(w, map[string]interface{}{
+			"status":         "deleted",
+			"client_id":      client.ID,
+			"events_deleted": eventCount,
 		})
 	}
 }
