@@ -350,10 +350,18 @@ func APIKeyAuth(_ *sqlx.DB) func(http.Handler) http.Handler {
 
 ### Middleware disponibili
 
-| Middleware       | Header richiesto  | Applicato a                                           |
-|------------------|-------------------|-------------------------------------------------------|
-| `APIKeyAuth`     | `X-API-Key`       | Tutti gli endpoint `/v1/api/bug-reports/*`            |
-| `AdminKeyAuth`   | `X-Admin-Key`     | Endpoint admin bug-reports + `/v1/api/admin/users/*`  |
+| Middleware     | Header             | Applicato a                                                                                                      |
+|----------------|--------------------|------------------------------------------------------------------------------------------------------------------|
+| `APIKeyAuth`   | `X-API-Key`        | Creazione e conteggio bug report (v1 e v2), `GET /v2/updates/manifest/updater`, `GET /v2/config`                   |
+| `AdminKeyAuth` | `X-Admin-Key`      | Gestione utenti, bug report in lettura/scrittura, release di update e updater, scritture di `/v2/config`, `/v2/bans`, `/v2/stats/*` |
+| `BanList`      | —                  | Globale. Blocca gli identificatori nella tabella `bans`; chi ha una admin key valida e' esente                     |
+| `RateLimiter`  | `X-Dashboard-Key`  | Globale e su ogni router di versione. L'header non autentica: fa saltare il limite a chi lo presenta valido        |
+
+I due middleware di auth prendono un `*sqlx.DB` che al momento non usano: le
+chiavi arrivano dalla config, non dal database.
+
+Gli endpoint admin bug report richiedono **entrambe** le chiavi, non solo
+`X-Admin-Key`: il gruppo applica `APIKeyAuth` e `AdminKeyAuth` in sequenza.
 
 ---
 
@@ -500,11 +508,13 @@ const (
 
 ## 8. Sistema di autenticazione
 
-L'API ha **due livelli di autenticazione separati**, entrambi header-based (niente cookie, niente JWT per le rotte API).
+L'API ha **tre livelli di autenticazione separati**, tutti header-based (niente cookie, niente JWT per le rotte API), piu' un quarto header che non autentica nulla ma fa saltare il rate limiter.
 
 ### Livello 1: API Key (`X-API-Key`)
 
-Usata da client esterni (es. l'applicazione desktop) per inviare bug report.
+Usata dai client esterni: l'applicazione desktop per inviare bug report,
+l'EMLy Updater per leggere il proprio manifest di self-update e per scaricare
+il documento di configurazione da `GET /v2/config`.
 
 ```
 X-API-Key: la-tua-api-key
@@ -514,13 +524,20 @@ Il valore e' configurato in `.env` come `API_KEY`. Il middleware `APIKeyAuth` ca
 
 ### Livello 2: Admin Key (`X-Admin-Key`)
 
-Usata per accedere agli endpoint di sola lettura/scrittura amministrativa.
+Usata per accedere agli endpoint amministrativi: gestione utenti, lettura e
+scrittura dei bug report, gestione delle release, scritture della remote config,
+block list e statistiche.
 
 ```
 X-Admin-Key: la-tua-admin-key
 ```
 
-Il valore e' configurato in `.env` come `ADMIN_KEY`.
+Il valore e' configurato in `.env` come `ADMIN_KEY`. Sugli endpoint admin dei
+bug report va mandata **insieme** a `X-API-Key`, non al suo posto.
+
+Una admin key valida e' anche l'esenzione dalla block list permanente: serve a
+non chiudersi fuori. Se banni l'IP dell'ufficio, la dashboard e la rotta che
+toglie il ban continuano a funzionare.
 
 ### Livello 3: Sessione utente (`X-Session-Token`)
 
@@ -560,6 +577,12 @@ Headers: X-Session-Token: <session_id>
 - Le sessioni scadute vengono eliminate automaticamente alla prima validazione fallita
 - UUID utenti generati con `crypto/rand` (UUID v4)
 - Session ID: 32 byte random, encoded come hex (64 caratteri)
+
+### Fuori scala: `X-Dashboard-Key`
+
+Non autentica niente e non protegge nessun endpoint. Una richiesta che lo porta
+valido salta il rate limiter custom, cosi' la dashboard puo' fare polling senza
+consumare la quota per IP. Il valore e' in `.env` come `DASHBOARD_KEY`.
 
 ---
 
@@ -628,13 +651,30 @@ All'avvio, `schema.Migrate(db, cfg.Database)` esegue questi passi:
 
 Base URL: `http://localhost:8080`
 
+> Il riferimento completo route per route, con auth, parametri e codici di
+> stato di ogni endpoint, sta in [ROUTES.md](ROUTES.md). Questa sezione ne
+> spiega i pezzi piu' importanti con il contesto che serve per usarli.
+
 ### Header di autenticazione
 
-| Header            | Richiesto per                                         |
-|-------------------|-------------------------------------------------------|
-| `X-API-Key`       | Tutti gli endpoint `/v1/api/bug-reports/*`            |
-| `X-Admin-Key`     | Endpoint admin bug-reports + `/v1/api/admin/users/*`  |
-| `X-Session-Token` | `/v1/api/admin/auth/validate` e `/logout`             |
+| Header             | Richiesto per                                                                                                                   | Se manca o e' errato |
+|--------------------|---------------------------------------------------------------------------------------------------------------------------------|----------------------|
+| `X-API-Key`        | `POST` e `GET /count` dei bug report (v1 e v2), `GET /v2/updates/manifest/updater`, `GET /v2/config`                              | `401`                |
+| `X-Admin-Key`      | `/v1/api/admin/users/*` e `/v2/api/admin/users/*`, tutta la gestione release (`/v2/updates/releases`, `/v2/updates/updater/releases`), le scritture di `/v2/config`, `/v2/bans`, `/v2/stats/*` incluso `/stream` | `401`                |
+| `X-API-Key` **e** `X-Admin-Key` | Bug report in lettura e scrittura amministrativa: `GET /`, `GET /{id}`, `{id}/status`, `{id}/files`, `{id}/download`, `PATCH`, `DELETE` | `401`                |
+| `X-Session-Token`  | `/v1/api/admin/auth/validate` e `/logout`, e i loro equivalenti v2                                                                | `401`, o `403` se l'account e' disabilitato |
+| `X-Dashboard-Key`  | Nessun endpoint. Non autentica: fa saltare il rate limiter custom a chi lo presenta                                               | la richiesta prosegue, ma limitata |
+
+Restano **pubblici**, senza nessun header: `GET /`, `/health` in tutte le
+versioni, `GET /v2/updates/manifest`, `GET /v2/updates/releases/{version}/download`
+e `GET /v2/updates/download/updater/{version}`. I due download stanno fuori
+dall'auth di proposito: il link del manifest puo' passare da un mirror di sito o
+da una CDN che non inoltra l'API key.
+
+`GET /v2/stats/stream` e' un caso a parte. Controlla `X-Admin-Key` da solo,
+prima di completare l'upgrade WebSocket, e accetta `?admin_key=` in query string
+come ripiego per i proxy che rimuovono gli header custom sulla richiesta di
+Upgrade.
 
 ### Ban permanenti (`bans`)
 
