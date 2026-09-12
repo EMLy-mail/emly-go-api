@@ -45,9 +45,14 @@ func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storag
 
 }
 
+// registerBugReports builds the root-level legacy alias. It is a v1 route that
+// happens to be mounted outside the v1 router, so it carries v1's deprecation
+// warning too - it is the oldest path in the API and the likeliest to be
+// wired into something nobody has looked at in a while.
 func registerBugReports(_ chi.Router, db *sqlx.DB, dbName string, s3conn *storage.S3Connector) http.HandlerFunc {
 	h := handlers.CreateBugReport(db, dbName, s3conn)
 	h = apimw.APIKeyAuth(db)(h).ServeHTTP
 	h = httprate.LimitByIP(30, time.Minute)(h).ServeHTTP
+	h = v1.DeprecationWarning(h).ServeHTTP
 	return h
 }
