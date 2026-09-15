@@ -63,6 +63,8 @@ func AccessLog(next http.Handler) http.Handler {
 		hostName := r.Header.Get("X-EMLy-Hostname")
 		hwid := r.Header.Get("X-EMLy-HWID")
 		loggedUser := r.Header.Get("X-EMLy-LoggedUser")
+		loggedUserState := r.Header.Get("X-EMLy-LoggedUserState")
+		loggedUserDisconnectedAt := r.Header.Get("X-EMLy-LoggedUserDisconnectedAt")
 		serial := r.Header.Get("X-EMLy-Serial")
 		product := r.Header.Get("X-EMLy-Product")
 
@@ -91,6 +93,14 @@ func AccessLog(next http.Handler) http.Handler {
 		// user_agent field is exactly what that split exists to avoid.
 		if loggedUser != "" {
 			args = append(args, "logged_user", loggedUser)
+		}
+		// Next to logged_user because they qualify it: without the state a
+		// session left disconnected over RDP reads like someone at the desk.
+		if loggedUserState != "" {
+			args = append(args, "logged_user_state", loggedUserState)
+		}
+		if loggedUserDisconnectedAt != "" {
+			args = append(args, "logged_user_disconnected_at", loggedUserDisconnectedAt)
 		}
 		// Logged for the same reason as logged_user, and worth the two extra
 		// fields: these three are the newest headers, so "is the client

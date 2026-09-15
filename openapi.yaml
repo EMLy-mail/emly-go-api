@@ -128,6 +128,37 @@ components:
         type: string
       example: 'CONTOSO\mario.rossi'
 
+    EMLyLoggedUserState:
+      name: X-EMLy-LoggedUserState
+      in: header
+      required: false
+      description: >-
+        How `X-EMLy-LoggedUser` is attached to the machine: `active-console`
+        (somebody at the physical console), `active-rdp` (a remote client
+        attached right now) or `disconnected` (still logged on, programs
+        running, but no client attached - typically an RDP window closed
+        without signing out). Sent whenever `X-EMLy-LoggedUser` is. Stored in
+        `updater_clients.logged_user_state`; values other than these three are
+        ignored.
+      schema:
+        type: string
+        enum: [active-console, active-rdp, disconnected]
+      example: "disconnected"
+
+    EMLyLoggedUserDisconnectedAt:
+      name: X-EMLy-LoggedUserDisconnectedAt
+      in: header
+      required: false
+      description: >-
+        When a `disconnected` session lost its client, RFC 3339 in UTC. Only
+        sent, and only stored, alongside `X-EMLy-LoggedUserState: disconnected`.
+        Stored in `updater_clients.logged_user_disconnected_at`, which is reset
+        to NULL whenever a request reports any other state.
+      schema:
+        type: string
+        format: date-time
+      example: "2026-09-12T18:04:31Z"
+
     EMLySerial:
       name: X-EMLy-Serial
       in: header
@@ -1914,8 +1945,8 @@ paths:
         An empty catalogue is therefore a `200`, not a `404`.
 
         The client also sends the `X-EMLy-*` machine-identity headers
-        (`Hostname`, `HWID`, `ADDomain`, `IntIP`, `LoggedUser`, `Serial`,
-        `Product` — see `components/parameters`), plus a
+        (`Hostname`, `HWID`, `ADDomain`, `IntIP`, `LoggedUser`,
+        `LoggedUserState`, `LoggedUserDisconnectedAt`, `Serial`, `Product` — see `components/parameters`), plus a
         `EMLy-Updater/<version> (contact)` User-Agent carrying the version
         currently installed on the machine. A staged rollout can be done
         entirely server-side by keying off those headers and returning
@@ -1928,6 +1959,8 @@ paths:
         - $ref: '#/components/parameters/EMLyADDomain'
         - $ref: '#/components/parameters/EMLyIntIP'
         - $ref: '#/components/parameters/EMLyLoggedUser'
+        - $ref: '#/components/parameters/EMLyLoggedUserState'
+        - $ref: '#/components/parameters/EMLyLoggedUserDisconnectedAt'
         - $ref: '#/components/parameters/EMLySerial'
         - $ref: '#/components/parameters/EMLyProduct'
       responses:
@@ -2362,6 +2395,8 @@ paths:
         - $ref: '#/components/parameters/EMLyADDomain'
         - $ref: '#/components/parameters/EMLyIntIP'
         - $ref: '#/components/parameters/EMLyLoggedUser'
+        - $ref: '#/components/parameters/EMLyLoggedUserState'
+        - $ref: '#/components/parameters/EMLyLoggedUserDisconnectedAt'
         - $ref: '#/components/parameters/EMLySerial'
         - $ref: '#/components/parameters/EMLyProduct'
       responses:

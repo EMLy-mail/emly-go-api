@@ -130,5 +130,13 @@
         { "type": "column_not_exists", "table": "updater_clients", "column": "emly_version" }
       ]
     }
+    ,{
+      "id": "16_updater_clients_logged_user_session",
+      "sql_file": "16_updater_clients_logged_user_session.sql",
+      "description": "Add logged_user_state/logged_user_disconnected_at columns to updater_clients so the X-EMLy-LoggedUserState and X-EMLy-LoggedUserDisconnectedAt headers tell a user at the machine from an RDP session left disconnected.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "updater_clients", "column": "logged_user_state" }
+      ]
+    }
   ]
 }

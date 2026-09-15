@@ -737,10 +737,12 @@ vuoto. Popolano la tabella `updater_clients`.
 | `X-EMLy-ADDomain`    | `ad_domain`     | Dominio AD, o nome del workgroup se non e' in dominio                                            |
 | `X-EMLy-IntIP`       | —               | Primo IPv4 non-loopback su interfaccia attiva (solo access log)                                  |
 | `X-EMLy-LoggedUser`  | `logged_user`   | Utente interattivo collegato in quel momento, da console **o RDP**, come `DOMINIO\utente`        |
+| `X-EMLy-LoggedUserState` | `logged_user_state` | Come e' collegato l'utente: `active-console`, `active-rdp` o `disconnected` (sessione ancora aperta ma senza client, es. finestra RDP chiusa senza disconnettersi). Valori diversi vengono ignorati |
+| `X-EMLy-LoggedUserDisconnectedAt` | `logged_user_disconnected_at` | Solo con `disconnected`: da quando la sessione e' senza client, RFC 3339 (salvato in UTC) |
 | `X-EMLy-Serial`      | `serial`        | Numero di serie dello chassis dal BIOS (`Win32_BIOS.SerialNumber`)                               |
 | `X-EMLy-Product`     | `product`       | Product number / SKU del produttore — su HP il `8XXXXXXX#ABZ` stampato sull'etichetta            |
 
-Due regole da tenere a mente:
+Tre regole da tenere a mente:
 
 - **Un header assente non cancella il valore gia' salvato.** L'upsert usa
   `COALESCE(NULLIF(?, ''), colonna)`, quindi un Updater troppo vecchio per
@@ -750,6 +752,10 @@ Due regole da tenere a mente:
   ogni richiesta che porta l'header, quindi va letto insieme a `last_seen_at`
   per sapere quanto e' recente. Serial e product number invece sono fissi per
   la macchina.
+- **`logged_user_disconnected_at` segue lo stato, non il proprio header.**
+  Ogni richiesta che porta `X-EMLy-LoggedUserState` riscrive anche l'orario,
+  azzerandolo se la sessione non e' `disconnected`: altrimenti un utente che si
+  ricollega lascerebbe in tabella "active-rdp, disconnesso da ieri".
 
 ---
 

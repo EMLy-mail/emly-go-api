@@ -562,14 +562,17 @@ sommario va in `buildStatsSummary`, dietro la cache, non nell'handler.
 | `to`         | RFC3339 |
 
 **Telemetria dei client.** Gli header `X-EMLy-*` (`Hostname`, `HWID`, `ADDomain`,
-`LoggedUser`, `Serial`, `Product`, `AppVersion`) sono letti in un solo punto,
+`LoggedUser`, `LoggedUserState`, `LoggedUserDisconnectedAt`, `Serial`, `Product`,
+`AppVersion`) sono letti in un solo punto,
 `clientIdentityFromRequest`, insieme alla versione e al contatto estratti dallo
 User-Agent e all'IP del peer. Aggiungere un header significa aggiungerlo lì, non
 nei singoli call site. Una richiesta senza né HWID né hostname viene servita ma
 non tracciata. Un header che il client non invia non azzera mai il valore già
 memorizzato: l'Updater omette gli header per cui non ha un valore, quindi
 "assente" vuol dire "sconosciuto". Per questo `logged_user` è un'istantanea da
-leggere insieme a `last_seen_at`, non uno storico.
+leggere insieme a `last_seen_at`, non uno storico. Unica eccezione:
+`logged_user_disconnected_at` viene riscritto (anche a `NULL`) ogni volta che
+arriva uno stato, così non sopravvive a una sessione che si è ricollegata.
 
 ### 5.8 Stream WebSocket — `/v2/stats/stream`
 

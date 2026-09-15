@@ -4,6 +4,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The whole X-EMLy-* set the EMLy Updater sends must land on clientIdentity.
@@ -17,20 +18,24 @@ func TestClientIdentityFromRequest(t *testing.T) {
 	r.Header.Set("X-EMLy-Hostname", "PC-01")
 	r.Header.Set("X-EMLy-ADDomain", "contoso.local")
 	r.Header.Set("X-EMLy-LoggedUser", `CONTOSO\mario.rossi`)
+	r.Header.Set("X-EMLy-LoggedUserState", "disconnected")
+	r.Header.Set("X-EMLy-LoggedUserDisconnectedAt", "2026-09-12T18:04:31Z")
 	r.Header.Set("X-EMLy-Serial", "CND0342SLW")
 	r.Header.Set("X-EMLy-Product", "1F3N0EA#ABZ")
 
 	got := clientIdentityFromRequest(r)
 	want := clientIdentity{
-		HWID:       "36CC511A-F0DE-EA11-8106-842AFDCE34D0",
-		Hostname:   "PC-01",
-		ADDomain:   "contoso.local",
-		LoggedUser: `CONTOSO\mario.rossi`,
-		Serial:     "CND0342SLW",
-		Product:    "1F3N0EA#ABZ",
-		UAVersion:  "1.5.6",
-		Contact:    "f.fois@3git.eu",
-		IP:         "10.0.0.5",
+		HWID:                     "36CC511A-F0DE-EA11-8106-842AFDCE34D0",
+		Hostname:                 "PC-01",
+		ADDomain:                 "contoso.local",
+		LoggedUser:               `CONTOSO\mario.rossi`,
+		LoggedUserState:          "disconnected",
+		LoggedUserDisconnectedAt: time.Date(2026, 9, 12, 18, 4, 31, 0, time.UTC),
+		Serial:                   "CND0342SLW",
+		Product:                  "1F3N0EA#ABZ",
+		UAVersion:                "1.5.6",
+		Contact:                  "f.fois@3git.eu",
+		IP:                       "10.0.0.5",
 	}
 	if got != want {
 		t.Fatalf("clientIdentityFromRequest =\n  %+v\nwant\n  %+v", got, want)
@@ -50,8 +55,41 @@ func TestClientIdentityWithoutNewHeaders(t *testing.T) {
 	if !got.identified() {
 		t.Error("a request carrying only a hostname must still be identified")
 	}
-	if got.LoggedUser != "" || got.Serial != "" || got.Product != "" {
+	if got.LoggedUser != "" || got.LoggedUserState != "" || !got.LoggedUserDisconnectedAt.IsZero() ||
+		got.Serial != "" || got.Product != "" {
 		t.Errorf("absent headers produced values: %+v", got)
+	}
+}
+
+// Only the states the updater defines are stored, and the disconnection time
+// only ever travels with a disconnected session: anything else would put a
+// value in the row the dashboard cannot interpret, or a stale timestamp next
+// to a live session.
+func TestParseLoggedUserSession(t *testing.T) {
+	at := "2026-09-12T20:04:31+02:00"
+	wantAt := time.Date(2026, 9, 12, 18, 4, 31, 0, time.UTC)
+	cases := []struct {
+		name, state, at string
+		wantState       string
+		wantAt          time.Time
+	}{
+		{"disconnected with time, normalised to UTC", "disconnected", at, "disconnected", wantAt},
+		{"fractional seconds dropped", "disconnected", "2026-09-12T18:04:31.734Z", "disconnected", wantAt},
+		{"disconnected without time", "disconnected", "", "disconnected", time.Time{}},
+		{"disconnected with garbage time", "disconnected", "yesterday", "disconnected", time.Time{}},
+		{"state is case-insensitive", " Active-RDP ", "", "active-rdp", time.Time{}},
+		{"time dropped on an active session", "active-console", at, "active-console", time.Time{}},
+		{"unknown state ignored", "locked", at, "", time.Time{}},
+		{"absent", "", "", "", time.Time{}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			state, got := parseLoggedUserSession(c.state, c.at)
+			if state != c.wantState || !got.Equal(c.wantAt) {
+				t.Errorf("parseLoggedUserSession(%q, %q) = (%q, %v), want (%q, %v)",
+					c.state, c.at, state, got, c.wantState, c.wantAt)
+			}
+		})
 	}
 }
 

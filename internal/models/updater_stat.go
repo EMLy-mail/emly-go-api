@@ -14,8 +14,15 @@ type UpdaterClient struct {
 	// Product are the firmware's chassis serial and vendor product/SKU
 	// number. All three are nil for a client that has never reported one.
 	LoggedUser *string `db:"logged_user"       json:"logged_user,omitempty"`
-	Serial     *string `db:"serial"            json:"serial,omitempty"`
-	Product    *string `db:"product"           json:"product,omitempty"`
+	// LoggedUserState is how LoggedUser was attached at that sighting:
+	// "active-console", "active-rdp" or "disconnected" (a session still
+	// logged on with no client attached). LoggedUserDisconnectedAt is when a
+	// disconnected session lost its client, and nil for any other state. Both
+	// are nil for a client that has never reported a state.
+	LoggedUserState          *string    `db:"logged_user_state"           json:"logged_user_state,omitempty"`
+	LoggedUserDisconnectedAt *time.Time `db:"logged_user_disconnected_at" json:"logged_user_disconnected_at,omitempty"`
+	Serial                   *string    `db:"serial"            json:"serial,omitempty"`
+	Product                  *string    `db:"product"           json:"product,omitempty"`
 	// UpdaterVersion is the version of the EMLy Updater that made the request
 	// (read off its User-Agent); EMLyVersion is the version of the EMLy app it
 	// maintains (X-EMLy-AppVersion). The two move independently, so a fleet on

@@ -67,8 +67,13 @@ type clientIdentity struct {
 	Hostname   string
 	ADDomain   string
 	LoggedUser string
-	Serial     string
-	Product    string
+	// LoggedUserState is one of the loggedUserState* values, or "" when the
+	// header is absent or carries a value this server does not know.
+	// LoggedUserDisconnectedAt is set only alongside loggedUserDisconnected.
+	LoggedUserState          string
+	LoggedUserDisconnectedAt time.Time
+	Serial                   string
+	Product                  string
 	// EMLyVersion is the version of the EMLy app (X-EMLy-AppVersion),
 	// UAVersion the version of the updater that reported it (User-Agent).
 	// They move independently: the updater self-updates on its own schedule,
@@ -85,17 +90,53 @@ func (c clientIdentity) identified() bool { return c.HWID != "" || c.Hostname !=
 
 func clientIdentityFromRequest(r *http.Request) clientIdentity {
 	uaVersion, contact := parseUpdaterUserAgent(r.UserAgent())
+	state, disconnectedAt := parseLoggedUserSession(
+		r.Header.Get("X-EMLy-LoggedUserState"), r.Header.Get("X-EMLy-LoggedUserDisconnectedAt"))
 	return clientIdentity{
-		HWID:        r.Header.Get("X-EMLy-HWID"),
-		Hostname:    r.Header.Get("X-EMLy-Hostname"),
-		ADDomain:    r.Header.Get("X-EMLy-ADDomain"),
-		LoggedUser:  truncate(r.Header.Get("X-EMLy-LoggedUser"), 255),
-		Serial:      truncate(r.Header.Get("X-EMLy-Serial"), 128),
-		Product:     truncate(r.Header.Get("X-EMLy-Product"), 128),
-		EMLyVersion: truncate(r.Header.Get("X-EMLy-AppVersion"), 20),
-		UAVersion:   uaVersion,
-		Contact:     contact,
-		IP:          clientIPFromRequest(r),
+		HWID:                     r.Header.Get("X-EMLy-HWID"),
+		Hostname:                 r.Header.Get("X-EMLy-Hostname"),
+		ADDomain:                 r.Header.Get("X-EMLy-ADDomain"),
+		LoggedUser:               truncate(r.Header.Get("X-EMLy-LoggedUser"), 255),
+		LoggedUserState:          state,
+		LoggedUserDisconnectedAt: disconnectedAt,
+		Serial:                   truncate(r.Header.Get("X-EMLy-Serial"), 128),
+		Product:                  truncate(r.Header.Get("X-EMLy-Product"), 128),
+		EMLyVersion:              truncate(r.Header.Get("X-EMLy-AppVersion"), 20),
+		UAVersion:                uaVersion,
+		Contact:                  contact,
+		IP:                       clientIPFromRequest(r),
+	}
+}
+
+// Values of X-EMLy-LoggedUserState, and of updater_clients.logged_user_state.
+// They are a wire contract with the EMLy Updater (machineinfo.SessionState).
+const (
+	loggedUserActiveConsole = "active-console"
+	loggedUserActiveRDP     = "active-rdp"
+	loggedUserDisconnected  = "disconnected"
+)
+
+// parseLoggedUserSession validates the two session headers together.
+//
+// A state this server does not know comes back as "" - stored as "not
+// reported" rather than as whatever string a client sent, so the column only
+// ever holds values the dashboard can interpret. The disconnection time is
+// only meaningful for a disconnected session and is dropped for any other
+// state, as is one that does not parse as RFC 3339; it is normalised to UTC
+// because that is how the DSN (loc=UTC) reads every DATETIME back.
+func parseLoggedUserSession(state, disconnectedAt string) (string, time.Time) {
+	state = strings.ToLower(strings.TrimSpace(state))
+	switch state {
+	case loggedUserActiveConsole, loggedUserActiveRDP:
+		return state, time.Time{}
+	case loggedUserDisconnected:
+		t, err := time.Parse(time.RFC3339, strings.TrimSpace(disconnectedAt))
+		if err != nil {
+			return state, time.Time{}
+		}
+		return state, t.UTC().Truncate(time.Second)
+	default:
+		return "", time.Time{}
 	}
 }
 
@@ -222,6 +263,12 @@ func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, hub *
 // or a machine sitting at the lock screen with nobody logged on, must not
 // erase what earlier sightings established. last_seen_at is what says how
 // current the row is.
+//
+// logged_user_disconnected_at is the one exception: it follows
+// logged_user_state instead of its own header. Whenever a state is reported
+// the timestamp is written with it - NULL included - because a session that
+// reconnects stops sending the header, and keeping the old value would leave
+// a row saying "active-rdp, disconnected since yesterday".
 func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, id clientIdentity) (int64, error) {
 	hwid, hostname, adDomain := id.HWID, id.Hostname, id.ADDomain
 	lookup := func(query string, args ...interface{}) (int64, bool, error) {
@@ -272,12 +319,16 @@ func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, id clientIdentity) (i
 			`UPDATE updater_clients
 			 SET hwid = COALESCE(NULLIF(?, ''), hwid), hostname = ?, ad_domain = ?,
 			     logged_user = COALESCE(NULLIF(?, ''), logged_user),
+			     logged_user_disconnected_at = IF(? = '', logged_user_disconnected_at, ?),
+			     logged_user_state = COALESCE(NULLIF(?, ''), logged_user_state),
 			     serial = COALESCE(NULLIF(?, ''), serial),
 			     product = COALESCE(NULLIF(?, ''), product),
 			     emly_version = COALESCE(NULLIF(?, ''), emly_version),
 			     updater_version = ?, contact = ?, last_ip = ?, last_seen_at = CURRENT_TIMESTAMP
 			 WHERE id = ?`,
-			hwid, hostname, adDomain, id.LoggedUser, id.Serial, id.Product, id.EMLyVersion,
+			hwid, hostname, adDomain, id.LoggedUser,
+			id.LoggedUserState, nullableTime(id.LoggedUserDisconnectedAt), id.LoggedUserState,
+			id.Serial, id.Product, id.EMLyVersion,
 			nullableString(id.UAVersion), nullableString(id.Contact), nullableString(id.IP), targetID,
 		); err != nil {
 			return 0, err
@@ -286,10 +337,11 @@ func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, id clientIdentity) (i
 	}
 
 	res, err := db.ExecContext(ctx,
-		`INSERT INTO updater_clients (hwid, hostname, ad_domain, logged_user, serial, product, emly_version, updater_version, contact, last_ip)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO updater_clients (hwid, hostname, ad_domain, logged_user, logged_user_state, logged_user_disconnected_at, serial, product, emly_version, updater_version, contact, last_ip)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullableString(hwid), hostname, adDomain,
-		nullableString(id.LoggedUser), nullableString(id.Serial), nullableString(id.Product),
+		nullableString(id.LoggedUser), nullableString(id.LoggedUserState), nullableTime(id.LoggedUserDisconnectedAt),
+		nullableString(id.Serial), nullableString(id.Product),
 		nullableString(id.EMLyVersion),
 		nullableString(id.UAVersion), nullableString(id.Contact), nullableString(id.IP),
 	)
@@ -304,6 +356,13 @@ func nullableString(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+func nullableTime(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 const releaseSelectCols = `
