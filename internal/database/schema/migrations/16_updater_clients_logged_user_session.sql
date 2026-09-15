@@ -10,7 +10,10 @@
 -- (UTC, like every other DATETIME here).
 --
 -- VARCHAR rather than ENUM so a state added by a future updater is a code
--- change, not a migration; the handler only stores the values it knows.
+-- change, not a migration. The handler only stores the values it knows.
+--
+-- No semicolons in these comments: the migrator splits the file on every
+-- one of them, comments included.
 --
 -- Both nullable with no default: NULL means this client has never reported a
 -- state (an updater too old to send the header), and for logged_user_disconnected_at

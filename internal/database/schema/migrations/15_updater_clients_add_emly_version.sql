@@ -6,8 +6,8 @@
 -- installs behind it lag several releases. emly_version is that second number,
 -- so "who is still on the old EMLy" is answerable without joining events.
 --
--- VARCHAR(20) matches updater_clients.updater_version and updater_events.version;
--- the handler truncates to the same width so an over-long header cannot fail
+-- VARCHAR(20) matches updater_clients.updater_version and updater_events.version,
+-- and the handler truncates to the same width so an over-long header cannot fail
 -- the whole telemetry upsert.
 --
 -- Nullable with no default: NULL means this client has never reported one - an
