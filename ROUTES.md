@@ -570,9 +570,12 @@ nei singoli call site. Una richiesta senza né HWID né hostname viene servita m
 non tracciata. Un header che il client non invia non azzera mai il valore già
 memorizzato: l'Updater omette gli header per cui non ha un valore, quindi
 "assente" vuol dire "sconosciuto". Per questo `logged_user` è un'istantanea da
-leggere insieme a `last_seen_at`, non uno storico. Unica eccezione:
+leggere insieme a `last_seen_at`, non uno storico. Due eccezioni:
 `logged_user_disconnected_at` viene riscritto (anche a `NULL`) ogni volta che
-arriva uno stato, così non sopravvive a una sessione che si è ricollegata.
+arriva uno stato, così non sopravvive a una sessione che si è ricollegata; e un
+Updater 1.6.2 o successivo che non manda `X-EMLy-LoggedUser` sta dicendo che non
+c'è nessuno loggato, quindi utente, stato e orario di disconnessione vengono
+azzerati.
 
 ### 5.8 Stream WebSocket — `/v2/stats/stream`
 

@@ -742,14 +742,21 @@ vuoto. Popolano la tabella `updater_clients`.
 | `X-EMLy-Serial`      | `serial`        | Numero di serie dello chassis dal BIOS (`Win32_BIOS.SerialNumber`)                               |
 | `X-EMLy-Product`     | `product`       | Product number / SKU del produttore — su HP il `8XXXXXXX#ABZ` stampato sull'etichetta            |
 
-Tre regole da tenere a mente:
+Quattro regole da tenere a mente:
 
 - **Un header assente non cancella il valore gia' salvato.** L'upsert usa
   `COALESCE(NULLIF(?, ''), colonna)`, quindi un Updater troppo vecchio per
-  mandare i nuovi header — o una macchina ferma al lock screen, senza nessuno
-  loggato — non azzera quello che le richieste precedenti avevano registrato.
+  mandare i nuovi header non azzera quello che le richieste precedenti avevano
+  registrato.
+- **Eccezione: dalla 1.6.2 un utente assente vuol dire "nessuno loggato".**
+  Da quella versione l'Updater manda sempre utente e stato insieme, e li omette
+  solo quando sulla macchina non c'e' nessuna sessione interattiva. Se la
+  richiesta arriva da un `EMLy-Updater/1.6.2` o successivo (letto dallo
+  User-Agent) senza `X-EMLy-LoggedUser`, `logged_user`, `logged_user_state` e
+  `logged_user_disconnected_at` vengono azzerati. Per le versioni precedenti
+  l'assenza resta "sconosciuto".
 - **`logged_user` e' un'istantanea, non uno storico**: viene sovrascritto a
-  ogni richiesta che porta l'header, quindi va letto insieme a `last_seen_at`
+  ogni richiesta che porta l'header (o azzerato come sopra), quindi va letto insieme a `last_seen_at`
   per sapere quanto e' recente. Serial e product number invece sono fissi per
   la macchina.
 - **`logged_user_disconnected_at` segue lo stato, non il proprio header.**

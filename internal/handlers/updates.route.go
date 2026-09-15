@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,8 +73,12 @@ type clientIdentity struct {
 	// LoggedUserDisconnectedAt is set only alongside loggedUserDisconnected.
 	LoggedUserState          string
 	LoggedUserDisconnectedAt time.Time
-	Serial                   string
-	Product                  string
+	// NobodyLoggedOn is true when the request positively says the machine
+	// has no interactive user, as opposed to merely not saying who it is. See
+	// reportsNobodyLoggedOn.
+	NobodyLoggedOn bool
+	Serial         string
+	Product        string
 	// EMLyVersion is the version of the EMLy app (X-EMLy-AppVersion),
 	// UAVersion the version of the updater that reported it (User-Agent).
 	// They move independently: the updater self-updates on its own schedule,
@@ -92,13 +97,15 @@ func clientIdentityFromRequest(r *http.Request) clientIdentity {
 	uaVersion, contact := parseUpdaterUserAgent(r.UserAgent())
 	state, disconnectedAt := parseLoggedUserSession(
 		r.Header.Get("X-EMLy-LoggedUserState"), r.Header.Get("X-EMLy-LoggedUserDisconnectedAt"))
+	loggedUser := truncate(r.Header.Get("X-EMLy-LoggedUser"), 255)
 	return clientIdentity{
 		HWID:                     r.Header.Get("X-EMLy-HWID"),
 		Hostname:                 r.Header.Get("X-EMLy-Hostname"),
 		ADDomain:                 r.Header.Get("X-EMLy-ADDomain"),
-		LoggedUser:               truncate(r.Header.Get("X-EMLy-LoggedUser"), 255),
+		LoggedUser:               loggedUser,
 		LoggedUserState:          state,
 		LoggedUserDisconnectedAt: disconnectedAt,
+		NobodyLoggedOn:           reportsNobodyLoggedOn(loggedUser, uaVersion),
 		Serial:                   truncate(r.Header.Get("X-EMLy-Serial"), 128),
 		Product:                  truncate(r.Header.Get("X-EMLy-Product"), 128),
 		EMLyVersion:              truncate(r.Header.Get("X-EMLy-AppVersion"), 20),
@@ -115,6 +122,69 @@ const (
 	loggedUserActiveRDP     = "active-rdp"
 	loggedUserDisconnected  = "disconnected"
 )
+
+// loggedUserSessionMinUpdaterVersion is the first EMLy Updater build that
+// sends X-EMLy-LoggedUserState. From this version on the updater resolves the
+// logged-on user on every request and sends the user and its state together,
+// omitting both only when nobody is logged on.
+const loggedUserSessionMinUpdaterVersion = "1.6.2"
+
+// reportsNobodyLoggedOn tells "nobody is logged on" apart from "this client
+// does not say". An updater older than loggedUserSessionMinUpdaterVersion
+// sends no header in both cases, so its silence keeps the stored user. A
+// newer one only omits X-EMLy-LoggedUser when the machine has no interactive
+// session, so its silence is an answer, and keeping the previous user would
+// show someone who signed out days ago as still logged on. A User-Agent that
+// is not the updater's, or a version that does not parse, is not an answer.
+func reportsNobodyLoggedOn(loggedUser, uaVersion string) bool {
+	if loggedUser != "" || uaVersion == "" {
+		return false
+	}
+	cmp, ok := compareDottedVersions(uaVersion, loggedUserSessionMinUpdaterVersion)
+	return ok && cmp >= 0
+}
+
+// compareDottedVersions compares the numeric major.minor.patch prefix of two
+// versions, ignoring any pre-release or build suffix ("1.6.2-dev" is 1.6.2).
+// ok is false when either side has no numeric prefix to compare.
+func compareDottedVersions(a, b string) (cmp int, ok bool) {
+	pa, okA := dottedVersionParts(a)
+	pb, okB := dottedVersionParts(b)
+	if !okA || !okB {
+		return 0, false
+	}
+	for i := range pa {
+		switch {
+		case pa[i] < pb[i]:
+			return -1, true
+		case pa[i] > pb[i]:
+			return 1, true
+		}
+	}
+	return 0, true
+}
+
+func dottedVersionParts(v string) ([3]int, bool) {
+	var parts [3]int
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
+	}
+	fields := strings.Split(v, ".")
+	if len(fields) == 0 || len(fields) > 4 {
+		return parts, false
+	}
+	for i, f := range fields {
+		if i >= len(parts) {
+			break
+		}
+		n, err := strconv.Atoi(f)
+		if err != nil || n < 0 {
+			return parts, false
+		}
+		parts[i] = n
+	}
+	return parts, true
+}
 
 // parseLoggedUserSession validates the two session headers together.
 //
@@ -259,16 +329,21 @@ func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, hub *
 // than clearing it (the COALESCE/NULLIF pairs below). "Not reported" and
 // "reported as empty" are the same thing on the wire - the updater omits a
 // header it has no value for - and for logged_user/serial/product the last
-// known answer is worth more than a NULL: an updater too old to send them,
-// or a machine sitting at the lock screen with nobody logged on, must not
-// erase what earlier sightings established. last_seen_at is what says how
-// current the row is.
+// known answer is worth more than a NULL: an updater too old to send them
+// must not erase what earlier sightings established. last_seen_at is what
+// says how current the row is.
 //
-// logged_user_disconnected_at is the one exception: it follows
-// logged_user_state instead of its own header. Whenever a state is reported
-// the timestamp is written with it - NULL included - because a session that
-// reconnects stops sending the header, and keeping the old value would leave
-// a row saying "active-rdp, disconnected since yesterday".
+// The logged-user columns have two exceptions:
+//   - when the request positively reports that nobody is logged on
+//     (id.NobodyLoggedOn - an updater new enough that its silence is an
+//     answer), logged_user, logged_user_state and logged_user_disconnected_at
+//     are all cleared, otherwise a user who signed out stays on the row for
+//     as long as the machine keeps checking in;
+//   - logged_user_disconnected_at follows logged_user_state instead of its
+//     own header. Whenever a state is reported the timestamp is written with
+//     it - NULL included - because a session that reconnects stops sending
+//     the header, and keeping the old value would leave a row saying
+//     "active-rdp, disconnected since yesterday".
 func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, id clientIdentity) (int64, error) {
 	hwid, hostname, adDomain := id.HWID, id.Hostname, id.ADDomain
 	lookup := func(query string, args ...interface{}) (int64, bool, error) {
@@ -318,16 +393,18 @@ func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, id clientIdentity) (i
 		if _, err := db.ExecContext(ctx,
 			`UPDATE updater_clients
 			 SET hwid = COALESCE(NULLIF(?, ''), hwid), hostname = ?, ad_domain = ?,
-			     logged_user = COALESCE(NULLIF(?, ''), logged_user),
-			     logged_user_disconnected_at = IF(? = '', logged_user_disconnected_at, ?),
-			     logged_user_state = COALESCE(NULLIF(?, ''), logged_user_state),
+			     logged_user = IF(?, NULL, COALESCE(NULLIF(?, ''), logged_user)),
+			     logged_user_disconnected_at = IF(? OR ? <> '', ?, logged_user_disconnected_at),
+			     logged_user_state = IF(?, NULL, COALESCE(NULLIF(?, ''), logged_user_state)),
 			     serial = COALESCE(NULLIF(?, ''), serial),
 			     product = COALESCE(NULLIF(?, ''), product),
 			     emly_version = COALESCE(NULLIF(?, ''), emly_version),
 			     updater_version = ?, contact = ?, last_ip = ?, last_seen_at = CURRENT_TIMESTAMP
 			 WHERE id = ?`,
-			hwid, hostname, adDomain, id.LoggedUser,
-			id.LoggedUserState, nullableTime(id.LoggedUserDisconnectedAt), id.LoggedUserState,
+			hwid, hostname, adDomain,
+			id.NobodyLoggedOn, id.LoggedUser,
+			id.NobodyLoggedOn, id.LoggedUserState, nullableTime(id.LoggedUserDisconnectedAt),
+			id.NobodyLoggedOn, id.LoggedUserState,
 			id.Serial, id.Product, id.EMLyVersion,
 			nullableString(id.UAVersion), nullableString(id.Contact), nullableString(id.IP), targetID,
 		); err != nil {

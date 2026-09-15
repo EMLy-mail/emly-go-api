@@ -72,7 +72,9 @@ components:
     # it makes. All are optional: a client that cannot determine a value omits
     # the header rather than sending it empty, and the API reads a missing
     # header as "unknown" — it never clears a value an earlier sighting
-    # established. They are what populates `updater_clients`.
+    # established. The one exception is X-EMLy-LoggedUser from an updater
+    # 1.6.2 or newer, whose absence means nobody is logged on and clears the
+    # stored user. They are what populates `updater_clients`.
 
     EMLyHostname:
       name: X-EMLy-Hostname

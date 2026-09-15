@@ -42,10 +42,9 @@ func TestClientIdentityFromRequest(t *testing.T) {
 	}
 }
 
-// A client too old to send the new headers, or one on a machine with nobody
-// logged on, must still be identified and tracked - the new values simply
-// come through empty, which upsertUpdaterClient turns into "leave the stored
-// value alone".
+// A client too old to send the new headers must still be identified and
+// tracked - the new values simply come through empty, which
+// upsertUpdaterClient turns into "leave the stored value alone".
 func TestClientIdentityWithoutNewHeaders(t *testing.T) {
 	r := httptest.NewRequest("GET", "/v2/updates/manifest", nil)
 	r.RemoteAddr = "10.0.0.5:51234"
@@ -58,6 +57,65 @@ func TestClientIdentityWithoutNewHeaders(t *testing.T) {
 	if got.LoggedUser != "" || got.LoggedUserState != "" || !got.LoggedUserDisconnectedAt.IsZero() ||
 		got.Serial != "" || got.Product != "" {
 		t.Errorf("absent headers produced values: %+v", got)
+	}
+	if got.NobodyLoggedOn {
+		t.Error("a request with no updater User-Agent must not claim nobody is logged on")
+	}
+}
+
+// From 1.6.2 on the updater sends the user on every request that has one, so
+// a request without it means nobody is logged on and the stored user must be
+// cleared - otherwise a machine signed out for days keeps showing its last
+// user. Older updaters never send the state, so their silence stays "unknown".
+func TestClientIdentityNobodyLoggedOn(t *testing.T) {
+	cases := []struct {
+		name, ua, user string
+		want           bool
+	}{
+		{"current updater, no user", "EMLy-Updater/1.6.2 (f.fois@3git.eu)", "", true},
+		{"newer updater, no user", "EMLy-Updater/1.10.0 (f.fois@3git.eu)", "", true},
+		{"dev build of the first version", "EMLy-Updater/1.6.2-dev (f.fois@3git.eu)", "", true},
+		{"current updater with a user", "EMLy-Updater/1.6.2 (f.fois@3git.eu)", `CONTOSO\bera2`, false},
+		{"updater before session state", "EMLy-Updater/1.6.1 (f.fois@3git.eu)", "", false},
+		{"not the updater", "Mozilla/5.0", "", false},
+		{"unparseable version", "EMLy-Updater/dev (f.fois@3git.eu)", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "/v2/config", nil)
+			r.Header.Set("X-EMLy-HWID", "HW-1")
+			r.Header.Set("User-Agent", c.ua)
+			if c.user != "" {
+				r.Header.Set("X-EMLy-LoggedUser", c.user)
+				r.Header.Set("X-EMLy-LoggedUserState", "active-console")
+			}
+			if got := clientIdentityFromRequest(r).NobodyLoggedOn; got != c.want {
+				t.Errorf("NobodyLoggedOn = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestCompareDottedVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		cmp  int
+		ok   bool
+	}{
+		{"1.6.2", "1.6.2", 0, true},
+		{"1.6.10", "1.6.2", 1, true},
+		{"1.5.9", "1.6.2", -1, true},
+		{"2.0", "1.6.2", 1, true},
+		{"1.6.2.4", "1.6.2", 0, true},
+		{"1.6.2+build.7", "1.6.2", 0, true},
+		{"v1.6.2", "1.6.2", 0, false},
+		{"", "1.6.2", 0, false},
+	}
+	for _, c := range cases {
+		cmp, ok := compareDottedVersions(c.a, c.b)
+		if cmp != c.cmp || ok != c.ok {
+			t.Errorf("compareDottedVersions(%q, %q) = (%d, %v), want (%d, %v)", c.a, c.b, cmp, ok, c.cmp, c.ok)
+		}
 	}
 }
 
