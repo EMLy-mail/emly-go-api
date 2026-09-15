@@ -24,7 +24,8 @@ go run . --migrate-files
 # internal/routes/v2 and internal/handlers), the stats event bus
 # (internal/statshub), and the stats WS stream (routing + admin-key gating
 # in internal/routes/v2; auth gating, the query-string key fallback, and a
-# full ping/pong handshake over a real listener in internal/handlers)
+# full ping/pong handshake over a real listener in internal/handlers), and
+# the daily log files (naming, day rotation, retention in internal/logfile)
 go test ./...
 go test ./internal/... -run TestName -v
 ```
@@ -43,7 +44,7 @@ Go REST API for the "EMLy" bug-reporting system. Stack:
 ### Startup sequence (`main.go`)
 
 1. `godotenv.Load()` then `config.Load()` (singleton via `sync.Once`).
-2. If `OTEL_ENABLED`, set up OTel and bridge the std `log` package into `slog` → OTLP.
+2. If `LOG_FILE_ENABLED`, open today's file via `internal/logfile` and tee the console handler's output into it (a failure falls back to console-only with a warn line). If `OTEL_ENABLED`, set up OTel. In both modes bridge the std `log` package into `slog`, so `log.Fatalf` reaches OTLP and the log file.
 3. Connect to MySQL, run `schema.Migrate`.
 4. For each of `USE_S3_API_FILE_STORAGE` / `USE_S3_UPDATES_STORAGE` that is enabled, build + ping that bucket's S3 connector independently (an unreachable bucket logs an error and leaves that connector `nil` rather than crashing startup).
 5. Handle `--migrate-files` CLI flag.
@@ -86,6 +87,7 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - `internal/handlers/` — Factory functions returning `http.HandlerFunc`, named `<resource>.route.go`. Response helpers (`jsonOK`, `jsonCreated`, `jsonError`) in `response.go`.
 - `internal/middleware/` — Auth (`apikey.go`, `adminKey.go`) and rate limiting. Auth middleware load allowed keys into a map at construction for O(1) lookup; they take a `*sqlx.DB` arg that is currently unused (keys come from config).
 - `internal/storage/` — `S3Connector` wrapping an S3-compatible bucket (upload/download/list/delete/rename, folder helpers) and `migrateFiles.go`. `NewS3Connector` is provider-agnostic; `main.go` constructs one instance per bucket (API files, updates) from their respective `config.S3BucketConfig`.
+- `internal/logfile/` — HTTP- and DB-free `io.Writer` over one log file per day, `emly-api-log-YYYY-MM-DD-HH-mm-ss.log` named after the moment it was opened (`-`, not `:`, because `:` is illegal in Windows file names). Rotates on the first write of a new local-time day, and a restart opens a new file too; prunes files older than `LOG_RETENTION_DAYS` whenever it opens one, touching only names it generates. `main.go` is its only caller and puts it behind `io.MultiWriter(console, file)` — console first, so a full disk cannot silence the console. The Docker entrypoint `exec`s the binary instead of `tee`-ing into `/logs/app.log`.
 - `internal/telemetry/` — OTel provider setup (trace/metric/log exporters, W3C propagators).
 - `internal/timing/` — Per-request timing checkpoints carried on the context.
 - `internal/models/` — Structs with `db:` and `json:` tags. Sensitive fields use `json:"-"`.
@@ -128,7 +130,7 @@ DB_DSN=root:secret@tcp(127.0.0.1:3306)/emly?parseTime=true&loc=UTC
 
 Other notable vars (see `.env.example` for full list + defaults):
 - DB pool: `DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_CONNS`, `DB_CONN_MAX_LIFETIME`
-- Logging: `LOG_LEVEL` (`debug`/`info`/`warn`/`error`, default `info`) — sets the `slog` handler level for both the plain and OTel-forwarded log paths
+- Logging: `LOG_LEVEL` (`debug`/`info`/`warn`/`error`, default `info`) — sets the `slog` handler level for both the plain and OTel-forwarded log paths. `LOG_FILE_ENABLED` (default `true`), `LOG_DIR` (default `logs`; `/logs` in `docker-compose.yml`), `LOG_RETENTION_DAYS` (default `30`, `0` keeps everything) — the daily log files
 - Auth extras: `DASHBOARD_KEY` (bypasses both rate-limit layers)
 - Rate limiting: `RL_UNAUTH_*` and `RL_AUTH_*` (`MAX_REQS`, `WINDOW`, `MAX_FAILS`, `BAN_DUR`)
 - Storage — API file bucket: `USE_S3_API_FILE_STORAGE`, `S3_API_FILE_ACCESS_KEY_ID`, `S3_API_FILE_SECRET_ACCESS_KEY`, `S3_API_FILE_BUCKET`, `S3_API_FILE_REGION`, `S3_API_FILE_ENDPOINT`, `S3_API_FILE_ACCOUNT_ID` (optional, R2 endpoint shortcut)

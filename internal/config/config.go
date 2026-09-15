@@ -40,6 +40,14 @@ type OtelConfig struct {
 	Endpoint string
 }
 
+// LogFileConfig controls the daily log files written by internal/logfile, on
+// top of the console output.
+type LogFileConfig struct {
+	Enabled       bool
+	Dir           string
+	RetentionDays int
+}
+
 type Config struct {
 	Port                    string
 	DSN                     string
@@ -48,7 +56,8 @@ type Config struct {
 	AdminKey                string
 	DashboardKey            string
 	LogLevel                string
-	MaxOpenConns            int
+	LogFile                 LogFileConfig
+	MaxOpenConns           int
 	MaxIdleConns            int
 	ConnMaxLifetime         int
 	UpdatesEnabled          bool
@@ -142,6 +151,11 @@ func load() *Config {
 		AdminKey:        adminKey,
 		DashboardKey:    os.Getenv("DASHBOARD_KEY"),
 		LogLevel:        strings.ToLower(strings.TrimSpace(envString("LOG_LEVEL", "info"))),
+		LogFile: LogFileConfig{
+			Enabled:       strings.ToLower(strings.TrimSpace(envString("LOG_FILE_ENABLED", "true"))) == "true",
+			Dir:           envString("LOG_DIR", "logs"),
+			RetentionDays: envInt("LOG_RETENTION_DAYS", 30),
+		},
 		MaxOpenConns:    maxOpenConns,
 		MaxIdleConns:    maxIdleConns,
 		ConnMaxLifetime: connMaxLifetime,

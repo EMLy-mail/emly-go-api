@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"emly-api-go/internal/database"
 	"emly-api-go/internal/database/schema"
 	"emly-api-go/internal/handlers"
+	"emly-api-go/internal/logfile"
 	emlyMiddleware "emly-api-go/internal/middleware"
 	"emly-api-go/internal/routes"
 	"emly-api-go/internal/statshub"
@@ -77,16 +79,39 @@ func main() {
 	cfg := config.Load()
 
 	logLevel := parseLogLevel(cfg.LogLevel)
+
+	// Daily log files (internal/logfile) receive exactly the lines the console
+	// does. A log dir that cannot be created or written must not keep the API
+	// down: fall back to console-only and say so once slog is up.
+	var logFile *logfile.Writer
+	var logFileErr error
+	if cfg.LogFile.Enabled {
+		logFile, logFileErr = logfile.Open(cfg.LogFile.Dir, cfg.LogFile.RetentionDays)
+		if logFile != nil {
+			// Registered before the OTel shutdown defer, so it runs after it and
+			// the shutdown's own log lines still reach the file.
+			defer logFile.Close()
+		}
+	}
+	// Console first: io.MultiWriter stops at the first failing writer, and a
+	// full disk must not silence the console as well.
+	withLogFile := func(console io.Writer) io.Writer {
+		if logFile == nil {
+			return console
+		}
+		return io.MultiWriter(console, logFile)
+	}
+
 	if !cfg.Otel.Enabled {
 		// Without OTel, slog would otherwise fall back to its built-in
 		// default handler (text on stderr, fixed at LevelInfo) — set one
 		// explicitly so LOG_LEVEL is honored here too.
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
+		slog.SetDefault(slog.New(slog.NewTextHandler(withLogFile(os.Stderr), &slog.HandlerOptions{Level: logLevel})))
 	}
 
 	// OTel setup — runs early so all subsequent logs flow through the pipeline.
 	if cfg.Otel.Enabled {
-		stdoutHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
+		stdoutHandler := slog.NewJSONHandler(withLogFile(os.Stdout), &slog.HandlerOptions{Level: logLevel})
 		otelShutdown, err := telemetry.Setup(context.Background(), cfg.Otel.Endpoint, stdoutHandler)
 		if err != nil {
 			log.Fatalf("otel setup failed: %v", err)
@@ -99,14 +124,23 @@ func main() {
 			}
 		}()
 
-		// Forward standard log package output through slog → OTel.
-		log.SetOutput(logBridge{level: slog.LevelInfo})
-		log.SetFlags(0)
-
 		slog.Info("OpenTelemetry enabled", "endpoint", cfg.Otel.Endpoint)
 	}
 
+	// Forward standard log package output (log.Fatalf on startup failures
+	// included) through slog, so it reaches OTel and the log file too. Safe
+	// only because both branches above replaced slog's built-in default
+	// handler, which itself writes to the log package and would loop.
+	log.SetOutput(logBridge{level: slog.LevelInfo})
+	log.SetFlags(0)
+
 	slog.Info("log level set", "level", logLevel.String())
+	switch {
+	case logFile != nil:
+		slog.Info("writing daily log files", "file", logFile.Path(), "retention_days", cfg.LogFile.RetentionDays)
+	case logFileErr != nil:
+		slog.Warn("log file disabled, logging to console only", "dir", cfg.LogFile.Dir, "err", logFileErr)
+	}
 
 	db, err := database.Connect(cfg)
 	if err != nil {

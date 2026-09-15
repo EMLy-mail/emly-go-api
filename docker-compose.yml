@@ -8,6 +8,9 @@ services:
     environment:
       PORT: 8080
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FILE_ENABLED: ${LOG_FILE_ENABLED:-true}
+      LOG_DIR: ${LOG_DIR:-/logs}
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-30}
       DB_DSN: ${DB_DSN}
       DATABASE_NAME: ${DATABASE_NAME}
       API_KEY: ${API_KEY}

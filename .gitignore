@@ -38,4 +38,6 @@ go.work.sum
 
 tmp/
 
+logs/
+
 build/

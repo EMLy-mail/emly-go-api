@@ -88,6 +88,9 @@ emly-api-go/
     │           ├── 1_bug_reports.sql
     │           └── 2_users.sql
     │
+    ├── logfile/
+    │   └── logfile.go               # File di log giornalieri con retention (come winston-daily-rotate-file)
+    │
     ├── handlers/                    # I "controller" — una funzione per endpoint
     │   ├── response.go              # Helper: jsonOK, jsonCreated, jsonError
     │   ├── health.route.go          # GET /v1/health
@@ -172,10 +175,50 @@ go test ./internal/... -run NomeTest -v
 
 1. Carica `.env` (se presente)
 2. Legge la config dalle env vars
-3. Apre il pool di connessioni MySQL
-4. Esegue le migrazioni (vedi sezione 9)
-5. Crea il router chi e registra tutti i middleware e le rotte
-6. Avvia il server HTTP su `PORT`
+3. Apre il file di log del giorno (vedi sotto) e configura il logger
+4. Apre il pool di connessioni MySQL
+5. Esegue le migrazioni (vedi sezione 9)
+6. Crea il router chi e registra tutti i middleware e le rotte
+7. Avvia il server HTTP su `PORT`
+
+### Log su file giornalieri
+
+Oltre alla console, l'API scrive i log in un file per giorno dentro `LOG_DIR`
+(default `logs/`, `/logs` in Docker). E' lo stesso risultato di
+`winston-daily-rotate-file` in Node o del canale `daily` di Laravel
+(`storage/logs/laravel-2026-09-15.log`), ma senza librerie esterne: il package
+`internal/logfile` e' un semplice `io.Writer` (l'equivalente di uno stream
+`Writable` in Node) che `main.go` affianca a stdout/stderr con
+`io.MultiWriter`, cosi' ogni riga finisce in entrambi i posti identica.
+
+Il nome del file e' il momento in cui e' stato aperto:
+
+```
+logs/emly-api-log-2026-09-15-10-32-22.log
+```
+
+- **Ora con `-` e non `:`** — Windows non accetta `:` nei nomi dei file, e
+  l'API gira anche li' (`air`, build `.exe`).
+- **Rotazione** — alla prima riga di log di un nuovo giorno si apre un nuovo
+  file. Il "giorno" segue il fuso orario del processo (`TZ`; in Docker e' UTC
+  se non impostato). Anche un riavvio apre un file nuovo: il timestamp nel
+  nome tiene separati due avvii dello stesso giorno.
+- **Retention** — ogni volta che si apre un file, quelli piu' vecchi di
+  `LOG_RETENTION_DAYS` giorni (default 30) vengono cancellati. `0` li tiene
+  tutti. Vengono toccati solo i file con quel formato di nome: qualsiasi altro
+  file nella cartella resta dov'e'.
+- **Mai bloccante** — se `LOG_DIR` non si puo' creare o scrivere, l'API parte
+  lo stesso e logga solo in console, con un warning che lo dice. Stessa logica
+  del bucket S3 irraggiungibile: un problema accessorio non deve spegnere il
+  servizio.
+
+Anche il vecchio package `log` di Go (quello di `log.Fatalf`, tipo
+`console.log` rispetto a un logger strutturato) viene inoltrato a `slog`, cosi'
+gli errori fatali di avvio finiscono nel file invece di andare persi.
+
+Si disattiva con `LOG_FILE_ENABLED=false`. In Docker l'entrypoint prima faceva
+`tee -a /logs/app.log`, un unico file che cresceva all'infinito: ora avvia
+direttamente il binario e i file giornalieri li scrive l'app.
 
 ---
 
