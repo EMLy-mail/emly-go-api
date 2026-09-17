@@ -63,7 +63,7 @@ type Document struct {
 	// existed. Without it, every pre-existing document would gain a
 	// `"clientWs":null` it never had, changing its ETag and breaking
 	// internal/configmirror's ETag comparison on every site mirror in the
-	// field the moment either side upgrades (see TestCanonicalOmitsNilClientWS).
+	// field the moment either side upgrades (see TestCanonical_OmitsNilClientWS).
 	ClientWS *ToggleOnly `json:"clientWs,omitempty"`
 
 	Overrides []Override `json:"overrides"`
