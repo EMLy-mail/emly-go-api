@@ -30,7 +30,7 @@ func registerStats(r chi.Router, db *sqlx.DB, cfg *config.Config, hub *statshub.
 
 			r.Get("/summary", handlers.GetStatsSummary(db, cfg))
 			r.Get("/clients", handlers.ListStatsClients(db, presence))
-			r.Get("/clients/{id}", handlers.GetStatsClientDetail(db))
+			r.Get("/clients/{id}", handlers.GetStatsClientDetail(db, presence))
 			r.Get("/events", handlers.GetStatsEvents(db))
 		})
 

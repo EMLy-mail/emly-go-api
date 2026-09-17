@@ -214,10 +214,11 @@ func fetchAllStatsClients(ctx context.Context, db *sqlx.DB) ([]models.UpdaterCli
 
 // decorateOnline sets Online on each client from presence (internal/
 // presencehub), the in-memory GET /v2/client/ws connection registry (design
-// doc §5). It is a response-time decoration, not a DB column - callers that
-// don't need it (GET /v2/stats/clients/{id}) simply don't call this, and
-// presence being nil (tests, or a build that never constructs one) decorates
-// every client as offline rather than panicking.
+// doc §5). It is a response-time decoration, not a DB column. Every stats
+// handler that returns a client (ListStatsClients, GetStatsClientDetail, the
+// stats:clients WS channel) decorates it - presence being nil (tests, or a
+// build that never constructs one) decorates every client as offline rather
+// than panicking, never leaves the field simply unset.
 func decorateOnline(clients []models.UpdaterClient, presence *presencehub.Hub) {
 	for i := range clients {
 		clients[i].Online = presence.Online(int64(clients[i].ID))
@@ -266,8 +267,10 @@ func ListStatsClients(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFunc {
 	}
 }
 
-// GetStatsClientDetail returns one client and its recent event history.
-func GetStatsClientDetail(db *sqlx.DB) http.HandlerFunc {
+// GetStatsClientDetail returns one client and its recent event history, the
+// client decorated with its current online state from presence
+// (internal/presencehub) exactly like ListStatsClients - see decorateOnline.
+func GetStatsClientDetail(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.Atoi(chi.URLParam(r, "id"))
 		if err != nil {
@@ -280,6 +283,12 @@ func GetStatsClientDetail(db *sqlx.DB) http.HandlerFunc {
 			jsonError(w, http.StatusNotFound, "client not found")
 			return
 		}
+		// Same decorateOnline ListStatsClients uses, on a one-element slice -
+		// one code path for "does this client show up online", not two that
+		// can drift (see TestDecorateOnline_SingleClientSlice).
+		single := []models.UpdaterClient{client}
+		decorateOnline(single, presence)
+		client = single[0]
 
 		var events []models.UpdaterEvent
 		if err := db.SelectContext(r.Context(), &events,
