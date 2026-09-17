@@ -785,6 +785,7 @@ vuoto. Popolano la tabella `updater_clients`.
 | `X-EMLy-Serial`      | `serial`        | Numero di serie dello chassis dal BIOS (`Win32_BIOS.SerialNumber`)                               |
 | `X-EMLy-Product`     | `product`       | Product number / SKU del produttore — su HP il `8XXXXXXX#ABZ` stampato sull'etichetta            |
 | `X-EMLy-OSVersion`   | `os_version`    | Versione di Windows in chiaro, es. `Windows 11 24H2 Professional (Build 26100.4652)`. Salvata cosi' com'e': nessuno la interpreta |
+| `X-EMLy-AppVersion`  | `emly_version`  | Versione di EMLy installata, letta dal `config.ini` di EMLy (`GUI_SEMVER`). Assente se EMLy non e' installato. La versione dell'Updater viaggia invece nello User-Agent |
 
 Quattro regole da tenere a mente:
 

@@ -68,6 +68,7 @@ func AccessLog(next http.Handler) http.Handler {
 		serial := r.Header.Get("X-EMLy-Serial")
 		product := r.Header.Get("X-EMLy-Product")
 		osVersion := r.Header.Get("X-EMLy-OSVersion")
+		appVersion := r.Header.Get("X-EMLy-AppVersion")
 
 		// Log AD domain and hostname as separate fields to avoid escaping
 		// characters like backslashes inside the user_agent field.
@@ -120,6 +121,12 @@ func AccessLog(next http.Handler) http.Handler {
 		// the line says which one each request came from without a query.
 		if osVersion != "" {
 			args = append(args, "os_version", osVersion)
+		}
+		// The EMLy release on the machine, next to the OS it runs on. The
+		// updater's own version is already in user_agent, so the two sit in
+		// the same line and a rollout can be read off the log directly.
+		if appVersion != "" {
+			args = append(args, "emly_version", appVersion)
 		}
 		if isDashboardRequest(UAString) {
 			slog.DebugContext(r.Context(), "request", args...)

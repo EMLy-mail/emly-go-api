@@ -202,6 +202,22 @@ components:
         type: string
       example: "Windows 11 24H2 Professional (Build 26100.4652)"
 
+    EMLyAppVersion:
+      name: X-EMLy-AppVersion
+      in: header
+      required: false
+      description: >-
+        The EMLy release installed on the machine, read by the updater from
+        EMLy's own `config.ini` (`[EMLy] GUI_SEMVER`) on every request, so it
+        reflects an install the updater has just performed. Absent when EMLy
+        is not installed - the updater sends nothing rather than the `0.0.0`
+        sentinel it uses internally for version comparisons. Stored in
+        `updater_clients.emly_version`. The updater's own version is not this
+        header: it travels in the User-Agent.
+      schema:
+        type: string
+      example: "3.4.1"
+
   # ─────────────────────────────────────────────────────────────
   # Shared schemas
   # ─────────────────────────────────────────────────────────────
@@ -1964,7 +1980,7 @@ paths:
         The client also sends the `X-EMLy-*` machine-identity headers
         (`Hostname`, `HWID`, `ADDomain`, `IntIP`, `LoggedUser`,
         `LoggedUserState`, `LoggedUserDisconnectedAt`, `Serial`, `Product`,
-        `OSVersion` — see `components/parameters`), plus a
+        `OSVersion`, `AppVersion` — see `components/parameters`), plus a
         `EMLy-Updater/<version> (contact)` User-Agent carrying the version
         currently installed on the machine. A staged rollout can be done
         entirely server-side by keying off those headers and returning
@@ -1982,6 +1998,7 @@ paths:
         - $ref: '#/components/parameters/EMLySerial'
         - $ref: '#/components/parameters/EMLyProduct'
         - $ref: '#/components/parameters/EMLyOSVersion'
+        - $ref: '#/components/parameters/EMLyAppVersion'
       responses:
         "200":
           description: 'Manifest, or `{"version": ""}` when there is nothing to distribute'
@@ -2419,6 +2436,7 @@ paths:
         - $ref: '#/components/parameters/EMLySerial'
         - $ref: '#/components/parameters/EMLyProduct'
         - $ref: '#/components/parameters/EMLyOSVersion'
+        - $ref: '#/components/parameters/EMLyAppVersion'
       responses:
         "200":
           description: The published document

@@ -23,6 +23,11 @@ func TestClientIdentityFromRequest(t *testing.T) {
 	r.Header.Set("X-EMLy-Serial", "CND0342SLW")
 	r.Header.Set("X-EMLy-Product", "1F3N0EA#ABZ")
 	r.Header.Set("X-EMLy-OSVersion", "Windows 11 24H2 Professional (Build 26100.4652)")
+	// The EMLy app's own version. The name matters: the updater's version is
+	// the one in the User-Agent, and the two must not be read from the same
+	// place - a fleet on one current updater is still spread across EMLy
+	// releases.
+	r.Header.Set("X-EMLy-AppVersion", "3.4.1")
 
 	got := clientIdentityFromRequest(r)
 	want := clientIdentity{
@@ -35,6 +40,7 @@ func TestClientIdentityFromRequest(t *testing.T) {
 		Serial:                   "CND0342SLW",
 		Product:                  "1F3N0EA#ABZ",
 		OSVersion:                "Windows 11 24H2 Professional (Build 26100.4652)",
+		EMLyVersion:              "3.4.1",
 		UAVersion:                "1.5.6",
 		Contact:                  "f.fois@3git.eu",
 		IP:                       "10.0.0.5",
@@ -57,7 +63,7 @@ func TestClientIdentityWithoutNewHeaders(t *testing.T) {
 		t.Error("a request carrying only a hostname must still be identified")
 	}
 	if got.LoggedUser != "" || got.LoggedUserState != "" || !got.LoggedUserDisconnectedAt.IsZero() ||
-		got.Serial != "" || got.Product != "" || got.OSVersion != "" {
+		got.Serial != "" || got.Product != "" || got.OSVersion != "" || got.EMLyVersion != "" {
 		t.Errorf("absent headers produced values: %+v", got)
 	}
 	if got.NobodyLoggedOn {
