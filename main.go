@@ -273,8 +273,21 @@ func main() {
 	// path before it ever reaches r's middleware, and serves it with this
 	// smaller, hijack-safe stack instead. Every other path still goes
 	// through r unchanged.
+	// bans.Handler sits ahead of the rate limiter here too, same position and
+	// same reason it holds on r above: rejecting a banned client is cheaper
+	// than the limiter's own bookkeeping. Without it here, middleware.BanList
+	// never runs for either WS route - DOCS.md's "il ban vale su tutta
+	// l'API" invariant would be false for exactly the two routes this mux
+	// bypass exists for. Note this only makes IP bans effective on
+	// /v2/client/ws: that protocol carries identity in the post-upgrade JSON
+	// payload, not X-EMLy-HWID/X-EMLy-Hostname headers, so HWID/hostname
+	// bans still don't reach it here (see DOCS.md and the design doc for the
+	// gap; closing it would mean a post-identity check against
+	// identity.HWID/identity.Hostname before presence.Connect, out of scope
+	// for this fix).
 	wsHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(handlers.StatsStream(db, statsHub, presenceHub))
 	wsHandler = rl.Handler(wsHandler)
+	wsHandler = bans.Handler(wsHandler)
 	wsHandler = chiMiddleware.Recoverer(wsHandler)
 	wsHandler = chiMiddleware.RealIP(wsHandler)
 	wsHandler = chiMiddleware.RequestID(wsHandler)
@@ -286,6 +299,7 @@ func main() {
 	clientWSHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(handlers.ClientWS(db, presenceHub))
 	clientWSHandler = emlyMiddleware.APIKeyAuth(db)(clientWSHandler)
 	clientWSHandler = rl.Handler(clientWSHandler)
+	clientWSHandler = bans.Handler(clientWSHandler)
 	clientWSHandler = chiMiddleware.Recoverer(clientWSHandler)
 	clientWSHandler = chiMiddleware.RealIP(clientWSHandler)
 	clientWSHandler = chiMiddleware.RequestID(clientWSHandler)
