@@ -7,6 +7,7 @@ import (
 
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/handlers"
+	"emly-api-go/internal/presencehub"
 	"emly-api-go/internal/statshub"
 
 	"github.com/go-chi/chi/v5"
@@ -17,16 +18,18 @@ import (
 // like the rest of this group) and their real-time counterpart,
 // /stats/stream. hub may be nil (tests, or a build with the WS stream
 // unused); handlers.StatsStream and recordUpdaterEvent both tolerate that.
-// cfg carries StatsCacheTTL, which bounds how stale the polled /summary may
-// be - see handlers.GetStatsSummary.
-func registerStats(r chi.Router, db *sqlx.DB, cfg *config.Config, hub *statshub.Hub) {
+// presence backs the "online" field on GET /stats/clients and the
+// stats:clients WS channel; nil is fine (see internal/presencehub). cfg
+// carries StatsCacheTTL, which bounds how stale the polled /summary may be -
+// see handlers.GetStatsSummary.
+func registerStats(r chi.Router, db *sqlx.DB, cfg *config.Config, hub *statshub.Hub, presence *presencehub.Hub) {
 	r.Route("/stats", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.AdminKeyAuth(db))
 			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
 			r.Get("/summary", handlers.GetStatsSummary(db, cfg))
-			r.Get("/clients", handlers.ListStatsClients(db))
+			r.Get("/clients", handlers.ListStatsClients(db, presence))
 			r.Get("/clients/{id}", handlers.GetStatsClientDetail(db))
 			r.Get("/events", handlers.GetStatsEvents(db))
 		})
@@ -39,7 +42,7 @@ func registerStats(r chi.Router, db *sqlx.DB, cfg *config.Config, hub *statshub.
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
-			r.Get("/stream", handlers.StatsStream(db, hub))
+			r.Get("/stream", handlers.StatsStream(db, hub, presence))
 		})
 	})
 }
