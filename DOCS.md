@@ -757,7 +757,11 @@ Tre cose da sapere prima di usarli:
 
 - **Il ban vale su tutta l'API**, non solo sulle statistiche: la macchina
   bannata prende `403` anche su manifest e `/v2/config`, quindi smette di
-  aggiornarsi e di ricevere configurazione.
+  aggiornarsi e di ricevere configurazione. Un'eccezione parziale:
+  su `GET /v2/client/ws` (sotto) il ban per IP funziona, ma un ban per
+  `hwid`/`hostname` no, perche' su quella rotta l'identita' della macchina
+  arriva dopo l'upgrade, in un messaggio JSON, non negli header che
+  `middleware.BanList` confronta.
 - **Chi ha una admin key valida e' esente.** Serve a non chiudersi fuori: se
   banni l'IP dell'ufficio, la dashboard (e la rotta per togliere il ban)
   continuano a funzionare.
@@ -808,6 +812,67 @@ Quattro regole da tenere a mente:
   Ogni richiesta che porta `X-EMLy-LoggedUserState` riscrive anche l'orario,
   azzerandolo se la sessione non e' `disconnected`: altrimenti un utente che si
   ricollega lascerebbe in tabella "active-rdp, disconnesso da ieri".
+
+---
+
+### Presenza client in tempo reale — `internal/presencehub` e `GET /v2/client/ws`
+
+`internal/presencehub` e' il gemello di `internal/statshub` (il bus dietro
+`GET /v2/stats/stream`, vedi §5.8 di ROUTES.md): stessa idea, un hub
+in-process senza dipendenze HTTP/DB, a istanza singola per scelta (niente
+Postgres LISTEN/NOTIFY o Redis in questo stack). Invece di un bus di eventi,
+pero', tiene un registro di "chi e' online adesso": una map protetta da mutex
+da `updater_clients.id` a "questa macchina ha una connessione aperta in
+questo momento". Alla disconnessione il client non sparisce subito dalla
+mappa: resta online per una finestra di grazia di 15s
+(`presencehub.DefaultGraceDuration`), cosi' un calo di rete o una
+riconnessione veloce non fa lampeggiare il pallino verde della dashboard.
+
+`GET /v2/client/ws` e' la rotta che alimenta quell'hub. E' diversa dal resto
+dell'API in un modo preciso: l'EMLy Updater la apre una volta all'avvio e la
+tiene aperta per tutta la vita del servizio, invece di fare una richiesta per
+azione. Il server parla per primo (`{"type":"hello"}`), il client risponde
+con un messaggio `identity` che porta esattamente gli stessi campi degli
+header `X-EMLy-*` visti sopra, ma dentro un JSON invece che negli header — e
+finisce nella stessa riga di `updater_clients`, attraverso lo stesso upsert
+di manifest/download (vedi ROUTES.md §5.9 per la forma del messaggio). Da li'
+in poi e' solo un heartbeat: un `ping` dal server ogni 10s, il client deve
+rispondere `pong` entro 20s o la connessione viene considerata morta.
+
+Come `GET /v2/stats/stream`, questa rotta fa `websocket.Accept` sul
+`ResponseWriter`, il che richiede di "hijackare" la connessione TCP —
+incompatibile con `chiMiddleware.Timeout`, che avvolge la risposta in un
+`ResponseWriter` che non implementa `http.Hijacker`. Per questo `main.go`
+mette un `http.ServeMux` separato davanti al router chi vero e proprio, che
+intercetta questi due path specifici e li serve con una catena di middleware
+piu' corta (niente `Timeout`, niente `AccessLog`/`otelhttp` — poco adatti a
+una connessione che resta aperta per ore come un'unica richiesta "loggata").
+Ogni altro path passa dal router chi normale, invariato.
+
+**Un limite del ban list su questa rotta**, gia' accennato sopra: il ban per
+IP funziona qui come ovunque, ma un ban per `hwid` o `hostname` no —
+`middleware.BanList` confronta gli header `X-EMLy-HWID`/`X-EMLy-Hostname`, e
+su `/v2/client/ws` l'identita' non arriva mai come header: arriva nel
+messaggio `identity`, dopo che la connessione e' gia' stata accettata. Una
+macchina bandita per HWID puo' quindi aprire questa connessione finche' il
+suo IP non e' bannato a sua volta. Chiuderlo richiederebbe un controllo
+esplicito di `identity.HWID`/`identity.Hostname` contro la block list prima
+di registrare la presenza — non implementato.
+
+Il campo `"online"` che questo canale produce compare anche su
+`GET /v2/stats/clients` e sul canale `stats:clients` di
+`GET /v2/stats/stream`: e' calcolato al volo dall'hub di presenza al momento
+della risposta, non e' una colonna nel database.
+
+**Rate limit senza eccezione per IP privati.** Come ogni gruppo v2,
+`/v2/client/ws` porta `apimw.RouteLimitByIP(30, time.Minute)` — ma a
+differenza del `RateLimiter` globale, qui non c'e' un'eccezione per IP
+privati/loopback, solo per chi presenta `X-Dashboard-Key` (e questa rotta non
+lo fa). Molte macchine dietro un solo IP pubblico (un gateway NAT unico,
+senza mirror di sito) che si riconnettono tutte insieme dopo un riavvio
+dell'API possono quindi finire limitate a ~30 riconnessioni al minuto — un
+limite noto e accettato, non ancora affrontato in attesa di conferme sulla
+topologia di rete reale della flotta.
 
 ---
 

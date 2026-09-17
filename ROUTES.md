@@ -564,10 +564,13 @@ sommario va in `buildStatsSummary`, dietro la cache, non nell'handler.
 
 **Telemetria dei client.** Gli header `X-EMLy-*` (`Hostname`, `HWID`, `ADDomain`,
 `LoggedUser`, `LoggedUserState`, `LoggedUserDisconnectedAt`, `Serial`, `Product`,
-`OSVersion`, `AppVersion`) sono letti in un solo punto,
+`OSVersion`, `AppVersion`) sono letti in un punto solo per la via HTTP,
 `clientIdentityFromRequest`, insieme alla versione e al contatto estratti dallo
-User-Agent e all'IP del peer. Aggiungere un header significa aggiungerlo lì, non
-nei singoli call site. Una richiesta senza né HWID né hostname viene servita ma
+User-Agent e all'IP del peer. Il messaggio `identity` di `GET /v2/client/ws`
+(§5.9) è la seconda via: stessi campi, letti da JSON invece che da header, da
+`clientIdentityFromWSPayload`. Aggiungere un campo significa aggiungerlo a
+**entrambi** i costruttori, non solo a uno dei due call site. Una richiesta
+senza né HWID né hostname viene servita ma
 non tracciata. Un header che il client non invia non azzera mai il valore già
 memorizzato: l'Updater omette gli header per cui non ha un valore, quindi
 "assente" vuol dire "sconosciuto". Per questo `logged_user` è un'istantanea da
@@ -643,11 +646,15 @@ stack non ci sono né Postgres LISTEN/NOTIFY né Redis.
 
 | Metodo | Path              | Auth      | Cosa fa |
 |--------|-------------------|-----------|---------|
-| `GET`  | `/v2/client/ws`   | `API (WS)` | Upgrade WebSocket che l'EMLy Updater tiene aperta per tutta la vita del servizio, per la presenza online/offline in tempo reale. |
+| `GET`  | `/v2/client/ws`   | `API` | Upgrade WebSocket che l'EMLy Updater tiene aperta per tutta la vita del servizio, per la presenza online/offline in tempo reale. |
 
-L'autenticazione (`X-Api-Key`) avviene tramite lo stesso middleware del
-manifest self-update dell'Updater, prima dell'upgrade — a differenza di
-`/v2/stats/stream` non esiste un fallback in query string.
+L'autenticazione (`X-Api-Key`) avviene tramite lo stesso middleware
+`apimw.APIKeyAuth` del manifest self-update dell'Updater, come middleware di
+route ordinario **prima** dell'upgrade — non è un controllo fatto a mano
+dentro l'handler (a differenza di `/v2/stats/stream`, che è per questo
+`ADMIN (WS)` nella tabella e non semplicemente `ADMIN`), quindi la sigla qui è
+`API` e basta. A differenza di `/v2/stats/stream` non esiste un fallback in
+query string.
 
 **Handshake**
 
@@ -660,8 +667,15 @@ client ──► { "type": "identity", "data": { hwid, hostname, ad_domain,
 
 L'identità arriva nel payload invece che negli header `X-EMLy-*`, ma passa
 per lo stesso upsert di manifest/download: la riga in `updater_clients` è
-la stessa. Un'identità mancante o senza `hwid`/`hostname` entro 10s riceve
-un `error` e la connessione viene chiusa.
+la stessa. Due casi diversi entro i 10s:
+
+- il client manda un primo messaggio che non è `identity`, o un `identity`
+  senza `hwid`/`hostname`: riceve un `error` e poi la connessione viene
+  chiusa dal server;
+- il client non manda **nulla** entro i 10s: `coder/websocket` considera
+  qualunque errore (compresa la scadenza del context di lettura) motivo
+  per chiudere la connessione da solo, quindi non c'è tempo per scrivere un
+  `error` — il client vede semplicemente la connessione cadere, senza busta.
 
 **Heartbeat**: il server manda `{"type":"ping"}` ogni 10s; il client deve
 rispondere `{"type":"pong"}` entro 20s o la connessione è considerata morta.
@@ -687,13 +701,23 @@ Attivata lato client dal flag `clientWs.enabled` nel documento di
 configurazione remota (§5.5): l'API non rifiuta comunque una connessione se
 quel flag è `false`, è l'Updater a non aprirla.
 
+**Rate limit senza eccezione per IP privati/loopback.** `/v2/client/ws` porta
+lo stesso `apimw.RouteLimitByIP(30, time.Minute)` di ogni altro gruppo v2, ma
+a differenza del `RateLimiter` globale non esiste un'eccezione per IP
+privati/loopback qui — solo `X-Dashboard-Key` esenta, e questa rotta non lo
+usa. Una raffica di riconnessioni da molte macchine dietro un solo IP
+pubblico (un unico gateway NAT, nessun mirror di sito) dopo un riavvio
+dell'API può quindi essere limitata a ~30 riconnessioni al minuto. È un limite
+noto e accettato finché non si conferma la reale topologia di rete della
+flotta — non è stato toccato in questo giro di fix.
+
 ---
 
 ## 6. Riepilogo autenticazione
 
 | Header            | Dove viene usato | Fallimento |
 |-------------------|------------------|------------|
-| `X-API-Key`       | Creazione bug report, manifest dell'Updater, `GET /v2/config` | `401` |
+| `X-API-Key`       | Creazione bug report, manifest dell'Updater, `GET /v2/config`, `GET /v2/client/ws` | `401` |
 | `X-Admin-Key`     | Tutte le route admin, releases, config writes, bans, stats | `401` |
 | `X-Dashboard-Key` | Bypass di entrambi i rate limiter, globale e per gruppo di route | nessuno, la richiesta prosegue limitata |
 | `X-Session-Token` | `auth/validate`, `auth/logout` | `401` o `403` |
