@@ -138,5 +138,13 @@
         { "type": "column_not_exists", "table": "updater_clients", "column": "logged_user_state" }
       ]
     }
+    ,{
+      "id": "17_updater_clients_os_version",
+      "sql_file": "17_updater_clients_os_version.sql",
+      "description": "Add the os_version column to updater_clients so the X-EMLy-OSVersion header the updater now sends records which Windows build each machine runs.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "updater_clients", "column": "os_version" }
+      ]
+    }
   ]
 }

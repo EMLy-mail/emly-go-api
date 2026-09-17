@@ -67,6 +67,7 @@ func AccessLog(next http.Handler) http.Handler {
 		loggedUserDisconnectedAt := r.Header.Get("X-EMLy-LoggedUserDisconnectedAt")
 		serial := r.Header.Get("X-EMLy-Serial")
 		product := r.Header.Get("X-EMLy-Product")
+		osVersion := r.Header.Get("X-EMLy-OSVersion")
 
 		// Log AD domain and hostname as separate fields to avoid escaping
 		// characters like backslashes inside the user_agent field.
@@ -113,6 +114,12 @@ func AccessLog(next http.Handler) http.Handler {
 		}
 		if product != "" {
 			args = append(args, "product", product)
+		}
+		// The Windows build behind the request, for the same reason: an OS
+		// that only some machines report is a rollout still in progress, and
+		// the line says which one each request came from without a query.
+		if osVersion != "" {
+			args = append(args, "os_version", osVersion)
 		}
 		if isDashboardRequest(UAString) {
 			slog.DebugContext(r.Context(), "request", args...)

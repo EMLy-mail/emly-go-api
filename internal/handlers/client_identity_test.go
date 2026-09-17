@@ -22,6 +22,7 @@ func TestClientIdentityFromRequest(t *testing.T) {
 	r.Header.Set("X-EMLy-LoggedUserDisconnectedAt", "2026-09-12T18:04:31Z")
 	r.Header.Set("X-EMLy-Serial", "CND0342SLW")
 	r.Header.Set("X-EMLy-Product", "1F3N0EA#ABZ")
+	r.Header.Set("X-EMLy-OSVersion", "Windows 11 24H2 Professional (Build 26100.4652)")
 
 	got := clientIdentityFromRequest(r)
 	want := clientIdentity{
@@ -33,6 +34,7 @@ func TestClientIdentityFromRequest(t *testing.T) {
 		LoggedUserDisconnectedAt: time.Date(2026, 9, 12, 18, 4, 31, 0, time.UTC),
 		Serial:                   "CND0342SLW",
 		Product:                  "1F3N0EA#ABZ",
+		OSVersion:                "Windows 11 24H2 Professional (Build 26100.4652)",
 		UAVersion:                "1.5.6",
 		Contact:                  "f.fois@3git.eu",
 		IP:                       "10.0.0.5",
@@ -55,7 +57,7 @@ func TestClientIdentityWithoutNewHeaders(t *testing.T) {
 		t.Error("a request carrying only a hostname must still be identified")
 	}
 	if got.LoggedUser != "" || got.LoggedUserState != "" || !got.LoggedUserDisconnectedAt.IsZero() ||
-		got.Serial != "" || got.Product != "" {
+		got.Serial != "" || got.Product != "" || got.OSVersion != "" {
 		t.Errorf("absent headers produced values: %+v", got)
 	}
 	if got.NobodyLoggedOn {
@@ -170,6 +172,7 @@ func TestClientIdentityTruncatesToColumnWidth(t *testing.T) {
 	r.Header.Set("X-EMLy-LoggedUser", strings.Repeat("à", 400))
 	r.Header.Set("X-EMLy-Serial", strings.Repeat("S", 200))
 	r.Header.Set("X-EMLy-Product", strings.Repeat("P", 200))
+	r.Header.Set("X-EMLy-OSVersion", strings.Repeat("W", 300))
 
 	got := clientIdentityFromRequest(r)
 	if n := len([]rune(got.LoggedUser)); n != 255 {
@@ -183,5 +186,8 @@ func TestClientIdentityTruncatesToColumnWidth(t *testing.T) {
 	}
 	if n := len([]rune(got.Product)); n != 128 {
 		t.Errorf("Product kept %d runes, want 128", n)
+	}
+	if n := len([]rune(got.OSVersion)); n != 128 {
+		t.Errorf("OSVersion kept %d runes, want 128", n)
 	}
 }

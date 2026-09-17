@@ -23,6 +23,12 @@ type UpdaterClient struct {
 	LoggedUserDisconnectedAt *time.Time `db:"logged_user_disconnected_at" json:"logged_user_disconnected_at,omitempty"`
 	Serial                   *string    `db:"serial"            json:"serial,omitempty"`
 	Product                  *string    `db:"product"           json:"product,omitempty"`
+	// OSVersion is the Windows release the machine runs, as the updater
+	// renders it from the registry: product name, display version, edition
+	// and build, e.g. "Windows 11 24H2 Professional (Build 26100.4652)". One
+	// opaque string - nothing here parses it. Nil for a client that has
+	// never reported one.
+	OSVersion *string `db:"os_version"        json:"os_version,omitempty"`
 	// UpdaterVersion is the version of the EMLy Updater that made the request
 	// (read off its User-Agent); EMLyVersion is the version of the EMLy app it
 	// maintains (X-EMLy-AppVersion). The two move independently, so a fleet on

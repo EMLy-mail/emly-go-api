@@ -79,6 +79,10 @@ type clientIdentity struct {
 	NobodyLoggedOn bool
 	Serial         string
 	Product        string
+	// OSVersion is the Windows release the machine runs, one opaque string
+	// the updater renders from the registry ("Windows 11 24H2 Professional
+	// (Build 26100.4652)"). Stored as sent; nothing parses it.
+	OSVersion string
 	// EMLyVersion is the version of the EMLy app (X-EMLy-AppVersion),
 	// UAVersion the version of the updater that reported it (User-Agent).
 	// They move independently: the updater self-updates on its own schedule,
@@ -108,6 +112,7 @@ func clientIdentityFromRequest(r *http.Request) clientIdentity {
 		NobodyLoggedOn:           reportsNobodyLoggedOn(loggedUser, uaVersion),
 		Serial:                   truncate(r.Header.Get("X-EMLy-Serial"), 128),
 		Product:                  truncate(r.Header.Get("X-EMLy-Product"), 128),
+		OSVersion:                truncate(r.Header.Get("X-EMLy-OSVersion"), 128),
 		EMLyVersion:              truncate(r.Header.Get("X-EMLy-AppVersion"), 20),
 		UAVersion:                uaVersion,
 		Contact:                  contact,
@@ -330,8 +335,9 @@ func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, hub *
 // "reported as empty" are the same thing on the wire - the updater omits a
 // header it has no value for - and for logged_user/serial/product the last
 // known answer is worth more than a NULL: an updater too old to send them
-// must not erase what earlier sightings established. last_seen_at is what
-// says how current the row is.
+// must not erase what earlier sightings established. os_version behaves the
+// same way: a machine that stops reporting it has not gone back to an unknown
+// Windows build. last_seen_at is what says how current the row is.
 //
 // The logged-user columns have two exceptions:
 //   - when the request positively reports that nobody is logged on
@@ -398,6 +404,7 @@ func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, id clientIdentity) (i
 			     logged_user_state = IF(?, NULL, COALESCE(NULLIF(?, ''), logged_user_state)),
 			     serial = COALESCE(NULLIF(?, ''), serial),
 			     product = COALESCE(NULLIF(?, ''), product),
+			     os_version = COALESCE(NULLIF(?, ''), os_version),
 			     emly_version = COALESCE(NULLIF(?, ''), emly_version),
 			     updater_version = ?, contact = ?, last_ip = ?, last_seen_at = CURRENT_TIMESTAMP
 			 WHERE id = ?`,
@@ -405,7 +412,7 @@ func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, id clientIdentity) (i
 			id.NobodyLoggedOn, id.LoggedUser,
 			id.NobodyLoggedOn, id.LoggedUserState, nullableTime(id.LoggedUserDisconnectedAt),
 			id.NobodyLoggedOn, id.LoggedUserState,
-			id.Serial, id.Product, id.EMLyVersion,
+			id.Serial, id.Product, id.OSVersion, id.EMLyVersion,
 			nullableString(id.UAVersion), nullableString(id.Contact), nullableString(id.IP), targetID,
 		); err != nil {
 			return 0, err
@@ -414,12 +421,12 @@ func upsertUpdaterClient(ctx context.Context, db *sqlx.DB, id clientIdentity) (i
 	}
 
 	res, err := db.ExecContext(ctx,
-		`INSERT INTO updater_clients (hwid, hostname, ad_domain, logged_user, logged_user_state, logged_user_disconnected_at, serial, product, emly_version, updater_version, contact, last_ip)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO updater_clients (hwid, hostname, ad_domain, logged_user, logged_user_state, logged_user_disconnected_at, serial, product, os_version, emly_version, updater_version, contact, last_ip)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullableString(hwid), hostname, adDomain,
 		nullableString(id.LoggedUser), nullableString(id.LoggedUserState), nullableTime(id.LoggedUserDisconnectedAt),
 		nullableString(id.Serial), nullableString(id.Product),
-		nullableString(id.EMLyVersion),
+		nullableString(id.OSVersion), nullableString(id.EMLyVersion),
 		nullableString(id.UAVersion), nullableString(id.Contact), nullableString(id.IP),
 	)
 	if err != nil {

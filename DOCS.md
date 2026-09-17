@@ -784,6 +784,7 @@ vuoto. Popolano la tabella `updater_clients`.
 | `X-EMLy-LoggedUserDisconnectedAt` | `logged_user_disconnected_at` | Solo con `disconnected`: da quando la sessione e' senza client, RFC 3339 (salvato in UTC) |
 | `X-EMLy-Serial`      | `serial`        | Numero di serie dello chassis dal BIOS (`Win32_BIOS.SerialNumber`)                               |
 | `X-EMLy-Product`     | `product`       | Product number / SKU del produttore — su HP il `8XXXXXXX#ABZ` stampato sull'etichetta            |
+| `X-EMLy-OSVersion`   | `os_version`    | Versione di Windows in chiaro, es. `Windows 11 24H2 Professional (Build 26100.4652)`. Salvata cosi' com'e': nessuno la interpreta |
 
 Quattro regole da tenere a mente:
 

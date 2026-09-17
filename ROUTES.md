@@ -563,7 +563,7 @@ sommario va in `buildStatsSummary`, dietro la cache, non nell'handler.
 
 **Telemetria dei client.** Gli header `X-EMLy-*` (`Hostname`, `HWID`, `ADDomain`,
 `LoggedUser`, `LoggedUserState`, `LoggedUserDisconnectedAt`, `Serial`, `Product`,
-`AppVersion`) sono letti in un solo punto,
+`OSVersion`, `AppVersion`) sono letti in un solo punto,
 `clientIdentityFromRequest`, insieme alla versione e al contatto estratti dallo
 User-Agent e all'IP del peer. Aggiungere un header significa aggiungerlo lì, non
 nei singoli call site. Una richiesta senza né HWID né hostname viene servita ma
