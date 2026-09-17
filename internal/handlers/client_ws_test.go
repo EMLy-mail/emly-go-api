@@ -1,9 +1,16 @@
 package handlers
 
 import (
+	"context"
+	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
+
+	"emly-api-go/internal/presencehub"
 )
 
 func TestClientIdentityFromWSPayload(t *testing.T) {
@@ -50,5 +57,118 @@ func TestClientIdentityFromWSPayloadUnidentified(t *testing.T) {
 	got := clientIdentityFromWSPayload(r, clientWSIdentityPayload{})
 	if got.identified() {
 		t.Fatalf("an empty payload must not be identified()")
+	}
+}
+
+// TestClientWSSendsHelloOnConnect checks the first half of the handshake
+// (design doc §3.1): the server speaks first. It never sends an identity
+// back, so the handler never reaches upsertUpdaterClient - nil db is safe.
+func TestClientWSSendsHelloOnConnect(t *testing.T) {
+	srv := httptest.NewServer(ClientWS(nil, presencehub.New(presencehub.DefaultGraceDuration)))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	c, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	_, data, err := c.Read(ctx)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	var env wsEnvelopeOut
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal %s: %v", data, err)
+	}
+	if env.Type != "hello" {
+		t.Fatalf("first message type = %q, want %q", env.Type, "hello")
+	}
+}
+
+// TestClientWSRejectsNonIdentityFirstMessage checks that sending anything
+// other than "identity" as the first client message is rejected immediately
+// (design doc §3.1) rather than left to time out - deterministic and fast,
+// and never reaches upsertUpdaterClient, so nil db is safe here too.
+func TestClientWSRejectsNonIdentityFirstMessage(t *testing.T) {
+	srv := httptest.NewServer(ClientWS(nil, presencehub.New(presencehub.DefaultGraceDuration)))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	c, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	if _, _, err := c.Read(ctx); err != nil { // consume "hello"
+		t.Fatalf("Read hello: %v", err)
+	}
+
+	if err := c.Write(ctx, websocket.MessageText, []byte(`{"type":"ping"}`)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	_, data, err := c.Read(ctx)
+	if err != nil {
+		t.Fatalf("Read error response: %v", err)
+	}
+	var env wsEnvelopeOut
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal %s: %v", data, err)
+	}
+	if env.Type != "error" {
+		t.Fatalf("response type = %q, want %q", env.Type, "error")
+	}
+
+	// The server must close the connection right after: a further read
+	// either errors or reports a close.
+	if _, _, err := c.Read(ctx); err == nil {
+		t.Fatal("expected the connection to be closed after a non-identity first message")
+	}
+}
+
+// TestClientWSRejectsUnidentifiedIdentity checks that an identity message
+// carrying neither hwid nor hostname is rejected the same way (design doc
+// §3.1's "non identificato"). Also never reaches upsertUpdaterClient.
+func TestClientWSRejectsUnidentifiedIdentity(t *testing.T) {
+	srv := httptest.NewServer(ClientWS(nil, presencehub.New(presencehub.DefaultGraceDuration)))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	c, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	if _, _, err := c.Read(ctx); err != nil { // consume "hello"
+		t.Fatalf("Read hello: %v", err)
+	}
+
+	if err := c.Write(ctx, websocket.MessageText, []byte(`{"type":"identity","data":{}}`)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	_, data, err := c.Read(ctx)
+	if err != nil {
+		t.Fatalf("Read error response: %v", err)
+	}
+	var env wsEnvelopeOut
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal %s: %v", data, err)
+	}
+	if env.Type != "error" {
+		t.Fatalf("response type = %q, want %q", env.Type, "error")
 	}
 }
