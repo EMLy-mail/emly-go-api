@@ -147,11 +147,16 @@ func TestStatsStreamDialRejectedWithoutAdminKey(t *testing.T) {
 	}
 }
 
-// TestStatsStreamClientsSnapshotIncludesOnline pins the wiring (StatsStream/
-// newWSConn accept and pass through a presence hub); it does not exercise a
-// DB-backed subscribe flow, consistent with this file's existing nil-DB-safe
-// tests.
-func TestStatsStreamClientsSnapshotIncludesOnline(t *testing.T) {
+// TestStatsStreamAcceptsAPresenceHub pins the wiring only (StatsStream/
+// newWSConn accept and pass through a presence hub) - it does NOT verify the
+// stats:clients snapshot actually carries "online": doing that means
+// subscribing and reading a channelClients snapshot, which runs through
+// fetchAllStatsClients -> db.SelectContext and needs a real (or mocked) *sqlx.DB,
+// more DB-backed plumbing than this file's existing nil-DB-safe tests take
+// on (see TestStatsStreamPingPong's doc comment for the same constraint).
+// Named for what it actually checks, rather than what its predecessor's name
+// (TestStatsStreamClientsSnapshotIncludesOnline) implied but never verified.
+func TestStatsStreamAcceptsAPresenceHub(t *testing.T) {
 	h := StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration))
 	if h == nil {
 		t.Fatal("StatsStream returned a nil handler")
