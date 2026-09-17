@@ -41,6 +41,14 @@ type UpdaterClient struct {
 	LastIP          *string    `db:"last_ip"           json:"last_ip,omitempty"`
 	FirstSeenAt     time.Time  `db:"first_seen_at"     json:"first_seen_at"`
 	LastSeenAt      time.Time  `db:"last_seen_at"      json:"last_seen_at"`
+	// Online reports whether this client currently holds an open
+	// GET /v2/client/ws connection (internal/presencehub), or is inside the
+	// short grace window after one dropped. It is computed at response time
+	// from the in-memory presence hub, never stored - db:"-" keeps sqlx's
+	// `SELECT *` from trying to bind a non-existent column - so it is false
+	// on any row nobody has explicitly decorated (see decorateOnline in
+	// internal/handlers/stats.route.go).
+	Online bool `db:"-" json:"online"`
 }
 
 // UpdaterEvent is one client-facing update operation. Product tells apart
