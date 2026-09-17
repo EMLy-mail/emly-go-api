@@ -4,6 +4,7 @@ import (
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/handlers"
 	apimw "emly-api-go/internal/middleware"
+	"emly-api-go/internal/presencehub"
 	"emly-api-go/internal/statshub"
 	"net/http"
 	"time"
@@ -22,9 +23,11 @@ import (
 // configMirror is non-nil only on a site mirror (CONFIG_UPSTREAM_URL set);
 // pass nil on the cloud/primary instance. statsHub feeds /v2/stats/stream;
 // pass nil to run without the real-time stats stream (it degrades to
-// snapshots-only, see statshub). bans is the live permanent-block snapshot
-// the /v2/bans admin routes refresh after a write.
-func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror handlers.ConfigMirrorReporter, statsHub *statshub.Hub, bans handlers.BanReloader) {
+// snapshots-only, see statshub). presence backs GET /v2/client/ws and the
+// "online" field on the stats routes; pass nil to run without presence
+// tracking (see internal/presencehub). bans is the live permanent-block
+// snapshot the /v2/bans admin routes refresh after a write.
+func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror handlers.ConfigMirrorReporter, statsHub *statshub.Hub, presence *presencehub.Hub, bans handlers.BanReloader) {
 	dbName := config.Load().Database
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +38,7 @@ func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storag
 	})
 
 	r.Mount("/v1", v1.NewRouter(db, apiFileS3conn))
-	r.Mount("/v2", v2.NewRouter(db, apiFileS3conn, updatesS3conn, configMirror, statsHub, bans))
+	r.Mount("/v2", v2.NewRouter(db, apiFileS3conn, updatesS3conn, configMirror, statsHub, presence, bans))
 	// Redirect /health to /v1/health
 	r.Get("/health", handlers.Health(db))
 

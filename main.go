@@ -25,6 +25,7 @@ import (
 	"emly-api-go/internal/handlers"
 	"emly-api-go/internal/logfile"
 	emlyMiddleware "emly-api-go/internal/middleware"
+	"emly-api-go/internal/presencehub"
 	"emly-api-go/internal/routes"
 	"emly-api-go/internal/statshub"
 	"emly-api-go/internal/storage"
@@ -220,6 +221,11 @@ func main() {
 	statsHub := statshub.New()
 	go statsHub.Run(backgroundCtx, cfg.StatsStreamTickInterval)
 
+	// In-memory registry of which EMLy Updater clients currently hold an
+	// open GET /v2/client/ws connection (see internal/presencehub package
+	// doc). Single-instance, like statsHub above.
+	presenceHub := presencehub.New(presencehub.DefaultGraceDuration)
+
 	r := chi.NewRouter()
 
 	r.Use(chiMiddleware.RequestID)
@@ -248,7 +254,7 @@ func main() {
 	rl := emlyMiddleware.NewRateLimiter(cfg)
 	r.Use(rl.Handler)
 
-	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub, bans)
+	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub, presenceHub, bans)
 
 	// GET /v2/stats/stream hijacks the connection to complete its WebSocket
 	// upgrade (coder/websocket.Accept requires the ResponseWriter to
@@ -267,14 +273,26 @@ func main() {
 	// path before it ever reaches r's middleware, and serves it with this
 	// smaller, hijack-safe stack instead. Every other path still goes
 	// through r unchanged.
-	wsHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(handlers.StatsStream(db, statsHub))
+	wsHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(handlers.StatsStream(db, statsHub, presenceHub))
 	wsHandler = rl.Handler(wsHandler)
 	wsHandler = chiMiddleware.Recoverer(wsHandler)
 	wsHandler = chiMiddleware.RealIP(wsHandler)
 	wsHandler = chiMiddleware.RequestID(wsHandler)
 
+	// GET /v2/client/ws hijacks the connection the same way and for the same
+	// reason (see the comment above): apimw.APIKeyAuth replaces the inline
+	// admin-key check /v2/stats/stream needs, since this route has no
+	// query-string key fallback to support.
+	clientWSHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(handlers.ClientWS(db, presenceHub))
+	clientWSHandler = emlyMiddleware.APIKeyAuth(db)(clientWSHandler)
+	clientWSHandler = rl.Handler(clientWSHandler)
+	clientWSHandler = chiMiddleware.Recoverer(clientWSHandler)
+	clientWSHandler = chiMiddleware.RealIP(clientWSHandler)
+	clientWSHandler = chiMiddleware.RequestID(clientWSHandler)
+
 	mux := http.NewServeMux()
 	mux.Handle("/v2/stats/stream", wsHandler)
+	mux.Handle("/v2/client/ws", clientWSHandler)
 	mux.Handle("/", r)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
