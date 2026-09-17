@@ -47,6 +47,13 @@ type Document struct {
 
 	Logging *Logging `json:"logging"`
 
+	// ClientWS is the kill switch for GET /v2/client/ws (design doc
+	// 2026-09-17-client-presence-ws-api-design.md §8.2), reusing the same
+	// {enabled} shape as SelfUpdate/InstallCertificate. Absent/nil means the
+	// client keeps the channel closed - updating the updater alone must
+	// never open it.
+	ClientWS *ToggleOnly `json:"clientWs"`
+
 	Overrides []Override `json:"overrides"`
 }
 

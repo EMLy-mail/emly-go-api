@@ -249,6 +249,39 @@ func TestParse_LoggingRanges(t *testing.T) {
 	}
 }
 
+func TestParse_ClientWSDefaultsToNilWhenAbsent(t *testing.T) {
+	doc, problems := Parse([]byte(`{
+		"schemaVersion": 1,
+		"revision": 1,
+		"generatedAt": "",
+		"servers": {"a": "https://a.example.com"},
+		"defaultServer": "a"
+	}`))
+	if len(problems) != 0 {
+		t.Fatalf("expected valid, got problems: %+v", problems)
+	}
+	if doc.ClientWS != nil {
+		t.Fatalf("ClientWS = %+v, want nil when the document omits clientWs", doc.ClientWS)
+	}
+}
+
+func TestParse_ClientWSEnabled(t *testing.T) {
+	doc, problems := Parse([]byte(`{
+		"schemaVersion": 1,
+		"revision": 1,
+		"generatedAt": "",
+		"servers": {"a": "https://a.example.com"},
+		"defaultServer": "a",
+		"clientWs": {"enabled": true}
+	}`))
+	if len(problems) != 0 {
+		t.Fatalf("expected valid, got problems: %+v", problems)
+	}
+	if doc.ClientWS == nil || !doc.ClientWS.Enabled {
+		t.Fatalf("ClientWS = %+v, want {Enabled: true}", doc.ClientWS)
+	}
+}
+
 // --- shared conformance fixtures (testdata/remoteconfig, §6 of the API design doc) ---
 
 func TestFixtures_Valid(t *testing.T) {
