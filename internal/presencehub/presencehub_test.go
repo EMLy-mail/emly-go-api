@@ -89,6 +89,45 @@ func TestOnlineOnNilHub(t *testing.T) {
 	}
 }
 
+// TestConnectOnNilHubDoesNotPanic guards the fix for a live nil-deref trap:
+// several doc comments (routes/v2/client.go, routes/v2/v2.go, routes.go)
+// claim presence being nil is fine because "presencehub.Hub's own methods
+// tolerate that" - Connect must actually live up to that, not just Online.
+func TestConnectOnNilHubDoesNotPanic(t *testing.T) {
+	var h *Hub
+	tok, supersede := h.Connect(1)
+	if tok != (Token{}) {
+		t.Fatalf("Connect on a nil *Hub returned a non-zero Token: %+v", tok)
+	}
+	if supersede != nil {
+		t.Fatal("Connect on a nil *Hub returned a non-nil supersede channel")
+	}
+	// A nil channel in a select simply never fires - confirm it doesn't
+	// panic or immediately report ready.
+	select {
+	case <-supersede:
+		t.Fatal("nil supersede channel fired")
+	default:
+	}
+}
+
+// TestDisconnectOnNilHubDoesNotPanic guards the other half of the same fix.
+func TestDisconnectOnNilHubDoesNotPanic(t *testing.T) {
+	var h *Hub
+	h.Disconnect(Token{})
+	h.Disconnect(Token{clientID: 1, gen: 1})
+}
+
+// TestDisconnectWithZeroTokenDoesNotPanic checks a zero-value Token (what a
+// nil Hub's Connect returns) is a safe no-op even against a real Hub.
+func TestDisconnectWithZeroTokenDoesNotPanic(t *testing.T) {
+	h := New(testGrace)
+	h.Disconnect(Token{})
+	if h.Online(1) {
+		t.Fatal("a zero-value Token Disconnect must not mark anything online")
+	}
+}
+
 func TestDifferentClientsAreIndependent(t *testing.T) {
 	h := New(testGrace)
 	tok1, _ := h.Connect(1)

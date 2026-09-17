@@ -58,7 +58,17 @@ func New(graceDuration time.Duration) *Hub {
 // precedente viene chiusa lato server"). Connecting also cancels any pending
 // grace-period removal left over from a previous Disconnect for this
 // clientID, so a reconnect inside the grace window is seamless.
+//
+// A nil *Hub returns a zero-value Token and a nil channel, mirroring Online's
+// nil-receiver safety: a caller that never wired presence tracking (tests, a
+// build that never constructs one) can still call Connect/Disconnect without
+// special-casing nil. A nil channel in a select simply never fires - it
+// blocks forever, which is correct here: there is nothing to supersede a
+// connection that was never tracked.
 func (h *Hub) Connect(clientID int64) (Token, <-chan struct{}) {
+	if h == nil {
+		return Token{}, nil
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -82,7 +92,13 @@ func (h *Hub) Connect(clientID int64) (Token, <-chan struct{}) {
 // it. A Disconnect whose Token no longer matches the current entry (the
 // connection was superseded - see Connect) is a no-op, so cleanup from the
 // old connection never touches the new one's state.
+//
+// A nil *Hub, or a zero-value Token (what a nil Hub's own Connect returns),
+// is a no-op - same nil-safety rationale as Connect above.
 func (h *Hub) Disconnect(tok Token) {
+	if h == nil {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 

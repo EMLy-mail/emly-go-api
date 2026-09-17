@@ -80,6 +80,13 @@ const (
 	clientWSIdleTimeout  = 20 * time.Second
 )
 
+// upsertClientFn is the seam ClientWS calls through instead of
+// upsertUpdaterClient directly. Production behavior is unchanged (it
+// defaults to the real function); a test replaces it to stub the DB-touching
+// upsert and drive the handshake -> presence-online path end to end without
+// a live database (see TestClientWSIdentityMarksClientOnline).
+var upsertClientFn = upsertUpdaterClient
+
 func writeClientWSEnvelope(ctx context.Context, c *websocket.Conn, typ string, data interface{}) error {
 	env := wsEnvelopeOut{Type: typ, Data: data}
 	b, err := json.Marshal(env)
@@ -179,10 +186,9 @@ func clientWSPingLoop(ctx context.Context, c *websocket.Conn) {
 // (apimw.APIKeyAuth) runs before this handler as route middleware, same as
 // the updater's self-update manifest - unlike /v2/stats/stream, there is no
 // query-string key fallback to justify an inline check here. presence may be
-// nil (tests); presencehub.Hub's own methods tolerate that, but Connect on a
-// nil Hub panics, so callers that pass nil must not expect presence
-// tracking to do anything (only exercised by tests that never send a valid
-// identity).
+// nil (tests, or a build that never constructs one); presencehub.Hub's own
+// methods (including Connect/Disconnect) all tolerate a nil receiver, so a
+// nil presence simply never tracks anyone as online.
 func ClientWS(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{})
@@ -206,7 +212,7 @@ func ClientWS(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFunc {
 			return
 		}
 
-		clientID, err := upsertUpdaterClient(ctx, db, identity)
+		clientID, err := upsertClientFn(ctx, db, identity)
 		if err != nil {
 			slog.WarnContext(ctx, "client ws: failed to upsert client", "error", err)
 			cancel()
@@ -217,6 +223,7 @@ func ClientWS(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFunc {
 		tok, supersede := presence.Connect(clientID)
 		slog.InfoContext(ctx, "client ws: connection established", "client_id", clientID)
 
+		var superseded bool
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); clientWSPingLoop(ctx, c) }()
@@ -224,6 +231,7 @@ func ClientWS(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFunc {
 			defer wg.Done()
 			select {
 			case <-supersede:
+				superseded = true
 				cancel()
 			case <-ctx.Done():
 			}
@@ -234,6 +242,13 @@ func ClientWS(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFunc {
 		cancel()
 		wg.Wait()
 		presence.Disconnect(tok)
+		if superseded {
+			// design doc §5: a superseded connection is told why, not just
+			// dropped with the generic "normal closure" every other teardown
+			// path (idle timeout, client disconnect, server shutdown) uses.
+			c.Close(websocket.StatusPolicyViolation, "superseded by newer connection")
+			return
+		}
 		c.Close(websocket.StatusNormalClosure, "")
 	}
 }
