@@ -15,6 +15,7 @@ import (
 
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/models"
+	"emly-api-go/internal/presencehub"
 	"emly-api-go/internal/statshub"
 )
 
@@ -91,12 +92,18 @@ type wsConn struct {
 
 	subMu sync.Mutex
 	sub   wsSubData
+
+	// presence backs the "online" field this connection's stats:clients
+	// snapshots/updates carry (design doc for GET /v2/client/ws §5). May be
+	// nil (tests); presencehub.Hub.Online tolerates that.
+	presence *presencehub.Hub
 }
 
-func newWSConn(ws *websocket.Conn) *wsConn {
+func newWSConn(ws *websocket.Conn, presence *presencehub.Hub) *wsConn {
 	now := time.Now().UTC()
 	return &wsConn{
-		ws: ws,
+		ws:       ws,
+		presence: presence,
 		sub: wsSubData{
 			channels:      make(map[string]bool),
 			windowMinutes: defaultConnectedWindowMinutes,
@@ -165,6 +172,7 @@ func (cn *wsConn) sendSnapshot(ctx context.Context, db *sqlx.DB, channel string)
 			cn.sendError(ctx, "internal", "failed to fetch clients")
 			return
 		}
+		decorateOnline(clients, cn.presence)
 		_ = cn.send(ctx, "snapshot", channelClients, map[string]interface{}{"clients": clients})
 
 	case channelEvents:
@@ -330,8 +338,10 @@ func (cn *wsConn) handleUpdaterEventPush(ctx context.Context, db *sqlx.DB, ev st
 	}
 
 	if s.channels[channelClients] && ev.Client != nil {
+		client := *ev.Client
+		client.Online = cn.presence.Online(int64(client.ID))
 		_ = cn.send(ctx, "update", channelClients, map[string]interface{}{
-			"upserted":    []models.UpdaterClient{*ev.Client},
+			"upserted":    []models.UpdaterClient{client},
 			"removed_ids": []int{},
 		})
 	}
@@ -436,7 +446,7 @@ func (cn *wsConn) eventLoop(ctx context.Context, hub *statshub.Hub, db *sqlx.DB)
 // answered 401 with no upgrade attempted at all - so a client can tell "bad
 // key" apart from "network/server problem" immediately, and nothing about
 // the connection is exposed to an unauthenticated caller.
-func StatsStream(db *sqlx.DB, hub *statshub.Hub) http.HandlerFunc {
+func StatsStream(db *sqlx.DB, hub *statshub.Hub, presence *presencehub.Hub) http.HandlerFunc {
 	cfg := config.Load()
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -456,7 +466,7 @@ func StatsStream(db *sqlx.DB, hub *statshub.Hub) http.HandlerFunc {
 			return
 		}
 
-		cn := newWSConn(c)
+		cn := newWSConn(c, presence)
 
 		ctx, cancel := context.WithCancel(r.Context())
 

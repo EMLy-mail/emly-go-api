@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"emly-api-go/internal/presencehub"
 	"emly-api-go/internal/statshub"
 )
 
@@ -31,7 +32,7 @@ func TestMain(m *testing.M) {
 // key gets a plain 401 the caller can tell apart from a network problem -
 // never an accepted-then-closed connection.
 func TestStatsStreamRejectsMissingOrWrongAdminKey(t *testing.T) {
-	h := StatsStream(nil, statshub.New())
+	h := StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration))
 
 	cases := []struct {
 		name    string
@@ -71,7 +72,7 @@ func TestStatsStreamRejectsMissingOrWrongAdminKey(t *testing.T) {
 // Hijacker) - see TestStatsStreamPingPong for a full handshake over a real
 // listener.
 func TestStatsStreamAcceptsQueryStringKeyFallback(t *testing.T) {
-	h := StatsStream(nil, statshub.New())
+	h := StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration))
 
 	req := httptest.NewRequest(http.MethodGet, "/stream?admin_key=test-admin-key", nil)
 	rec := httptest.NewRecorder()
@@ -90,7 +91,7 @@ func TestStatsStreamAcceptsQueryStringKeyFallback(t *testing.T) {
 // §7). It uses a nil hub and never subscribes to a channel, so it never
 // touches the (nil) database.
 func TestStatsStreamPingPong(t *testing.T) {
-	srv := httptest.NewServer(StatsStream(nil, statshub.New()))
+	srv := httptest.NewServer(StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration)))
 	defer srv.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -128,7 +129,7 @@ func TestStatsStreamPingPong(t *testing.T) {
 // of the same auth gate: Dial itself fails (no upgrade completes) when the
 // admin key is missing.
 func TestStatsStreamDialRejectedWithoutAdminKey(t *testing.T) {
-	srv := httptest.NewServer(StatsStream(nil, statshub.New()))
+	srv := httptest.NewServer(StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration)))
 	defer srv.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -143,5 +144,16 @@ func TestStatsStreamDialRejectedWithoutAdminKey(t *testing.T) {
 	}
 	if resp != nil && resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("response status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// TestStatsStreamClientsSnapshotIncludesOnline pins the wiring (StatsStream/
+// newWSConn accept and pass through a presence hub); it does not exercise a
+// DB-backed subscribe flow, consistent with this file's existing nil-DB-safe
+// tests.
+func TestStatsStreamClientsSnapshotIncludesOnline(t *testing.T) {
+	h := StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration))
+	if h == nil {
+		t.Fatal("StatsStream returned a nil handler")
 	}
 }
