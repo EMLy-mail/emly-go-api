@@ -1,6 +1,7 @@
 package remoteconfig
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -37,6 +38,32 @@ func TestCanonical_Idempotent(t *testing.T) {
 	b2, e2 := Canonical(doc)
 	if string(b1) != string(b2) || e1 != e2 {
 		t.Fatalf("Canonical is not idempotent")
+	}
+}
+
+// TestCanonical_OmitsNilClientWS pins down the fix for the site-mirror
+// replication break: ClientWS was added to Document after Canonical/ETag
+// already existed in the wild, tagged `json:"clientWs,omitempty"` precisely
+// so a document that never sets it canonicalizes exactly as it would have
+// before the field existed. minimalValidDocJSON predates ClientWS (no
+// "clientWs" key at all), so it stands in for an old document here; the
+// regression this guards against is a future optional field losing its
+// `omitempty` and silently changing the ETag of every document that never
+// touches it - which is exactly what broke internal/configmirror's ETag
+// comparison on every site mirror the first time either side of a mirror
+// pair upgraded, regardless of upgrade order.
+func TestCanonical_OmitsNilClientWS(t *testing.T) {
+	doc, problems := Parse([]byte(minimalValidDocJSON()))
+	if len(problems) != 0 {
+		t.Fatalf("invalid: %+v", problems)
+	}
+	if doc.ClientWS != nil {
+		t.Fatalf("expected ClientWS to be nil when absent from the source document, got %+v", doc.ClientWS)
+	}
+
+	b, _ := Canonical(doc)
+	if strings.Contains(string(b), "clientWs") {
+		t.Fatalf("canonical bytes contain \"clientWs\" for a document that never set it: %s", b)
 	}
 }
 

@@ -52,7 +52,19 @@ type Document struct {
 	// {enabled} shape as SelfUpdate/InstallCertificate. Absent/nil means the
 	// client keeps the channel closed - updating the updater alone must
 	// never open it.
-	ClientWS *ToggleOnly `json:"clientWs"`
+	//
+	// Tagged `omitempty`, unlike every other optional sub-object on this
+	// struct: those all predate this field and already round-trip as
+	// explicit JSON `null`, so adding `omitempty` to one of them would
+	// change bytes (and therefore the ETag) that documents already in the
+	// wild depend on. ClientWS has no such history - it was born after
+	// Canonical existed - so `omitempty` here means a document that never
+	// sets it canonicalizes byte-identically to one from before this field
+	// existed. Without it, every pre-existing document would gain a
+	// `"clientWs":null` it never had, changing its ETag and breaking
+	// internal/configmirror's ETag comparison on every site mirror in the
+	// field the moment either side upgrades (see TestCanonicalOmitsNilClientWS).
+	ClientWS *ToggleOnly `json:"clientWs,omitempty"`
 
 	Overrides []Override `json:"overrides"`
 }
