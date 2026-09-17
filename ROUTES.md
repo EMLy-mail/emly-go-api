@@ -24,6 +24,7 @@ vedi [DOCS.md](DOCS.md).
    - [Ban permanenti](#56-ban-permanenti--v2bans)
    - [Statistiche](#57-statistiche--v2stats)
    - [Stream WebSocket](#58-stream-websocket--v2statsstream)
+   - [Presenza client](#59-presenza-client--v2clientws)
 6. [Riepilogo autenticazione](#6-riepilogo-autenticazione)
 
 ---
@@ -637,6 +638,54 @@ rientra nel filtro della sottoscrizione, e a ogni tick periodico
 (`STATS_STREAM_TICK_INTERVAL`, default 30s) per la risincronizzazione. Il bus è
 in-process (`internal/statshub`) e quindi a istanza singola per scelta: in questo
 stack non ci sono né Postgres LISTEN/NOTIFY né Redis.
+
+### 5.9 Presenza client — `/v2/client/ws`
+
+| Metodo | Path              | Auth      | Cosa fa |
+|--------|-------------------|-----------|---------|
+| `GET`  | `/v2/client/ws`   | `API (WS)` | Upgrade WebSocket che l'EMLy Updater tiene aperta per tutta la vita del servizio, per la presenza online/offline in tempo reale. |
+
+L'autenticazione (`X-Api-Key`) avviene tramite lo stesso middleware del
+manifest self-update dell'Updater, prima dell'upgrade — a differenza di
+`/v2/stats/stream` non esiste un fallback in query string.
+
+**Handshake**
+
+```
+server ──► { "type": "hello" }
+client ──► { "type": "identity", "data": { hwid, hostname, ad_domain,
+             logged_user, logged_user_state, logged_user_disconnected_at,
+             serial, product, os_version, emly_version } }
+```
+
+L'identità arriva nel payload invece che negli header `X-EMLy-*`, ma passa
+per lo stesso upsert di manifest/download: la riga in `updater_clients` è
+la stessa. Un'identità mancante o senza `hwid`/`hostname` entro 10s riceve
+un `error` e la connessione viene chiusa.
+
+**Heartbeat**: il server manda `{"type":"ping"}` ogni 10s; il client deve
+rispondere `{"type":"pong"}` entro 20s o la connessione è considerata morta.
+Un `type` sconosciuto da uno dei due lati viene ignorato, non chiude la
+connessione — è così che un futuro comando si aggiunge senza rompere un
+Updater già distribuito.
+
+**Presenza**: tracciata solo in memoria (`internal/presencehub`), con una
+finestra di grazia di 15s alla disconnessione prima di segnare il client
+offline — assorbe un calo di rete breve o una riconnessione. Una nuova
+connessione con lo stesso client sostituisce quella precedente, che viene
+chiusa dal server.
+
+Il campo `"online"` che questo canale alimenta compare in
+`GET /v2/stats/clients` e nel canale `stats:clients` di
+`GET /v2/stats/stream` (§5.7-5.8): è calcolato al momento della risposta dal
+presence hub, **non** dallo stesso filtro di `last_seen_at` che
+`?online=true` su `/v2/stats/clients` usa per decidere quali righe
+restituire — i due possono disaccordare per un client appena disconnesso
+ma ancora dentro la finestra di `last_seen_at`.
+
+Attivata lato client dal flag `clientWs.enabled` nel documento di
+configurazione remota (§5.5): l'API non rifiuta comunque una connessione se
+quel flag è `false`, è l'Updater a non aprirla.
 
 ---
 
