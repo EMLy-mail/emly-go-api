@@ -15,6 +15,7 @@ import (
 
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/models"
+	"emly-api-go/internal/presencehub"
 )
 
 var validEventBuckets = map[string]bool{"day": true, "hour": true}
@@ -211,8 +212,22 @@ func fetchAllStatsClients(ctx context.Context, db *sqlx.DB) ([]models.UpdaterCli
 	return clients, err
 }
 
-// ListStatsClients returns a paginated list of known EMLy Updater clients.
-func ListStatsClients(db *sqlx.DB) http.HandlerFunc {
+// decorateOnline sets Online on each client from presence (internal/
+// presencehub), the in-memory GET /v2/client/ws connection registry (design
+// doc §5). It is a response-time decoration, not a DB column - callers that
+// don't need it (GET /v2/stats/clients/{id}) simply don't call this, and
+// presence being nil (tests, or a build that never constructs one) decorates
+// every client as offline rather than panicking.
+func decorateOnline(clients []models.UpdaterClient, presence *presencehub.Hub) {
+	for i := range clients {
+		clients[i].Online = presence.Online(int64(clients[i].ID))
+	}
+}
+
+// ListStatsClients returns a paginated list of known EMLy Updater clients,
+// each decorated with its current online state from presence
+// (internal/presencehub).
+func ListStatsClients(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		page, pageSize := 1, 20
 		if p := r.URL.Query().Get("page"); p != "" {
@@ -239,6 +254,7 @@ func ListStatsClients(db *sqlx.DB) http.HandlerFunc {
 			jsonError(w, http.StatusInternalServerError, "failed to fetch clients")
 			return
 		}
+		decorateOnline(clients, presence)
 
 		jsonOK(w, map[string]interface{}{
 			"data":        clients,
