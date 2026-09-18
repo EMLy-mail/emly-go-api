@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func minimalValidDocJSON() string {
@@ -279,6 +280,48 @@ func TestParse_ClientWSEnabled(t *testing.T) {
 	}
 	if doc.ClientWS == nil || !doc.ClientWS.Enabled {
 		t.Fatalf("ClientWS = %+v, want {Enabled: true}", doc.ClientWS)
+	}
+}
+
+// clientWs is patchable: a site can pilot the presence channel on a handful
+// of hosts (by hostname or HWID) before turning it on fleet-wide, the same
+// way the updater's twin AllowedPatchKeys/PatchableSections lists it. The
+// global switch stays off; only hosts the override matches see it on.
+func TestParse_ClientWSIsPatchable(t *testing.T) {
+	doc, problems := Parse([]byte(`{
+		"schemaVersion": 1,
+		"revision": 1,
+		"generatedAt": "",
+		"servers": {"a": "https://a.example.com"},
+		"defaultServer": "a",
+		"clientWs": {"enabled": false},
+		"overrides": [{
+			"id": "ws-pilot",
+			"match": {"hostnames": ["PC-TEST-01"]},
+			"patch": {"clientWs": {"enabled": true}}
+		}]
+	}`))
+	if len(problems) != 0 {
+		t.Fatalf("expected valid, got problems: %+v", problems)
+	}
+	if doc.ClientWS == nil || doc.ClientWS.Enabled {
+		t.Fatalf("global ClientWS = %+v, want {Enabled: false} (only the pilot host is patched)", doc.ClientWS)
+	}
+
+	pilot, applied := Effective(doc, Host{Hostname: "PC-TEST-01", Now: time.Now()})
+	if len(applied) != 1 || applied[0] != "ws-pilot" {
+		t.Fatalf("applied = %v, want [ws-pilot]", applied)
+	}
+	if pilot.ClientWS == nil || !pilot.ClientWS.Enabled {
+		t.Fatalf("pilot host ClientWS = %+v, want {Enabled: true}", pilot.ClientWS)
+	}
+
+	other, applied := Effective(doc, Host{Hostname: "PC-OTHER", Now: time.Now()})
+	if len(applied) != 0 {
+		t.Fatalf("applied = %v for an unmatched host, want none", applied)
+	}
+	if other.ClientWS == nil || other.ClientWS.Enabled {
+		t.Fatalf("unmatched host ClientWS = %+v, want {Enabled: false}", other.ClientWS)
 	}
 }
 

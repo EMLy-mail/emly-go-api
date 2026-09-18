@@ -211,4 +211,5 @@ var AllowedPatchKeys = map[string]bool{
 	"updater":       true,
 	"logging":       true,
 	"defaultServer": true,
+	"clientWs":      true,
 }
