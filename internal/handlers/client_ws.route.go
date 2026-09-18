@@ -221,7 +221,7 @@ func ClientWS(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFunc {
 		}
 
 		tok, supersede := presence.Connect(clientID)
-		slog.InfoContext(ctx, "client ws: connection established", "client_id", clientID)
+		slog.InfoContext(ctx, "client ws: connection established", "client_id", clientID, "hostname", identity.Hostname)
 
 		var superseded bool
 		var wg sync.WaitGroup
