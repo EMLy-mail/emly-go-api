@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	"emly-api-go/internal/config"
-	"emly-api-go/internal/handlers"
+	"emly-api-go/internal/health"
 	"emly-api-go/internal/storage"
 
 	"github.com/go-chi/chi/v5"
@@ -76,7 +76,7 @@ func NewRouter(db *sqlx.DB, s3conn *storage.S3Connector) http.Handler {
 		})
 	})
 
-	r.Get("/health", handlers.Health(db))
+	r.Get("/health", health.Health(db))
 
 	r.Route("/api", func(r chi.Router) {
 		registerAdmin(r, db, dbName)

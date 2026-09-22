@@ -1,12 +1,12 @@
 // Package statshub is the in-process event bus behind GET /v2/stats/stream
 // (docs/superpowers/specs/2026-09-04-websocket-stats-stream-design.md): it
 // fans out "something changed" notifications from the updater-event ingest
-// path (recordUpdaterEvent in internal/handlers) to every open stats WS
+// path (updaterclient.RecordEvent) to every open stats WS
 // connection, plus a periodic tick so time-derived fields (connected client
 // counts) stay fresh without a new event.
 //
 // It is HTTP- and DB-free like internal/remoteconfig: Hub only carries typed
-// notifications, never queries the database itself. internal/handlers is its
+// notifications, never queries the database itself. internal/updaterclient and internal/stats are its
 // only caller - it decides what to fetch and how to shape it into a WS
 // message.
 //

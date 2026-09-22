@@ -1,8 +1,10 @@
 package routes
 
 import (
+	"emly-api-go/internal/bans"
+	"emly-api-go/internal/bugreports"
 	"emly-api-go/internal/config"
-	"emly-api-go/internal/handlers"
+	"emly-api-go/internal/health"
 	apimw "emly-api-go/internal/middleware"
 	"emly-api-go/internal/presencehub"
 	"emly-api-go/internal/statshub"
@@ -27,7 +29,7 @@ import (
 // "online" field on the stats routes; pass nil to run without presence
 // tracking (see internal/presencehub). bans is the live permanent-block
 // snapshot the /v2/bans admin routes refresh after a write.
-func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror handlers.ConfigMirrorReporter, statsHub *statshub.Hub, presence *presencehub.Hub, bans handlers.BanReloader) {
+func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror health.ConfigMirrorReporter, statsHub *statshub.Hub, presence *presencehub.Hub, bans bans.BanReloader) {
 	dbName := config.Load().Database
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +42,7 @@ func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storag
 	r.Mount("/v1", v1.NewRouter(db, apiFileS3conn))
 	r.Mount("/v2", v2.NewRouter(db, apiFileS3conn, updatesS3conn, configMirror, statsHub, presence, bans))
 	// Redirect /health to /v1/health
-	r.Get("/health", handlers.Health(db))
+	r.Get("/health", health.Health(db))
 
 	// Legacy compatibility: expose bug-report creation also under /api/bug-reports.
 	r.Post("/api/bug-reports", registerBugReports(r, db, dbName, apiFileS3conn))
@@ -52,7 +54,7 @@ func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storag
 // warning too - it is the oldest path in the API and the likeliest to be
 // wired into something nobody has looked at in a while.
 func registerBugReports(_ chi.Router, db *sqlx.DB, dbName string, s3conn *storage.S3Connector) http.HandlerFunc {
-	h := handlers.CreateBugReport(db, dbName, s3conn)
+	h := bugreports.CreateBugReport(db, dbName, s3conn)
 	h = apimw.APIKeyAuth(db)(h).ServeHTTP
 	h = apimw.RouteLimitByIP(30, time.Minute)(h).ServeHTTP
 	h = v1.DeprecationWarning(h).ServeHTTP

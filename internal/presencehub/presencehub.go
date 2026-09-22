@@ -2,7 +2,7 @@
 // updater_clients.id) currently hold an open GET /v2/client/ws connection,
 // in memory only - HTTP- and DB-free, like internal/statshub, and subject to
 // the same single-instance limit (see that package's doc): presence known to
-// one API replica is invisible to another. internal/handlers is its only
+// one API replica is invisible to another. internal/clientws and internal/stats are its only
 // caller, for decorating GET /v2/stats/clients and the stats:clients WS
 // channel with an "online" field (2026-09-17-client-presence-ws-api-design.md
 // §5).

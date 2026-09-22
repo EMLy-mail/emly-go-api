@@ -18,16 +18,17 @@ import (
 	"github.com/joho/godotenv"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"emly-api-go/internal/clientws"
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/configmirror"
-	"emly-api-go/internal/eventprune"
 	"emly-api-go/internal/database"
 	"emly-api-go/internal/database/schema"
-	"emly-api-go/internal/handlers"
+	"emly-api-go/internal/eventprune"
 	"emly-api-go/internal/logfile"
 	emlyMiddleware "emly-api-go/internal/middleware"
 	"emly-api-go/internal/presencehub"
 	"emly-api-go/internal/routes"
+	"emly-api-go/internal/stats"
 	"emly-api-go/internal/statshub"
 	"emly-api-go/internal/storage"
 	"emly-api-go/internal/telemetry"
@@ -293,7 +294,7 @@ func main() {
 	// gap; closing it would mean a post-identity check against
 	// identity.HWID/identity.Hostname before presence.Connect, out of scope
 	// for this fix).
-	wsHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(handlers.StatsStream(db, statsHub, presenceHub))
+	wsHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(stats.StatsStream(db, statsHub, presenceHub))
 	wsHandler = rl.Handler(wsHandler)
 	wsHandler = bans.Handler(wsHandler)
 	wsHandler = chiMiddleware.Recoverer(wsHandler)
@@ -304,7 +305,7 @@ func main() {
 	// reason (see the comment above): apimw.APIKeyAuth replaces the inline
 	// admin-key check /v2/stats/stream needs, since this route has no
 	// query-string key fallback to support.
-	clientWSHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(handlers.ClientWS(db, presenceHub))
+	clientWSHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(clientws.ClientWS(db, presenceHub))
 	clientWSHandler = emlyMiddleware.APIKeyAuth(db)(clientWSHandler)
 	clientWSHandler = rl.Handler(clientWSHandler)
 	clientWSHandler = bans.Handler(clientWSHandler)

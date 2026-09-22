@@ -4,7 +4,8 @@ import (
 	apimw "emly-api-go/internal/middleware"
 	"time"
 
-	"emly-api-go/internal/handlers"
+	"emly-api-go/internal/admin"
+	"emly-api-go/internal/bugreports"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
@@ -21,10 +22,10 @@ func registerAdmin(r chi.Router, db *sqlx.DB, dbName string) {
 		r.Route("/auth", func(r chi.Router) {
 			r.Group(func(r chi.Router) {
 				r.Use(apimw.RouteLimitByIP(30, time.Minute))
-				r.Post("/login", handlers.LoginUser(db))
+				r.Post("/login", admin.LoginUser(db))
 			})
-			r.Get("/validate", handlers.ValidateSession(db))
-			r.Post("/logout", handlers.LogoutSession(db))
+			r.Get("/validate", admin.ValidateSession(db))
+			r.Post("/logout", admin.LogoutSession(db))
 		})
 
 		// User management — protected via Admin Key
@@ -32,12 +33,12 @@ func registerAdmin(r chi.Router, db *sqlx.DB, dbName string) {
 			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 			r.Use(apimw.AdminKeyAuth(db))
 
-			r.Get("/", handlers.ListUsers(db))
-			r.Post("/", handlers.CreateUser(db))
-			r.Get("/{id}", handlers.GetUserByID(db))
-			r.Patch("/{id}", handlers.UpdateUser(db))
-			r.Post("/{id}/reset-password", handlers.ResetPassword(db))
-			r.Delete("/{id}", handlers.DeleteUser(db))
+			r.Get("/", admin.ListUsers(db))
+			r.Post("/", admin.CreateUser(db))
+			r.Get("/{id}", admin.GetUserByID(db))
+			r.Patch("/{id}", admin.UpdateUser(db))
+			r.Post("/{id}/reset-password", admin.ResetPassword(db))
+			r.Delete("/{id}", admin.DeleteUser(db))
 		})
 
 		// Backward-compatible alias for admin-prefixed bug report delete path.
@@ -46,7 +47,7 @@ func registerAdmin(r chi.Router, db *sqlx.DB, dbName string) {
 			r.Use(apimw.AdminKeyAuth(db))
 			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
-			r.Delete("/{id}", handlers.DeleteBugReportByID(db, dbName))
+			r.Delete("/{id}", bugreports.DeleteBugReportByID(db, dbName))
 		})
 	})
 }

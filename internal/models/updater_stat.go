@@ -47,7 +47,7 @@ type UpdaterClient struct {
 	// from the in-memory presence hub, never stored - db:"-" keeps sqlx's
 	// `SELECT *` from trying to bind a non-existent column - so it is false
 	// on any row nobody has explicitly decorated (see decorateOnline in
-	// internal/handlers/stats.route.go).
+	// internal/stats/stats.route.go).
 	Online bool `db:"-" json:"online"`
 }
 

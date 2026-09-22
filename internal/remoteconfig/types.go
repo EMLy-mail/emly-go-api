@@ -1,7 +1,7 @@
 // Package remoteconfig implements the document type, validation, override
 // evaluation and canonical serialization shared by the /v2/config API and
 // (as a copy, see the design doc) the EMLy Updater client. It has no HTTP
-// and no DB dependency on purpose: internal/handlers wires it to storage,
+// and no DB dependency on purpose: internal/configapi wires it to storage,
 // the client wires the equivalent Go package to its own fetch/cache loop.
 //
 // The rules implemented here follow

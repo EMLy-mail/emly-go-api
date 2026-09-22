@@ -4,7 +4,7 @@ import (
 	apimw "emly-api-go/internal/middleware"
 	"time"
 
-	"emly-api-go/internal/handlers"
+	"emly-api-go/internal/bugreports"
 	"emly-api-go/internal/storage"
 
 	"github.com/go-chi/chi/v5"
@@ -18,8 +18,8 @@ func registerBugReports(r chi.Router, db *sqlx.DB, dbName string, s3conn *storag
 			r.Use(apimw.APIKeyAuth(db))
 			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
-			r.Get("/count", handlers.GetReportsCount(db, dbName))
-			r.Post("/", handlers.CreateBugReport(db, dbName, s3conn))
+			r.Get("/count", bugreports.GetReportsCount(db, dbName))
+			r.Post("/", bugreports.CreateBugReport(db, dbName, s3conn))
 		})
 
 		// API key + admin key: full read/write access
@@ -28,14 +28,14 @@ func registerBugReports(r chi.Router, db *sqlx.DB, dbName string, s3conn *storag
 			r.Use(apimw.AdminKeyAuth(db))
 			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
-			r.Get("/", handlers.GetAllBugReports(db, dbName))
-			r.Get("/{id}", handlers.GetBugReportByID(db, dbName))
-			r.Get("/{id}/status", handlers.GetReportStatusByID(db, dbName))
-			r.Get("/{id}/files", handlers.GetReportFilesByReportID(db, dbName))
-			r.Get("/{id}/files/{file_id}", handlers.GetReportFileByFileID(db, dbName, s3conn))
-			r.Get("/{id}/download", handlers.GetBugReportZipByID(db, dbName))
-			r.Patch("/{id}/status", handlers.PatchBugReportStatus(db, dbName))
-			r.Delete("/{id}", handlers.DeleteBugReportByID(db, dbName))
+			r.Get("/", bugreports.GetAllBugReports(db, dbName))
+			r.Get("/{id}", bugreports.GetBugReportByID(db, dbName))
+			r.Get("/{id}/status", bugreports.GetReportStatusByID(db, dbName))
+			r.Get("/{id}/files", bugreports.GetReportFilesByReportID(db, dbName))
+			r.Get("/{id}/files/{file_id}", bugreports.GetReportFileByFileID(db, dbName, s3conn))
+			r.Get("/{id}/download", bugreports.GetBugReportZipByID(db, dbName))
+			r.Patch("/{id}/status", bugreports.PatchBugReportStatus(db, dbName))
+			r.Delete("/{id}", bugreports.DeleteBugReportByID(db, dbName))
 		})
 	})
 }

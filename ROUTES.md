@@ -1,8 +1,10 @@
 # ROUTES.md — Mappa completa delle route
 
 Elenco di ogni endpoint esposto da **emly-api-go**, con autenticazione richiesta,
-parametri e comportamento. Generato dal codice in `internal/routes/` e
-`internal/handlers/`.
+parametri e comportamento. Generato dal codice in `internal/routes/` e nei
+package per feature sotto `internal/` (`bugreports`, `admin`, `updates`,
+`configapi`, `stats`, `clientws`, `bans`, `health`), ognuno dei quali registra
+le proprie route v2 nel suo `routes.go`.
 
 Per l'architettura generale vedi [CLAUDE.md](CLAUDE.md); per la guida estesa
 vedi [DOCS.md](DOCS.md).
@@ -45,7 +47,8 @@ La colonna **Auth** usa queste sigle:
 Tutti i gruppi applicano anche `apimw.RouteLimitByIP(30, time.Minute)`, oltre
 al rate limiter custom descritto sotto. Entrambi esentano chi presenta un
 `X-Dashboard-Key` valido. Tutte le risposte sono JSON tramite
-`jsonOK` / `jsonCreated` / `jsonError`, tranne i download binari.
+`response.OK` / `response.Created` / `response.Error` (`internal/response`),
+tranne i download binari.
 
 Il corpo di errore è sempre nella forma:
 
@@ -543,7 +546,7 @@ corrente parziale, quindi il totale può comprendere fino a un'ora in più di un
 esatto rolling 24h. È un indicatore di volume per la dashboard, e arrotondare
 per eccesso è la direzione innocua.
 
-Il payload è memoizzato dietro un `ttlCache` (`statscache.go`), con chiave
+Il payload è memoizzato dietro un `ttlcache.Cache` (`internal/ttlcache`), con chiave
 `product|window_minutes` e durata `STATS_CACHE_TTL` (default 30s, `0` disabilita),
 e la risposta porta un `Cache-Control: private, max-age=<TTL>`.
 Le dashboard fanno polling continuo su aggregati a 24 ore, quindi le query girano

@@ -58,7 +58,7 @@ if err != nil {
 }
 ```
 
-**I package sono come i moduli ES.** Il nome del package in cima al file (es. `package handlers`) e' l'equivalente di un namespace. Le funzioni con la prima lettera maiuscola (`CreateBugReport`) sono pubbliche (exported); quelle minuscole (`jsonError`) sono private al package.
+**I package sono come i moduli ES.** Il nome del package in cima al file (es. `package bugreports`) e' l'equivalente di un namespace, e coincide sempre con la cartella. Le funzioni con la prima lettera maiuscola (`CreateBugReport`) sono pubbliche (exported); quelle minuscole (`fetchStatsSummary`) sono private al package — visibili solo agli altri file della stessa cartella, test compresi.
 
 **Le funzioni ritornano valori multipli.** In Go e' normale avere `(result, error)` come return type. Non ci sono Promise; il codice e' sincrono (il parallelismo si fa con goroutine, non usate direttamente in questo progetto).
 
@@ -68,6 +68,12 @@ if err != nil {
 
 ## 2. Struttura del progetto
 
+Il progetto e' organizzato **per feature**, non per tipo di file. Se vieni da
+Laravel o da un progetto Express con `controllers/`, `models/`, `routes/` in
+cartelle separate, qui e' il contrario: tutto quello che serve a una feature
+(handler, registrazione delle route, test) sta nella sua cartella. Aggiungere un
+endpoint tocca una directory, non tre.
+
 ```
 emly-api-go/
 ├── main.go                          # Entry point: boot server, DB, middleware globali
@@ -75,49 +81,79 @@ emly-api-go/
 ├── .env                             # Variabili d'ambiente locali
 │
 └── internal/                        # Codice privato dell'applicazione
-    ├── config/
-    │   └── config.go                # Carica env vars in una struct Config
     │
+    │   ── Feature: handler + route + test, una cartella ciascuna ──
+    ├── bugreports/                  # /bug-reports: CRUD, upload, download ZIP
+    │   ├── bug_report.route.go      #   gli handler
+    │   ├── routes.go                #   RegisterV2: monta le sue route su /v2
+    │   └── templates/               #   template del testo nello ZIP
+    ├── admin/                       # admin/auth (login/sessioni) + admin/users
+    ├── updates/                     # release EMLy + self-update dell'Updater
+    ├── configapi/                   # /v2/config: documento e revisioni (HTTP)
+    ├── stats/                       # /v2/stats/* REST + /v2/stats/stream (WS)
+    ├── clientws/                    # /v2/client/ws: connessione sempre aperta
+    ├── bans/                        # block list permanente (admin)
+    ├── health/                       # /health
+    │
+    │   ── Foglie condivise: le feature le importano, loro non importano feature ──
+    ├── response/                    # OK / Created / Error: la forma delle risposte JSON
+    ├── dbvalue/                     # conversioni valore <-> colonna (NULL, troncamento)
+    ├── ttlcache/                    # memoizer generico dietro le stats in polling
+    ├── session/                     # chi e' l'utente dietro un token di sessione
+    ├── updaterclient/               # identita' dell'EMLy Updater + telemetria
+    │
+    │   ── Infrastruttura ──
+    ├── config/                      # Carica env vars in una struct Config
     ├── database/
-    │   ├── database.go              # Apre la connessione MySQL (pool)
-    │   └── schema/
-    │       ├── migrator.go          # Sistema di migration condizionali
-    │       ├── init.sql             # Schema base (CREATE TABLE IF NOT EXISTS)
-    │       └── migrations/
-    │           ├── tasks.json       # Definisce le migration con condizioni
-    │           ├── 1_bug_reports.sql
-    │           └── 2_users.sql
+    │   ├── database.go              #   Apre la connessione MySQL (pool)
+    │   └── schema/                  #   Migration condizionali (migrator + *.sql)
+    ├── middleware/                  # API key, admin key, rate limit, ban list
+    ├── models/                      # Struct che mappano tabelle DB e JSON
+    ├── remoteconfig/                # il documento /v2/config, senza HTTP ne' DB
+    ├── configmirror/                # replica /v2/config da un'istanza upstream
+    ├── statshub/                    # bus di eventi in-process per lo stream stats
+    ├── presencehub/                 # registro di chi e' online adesso
+    ├── eventprune/                  # retention delle righe grezze di updater_events
+    ├── logfile/                     # file di log giornalieri con retention
+    ├── storage/                     # client S3 (due bucket indipendenti)
+    ├── telemetry/                   # setup OpenTelemetry
+    ├── timing/                      # checkpoint di timing per richiesta
     │
-    ├── logfile/
-    │   └── logfile.go               # File di log giornalieri con retention (come winston-daily-rotate-file)
-    │
-    ├── handlers/                    # I "controller" — una funzione per endpoint
-    │   ├── response.go              # Helper: jsonOK, jsonCreated, jsonError
-    │   ├── health.route.go          # GET /v1/health
-    │   ├── bug_report.route.go      # Tutti gli endpoint /bug-reports
-    │   ├── admin_auth.route.go      # Login, validate, logout
-    │   ├── admin_users.route.go     # CRUD utenti admin
-    │   └── templates/
-    │       └── report.txt.tmpl      # Template testo per il file ZIP
-    │
-    ├── middleware/
-    │   ├── apikey.go                # Verifica header X-API-Key
-    │   └── adminKey.go              # Verifica header X-Admin-Key
-    │
-    ├── models/                      # Struct che mappano le tabelle DB e i JSON
-    │   ├── bug_report.go
-    │   ├── bug_report_file.go
-    │   ├── user.go
-    │   ├── session.go
-    │   └── rate_limit_hwid.go
-    │
-    └── routes/
-        ├── routes.go                # Monta i sub-router sul router root
-        └── v1/
-            ├── v1.go                # Crea il router /v1 con middleware globale v1
-            ├── bug_reports.go       # Registra le rotte /bug-reports
-            └── admin.go             # Registra le rotte /admin
+    └── routes/                      # Solo il montaggio: chi va su /v1 e chi su /v2
+        ├── routes.go                #   monta i sub-router sul router root
+        ├── v1/                      #   route v1 (congelate, sunset 2026-10-31)
+        └── v2/v2.go                 #   tabella di mount: chiama i RegisterV2
 ```
+
+### Dove va il codice nuovo
+
+Tre regole, e coprono quasi tutti i casi:
+
+1. **Un endpoint nuovo** va nella feature a cui appartiene: l'handler in un
+   `*.route.go` di quella cartella, la route nel suo `routes.go`. Niente giri
+   in `internal/routes/`.
+2. **Un helper che serve a due feature** va in una foglia condivisa
+   (`response`, `dbvalue`, `ttlcache`, `session`, `updaterclient`), **mai**
+   importando una feature da un'altra. Le feature non si conoscono tra loro:
+   e' quello che tiene il grafo delle dipendenze un albero e non una rete.
+3. **Una feature nuova** e' una cartella nuova sotto `internal/` con il suo
+   `routes.go`, piu' una riga in `internal/routes/v2/v2.go`.
+
+### Perche' i test non stanno in una cartella `test/`
+
+In Go i file `_test.go` appartengono al package in cui stanno, e questo da'
+loro accesso agli identificatori **non esportati** (quelli con l'iniziale
+minuscola). La maggior parte dei test qui testa esattamente quelli:
+`noteHubEvent` e `quantize` in `stats`, `parseLoggedUserSession` in
+`updaterclient`, la `Cache` interna in `ttlcache`. Spostarli in una cartella
+separata vorrebbe dire esportare tutta quella meccanica solo per poterla
+testare — allargare l'API pubblica di ogni package per soddisfare un layout di
+cartelle. In piu' `go test ./internal/stats` smetterebbe di eseguire i test di
+`stats`, e si perderebbe il segnale "quale package si e' rotto".
+
+Quindi: **un file di test accanto al codice che testa**. Le fixture, se
+servono, vanno in una cartella `testdata/` (nome magico che il toolchain
+ignora).
 
 ### Perche' `internal/`?
 
@@ -417,7 +453,7 @@ Gli endpoint admin bug report richiedono **entrambe** le chiavi, non solo
 
 ## 6. Handler (i controller)
 
-Gli handler sono in `internal/handlers/`. Ogni file corrisponde a una risorsa (es. `bug_report.route.go`).
+Gli handler stanno nel package della loro feature, un file per risorsa: `internal/bugreports/bug_report.route.go`, `internal/stats/stats.route.go`, e cosi' via (vedi §2). Accanto a ognuno c'e' il `routes.go` che li monta.
 
 ### Pattern factory function
 
@@ -446,14 +482,16 @@ function createBugReport(db) {
 app.post('/', createBugReport(db))
 ```
 
-### Response helpers (`response.go`)
+### Response helpers (`internal/response`)
 
-Tre funzioni usate in tutti gli handler per rispondere in JSON:
+Tre funzioni usate in tutti gli handler per rispondere in JSON. Stanno in un
+package a parte perche' le usano tutte le feature: la forma di una risposta e'
+una decisione sola, in un posto solo.
 
 ```go
-jsonOK(w, payload)        // HTTP 200 + JSON
-jsonCreated(w, payload)   // HTTP 201 + JSON
-jsonError(w, status, msg) // HTTP <status> + { "error": "msg" }
+response.OK(w, payload)        // HTTP 200 + JSON
+response.Created(w, payload)   // HTTP 201 + JSON
+response.Error(w, status, msg) // HTTP <status> + { "error": "msg" }
 ```
 
 ### Leggere il body JSON
@@ -465,7 +503,7 @@ var body struct {
     Password string `json:"password"`
 }
 if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-    jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+    response.Error(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
     return
 }
 ```
@@ -901,7 +939,7 @@ Il summary sulle 24h diventa una somma di ~48 righe, il grafico su 30 giorni
 una somma di ~720. Gli aggregati non guardano piu' nemmeno una riga grezza.
 
 Il contatore viene incrementato **nella stessa transazione dell'insert
-dell'evento** (`insertUpdaterEvent` in `internal/handlers/updates.route.go`),
+dell'evento** (`insertEvent` in `internal/updaterclient`),
 non da un job periodico. E' la scelta che tiene il tempo reale: il numero che
 la dashboard legge e' aggiornato nell'istante dell'evento, esattamente come
 prima. Un job di aggregazione ogni N minuti sarebbe stato piu' semplice ma
@@ -1285,28 +1323,31 @@ pubblico questo, cosa vede davvero la sede X" prima di premere publish.
 
 ## 11. Come aggiungere un nuovo endpoint
 
-Esempio: aggiungere `GET /v1/api/bug-reports/{id}/summary`.
+Esempio: aggiungere `GET /v2/api/bug-reports/{id}/summary`. Tutto quello che
+serve sta in **una cartella**, `internal/bugreports/`.
 
-### Step 1 — Scrivi l'handler in `internal/handlers/bug_report.route.go`
+### Step 1 — Scrivi l'handler in `internal/bugreports/bug_report.route.go`
 
 ```go
 func GetBugReportSummary(db *sqlx.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         id := chi.URLParam(r, "id")
         if id == "" {
-            jsonError(w, http.StatusBadRequest, "missing id parameter")
+            response.Error(w, http.StatusBadRequest, "missing id parameter")
             return
         }
 
         // esegui la query...
-        jsonOK(w, map[string]string{"summary": "..."})
+        response.OK(w, map[string]string{"summary": "..."})
     }
 }
 ```
 
-### Step 2 — Registra la rotta in `internal/routes/v1/bug_reports.go`
+### Step 2 — Registra la rotta in `internal/bugreports/routes.go`
 
-Aggiungila nel gruppo con le permission corrette:
+Nello stesso package, quindi senza prefisso: `GetBugReportSummary`, non
+`bugreports.GetBugReportSummary`. Mettila nel gruppo con le permission
+corrette:
 
 ```go
 r.Group(func(r chi.Router) {
@@ -1314,19 +1355,32 @@ r.Group(func(r chi.Router) {
     r.Use(apimw.AdminKeyAuth(db))
     r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
-    r.Get("/", handlers.GetAllBugReports(db))
-    r.Get("/{id}", handlers.GetBugReportByID(db))
-    r.Get("/{id}/summary", handlers.GetBugReportSummary(db)) // <-- aggiunto qui
+    r.Get("/", GetAllBugReports(db, dbName))
+    r.Get("/{id}", GetBugReportByID(db, dbName))
+    r.Get("/{id}/summary", GetBugReportSummary(db)) // <-- aggiunto qui
     // ...
 })
 ```
 
-### Step 3 — Build e test
+Non devi toccare `internal/routes/v2/`: quel file chiama gia'
+`bugreports.RegisterV2`, e la funzione che stai modificando e' quella.
+
+### Step 3 — Aggiungi il test accanto al codice
+
+`internal/bugreports/bug_report_test.go`, `package bugreports`. Stando nello
+stesso package puoi testare anche gli helper non esportati.
+
+### Step 4 — Build e test
 
 ```bash
 go build ./...      # verifica che compili
 go test ./...       # esegui i test
 air                 # hot-reload in sviluppo
 ```
+
+### Step 5 — Aggiorna `ROUTES.md`
+
+Non e' opzionale: una route nuova va nella tabella del suo gruppo, con auth,
+parametri e status code. Vale anche per un cambio di parametri o di gating.
 
 Non serve nessun file di routing separato, nessun decoratore, nessuna annotation. La rotta e' attiva immediatamente alla ricompilazione.

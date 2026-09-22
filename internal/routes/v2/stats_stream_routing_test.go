@@ -11,7 +11,7 @@ import (
 // upgrade, same as the REST stats/* routes it sits next to - unlike them, it
 // checks the key itself (design doc §4) rather than through
 // apimw.AdminKeyAuth, so this pins down the routing wire-up rather than
-// duplicating internal/handlers' own auth-gating tests.
+// duplicating internal/stats' own auth-gating tests.
 func TestStatsStreamRouteRequiresAdminKey(t *testing.T) {
 	router := NewRouter(nil, nil, nil, nil, nil, nil, nil)
 
