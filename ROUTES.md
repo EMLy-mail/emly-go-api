@@ -536,12 +536,20 @@ l'applicazione dei ban non deve né aprirsi né chiudersi per un singhiozzo del 
 Risposta: `total_clients`, `connected_clients`, `window_minutes`, `product`,
 `events_last_24h`, `clients_by_version`, `clients_by_config_revision`.
 
+`events_last_24h` è sommato dalla tabella di rollup `updater_event_hourly`
+(migration 20), non dalle righe grezze di `updater_events`. Di conseguenza la
+finestra è allineata all'ora: copre le 24 ore intere precedenti più l'ora
+corrente parziale, quindi il totale può comprendere fino a un'ora in più di un
+esatto rolling 24h. È un indicatore di volume per la dashboard, e arrotondare
+per eccesso è la direzione innocua.
+
 Il payload è memoizzato dietro un `ttlCache` (`statscache.go`), con chiave
-`product|window_minutes` e durata `STATS_CACHE_TTL` (default 30s, `0` disabilita).
+`product|window_minutes` e durata `STATS_CACHE_TTL` (default 30s, `0` disabilita),
+e la risposta porta un `Cache-Control: private, max-age=<TTL>`.
 Le dashboard fanno polling continuo su aggregati a 24 ore, quindi le query girano
 una volta per TTL invece che una volta per richiesta, e più chiamate concorrenti
 su una chiave fredda collassano in una sola build. Quello che si aggiunge al
-sommario va in `buildStatsSummary`, dietro la cache, non nell'handler.
+sommario va in `fetchStatsSummary`, dietro la cache, non nell'handler.
 
 **`GET /clients` — query string**
 
@@ -561,6 +569,20 @@ sommario va in `buildStatsSummary`, dietro la cache, non nell'handler.
 | `product`    | `emly`, `updater`, `all` |
 | `from`       | RFC3339 |
 | `to`         | RFC3339 |
+
+Anche questa serie viene dal rollup `updater_event_hourly`: l'ora è il bucket
+più fine che l'API espone, quindi **il filtro `from`/`to` ha granularità
+oraria** — `from` è arrotondato all'inizio della sua ora, così un intervallo
+che inizia a metà ora comprende l'ora intera e la prima colonna di un grafico
+giornaliero non risulta tagliata. I campi `from`/`to` nella risposta riportano
+comunque la finestra come l'ha chiesta il chiamante.
+
+Come `/summary`, la risposta è memoizzata per `STATS_CACHE_TTL` e porta il
+relativo `Cache-Control: private`. La chiave di cache include tutti i
+parametri, con gli istanti arrotondati a scatti larghi quanto il TTL: senza
+quell'arrotondamento la finestra di default finisce a `time.Now()` e due
+richieste non condividerebbero mai una chiave. Due chiamanti le cui finestre
+differiscono per meno del TTL condividono quindi un payload.
 
 **Telemetria dei client.** Gli header `X-EMLy-*` (`Hostname`, `HWID`, `ADDomain`,
 `LoggedUser`, `LoggedUserState`, `LoggedUserDisconnectedAt`, `Serial`, `Product`,
@@ -641,6 +663,19 @@ rientra nel filtro della sottoscrizione, e a ogni tick periodico
 (`STATS_STREAM_TICK_INTERVAL`, default 30s) per la risincronizzazione. Il bus è
 in-process (`internal/statshub`) e quindi a istanza singola per scelta: in questo
 stack non ci sono né Postgres LISTEN/NOTIFY né Redis.
+
+**Gli aggiornamenti sono raggruppati, non uno per evento** (`wsCoalesceWindow`,
+1s). Un evento dell'hub non fa query: segna soltanto quali canali sono da
+ricalcolare, e un ticker da un secondo ricalcola e spinge quelli sporchi. Una
+raffica di eventi produce quindi **un** `update` per canale, non uno per evento:
+la latenza percepita resta sotto il secondo, mentre il carico sul database
+diventa costante invece di crescere come (eventi al secondo) × (connessioni
+aperte). Sul canale `stats:clients` il raggruppamento vale anche per i delta: una
+macchina che fa più check dentro la stessa finestra compare una volta sola, nel
+suo stato più recente, e un tick che chiede una risincronizzazione completa
+prevale sui delta accumulati. Un client non deve quindi contare gli `update`
+ricevuti né assumere che a ogni evento ingerito corrisponda un messaggio — è
+sempre lo stato corrente, non un flusso di eventi.
 
 ### 5.9 Presenza client — `/v2/client/ws`
 

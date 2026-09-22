@@ -874,6 +874,74 @@ dell'API possono quindi finire limitate a ~30 riconnessioni al minuto — un
 limite noto e accettato, non ancora affrontato in attesa di conferme sulla
 topologia di rete reale della flotta.
 
+### Volume degli eventi updater — rollup, coalescing e retention
+
+`updater_events` prende una riga per ogni manifest check di ogni macchina, a
+ogni ciclo. Nessuno la cancellava: era arrivata a mezzo milione di righe, e
+sopra quelle righe girava ogni aggregato della dashboard. Il problema non era
+la singola query (`SELECT *` su tutta la tabella e' lento solo a trasferire le
+righe al client SQL), ma tre letture che si ripetevano all'infinito:
+
+1. `GET /v2/stats/summary` contava 24h di eventi per tipo — decine di
+   migliaia di righe per chiamata.
+2. `GET /v2/stats/events` raggruppava 30 giorni per `DATE(created_at)`.
+   Raggruppare per un'espressione non e' indicizzabile: MySQL scansiona tutto
+   l'intervallo, si costruisce una tabella temporanea e la ordina.
+3. Peggio: **entrambe ripartivano a ogni evento ingerito, per ogni
+   connessione `/v2/stats/stream` aperta**. Cioe' il costo cresceva come
+   (macchine nella flotta) x (dashboard connesse).
+
+La soluzione sono tre pezzi distinti.
+
+**1. Tabella di rollup — `updater_event_hourly` (migration 20).** E' la stessa
+idea del "counter cache" che in Laravel si tiene in una colonna
+`comments_count` invece di fare `COUNT(*)` ogni volta, o di una vista
+materializzata: una riga per `(ora, product, event_type)` con un contatore.
+Il summary sulle 24h diventa una somma di ~48 righe, il grafico su 30 giorni
+una somma di ~720. Gli aggregati non guardano piu' nemmeno una riga grezza.
+
+Il contatore viene incrementato **nella stessa transazione dell'insert
+dell'evento** (`insertUpdaterEvent` in `internal/handlers/updates.route.go`),
+non da un job periodico. E' la scelta che tiene il tempo reale: il numero che
+la dashboard legge e' aggiornato nell'istante dell'evento, esattamente come
+prima. Un job di aggregazione ogni N minuti sarebbe stato piu' semplice ma
+avrebbe introdotto proprio il ritardo che volevamo evitare.
+
+**2. Coalescing sulla WebSocket — `wsCoalesceWindow`.** Gli eventi dell'hub
+ora non fanno query: segnano soltanto "questo canale e' da ricalcolare"
+(`noteHubEvent`), e un ticker da 1 secondo fa il ricalcolo per i canali
+sporchi (`flush`). E' il `throttle` di lodash, applicato al lato server: 500
+eventi in un secondo producono un aggiornamento, non 500. Per chi guarda la
+dashboard e' indistinguibile; per il database la differenza e' tra una query
+al secondo e una query per evento per connessione.
+
+Nota di ordine: svuotare il canale dell'hub e' la prima responsabilita' del
+loop, perche' `statshub.Publish` scarta un evento invece di bloccarsi su un
+buffer pieno. Ecco perche' le query stanno nel ramo del ticker e non in quello
+della ricezione.
+
+**3. Retention — `internal/eventprune`.** Un loop in background (come
+`internal/configmirror`, e con la stessa logica di retention di
+`internal/logfile`) che ogni ora cancella le righe grezze piu' vecchie di
+`EVENTS_RETENTION_DAYS` (default 30, `0` disattiva). Cancella **per chiave
+primaria a blocchi di 5000**, non con un `WHERE created_at < ?`: nessun indice
+parte da `created_at`, quindi un `DELETE` con quel predicato scansionerebbe
+tutta la tabella a ogni blocco. Una query trova l'`id` di confine, poi ogni
+blocco e' una `DELETE ... WHERE id < ? LIMIT 5000` con una pausa in mezzo, cosi'
+il lavoro si spalma invece di bloccare l'ingest.
+
+Cosa si perde cancellando: solo la cronologia per-evento di
+`GET /v2/stats/clients/{id}` oltre la finestra. Totali e grafici vengono dal
+rollup, che non viene mai potato — la storia aggregata resta per sempre.
+
+**Cache come seconda difesa.** `GET /v2/stats/summary` e ora anche
+`GET /v2/stats/events` restano dietro il `ttlCache` (`STATS_CACHE_TTL`,
+default 30s). Con il rollup davanti non e' piu' indispensabile, ma toglie
+comunque dal processo le dashboard che fanno polling. Per `/events` la chiave
+di cache arrotonda gli istanti `from`/`to` a scatti larghi quanto il TTL:
+senza quell'arrotondamento la finestra di default finisce a `time.Now()` e due
+richieste non condividerebbero mai una chiave.
+
 ---
 
 ### Pubblici

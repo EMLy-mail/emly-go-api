@@ -270,20 +270,13 @@ func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, hub *
 
 	eventVersion := nullableString(version)
 	eventIP := nullableString(id.IP)
-	res, err := db.ExecContext(ctx,
-		`INSERT INTO updater_events (client_id, event_type, product, version, ip_address) VALUES (?, ?, ?, ?, ?)`,
-		clientID, eventType, product, eventVersion, eventIP,
-	)
+	eventID, err := insertUpdaterEvent(ctx, db, clientID, eventType, product, eventVersion, eventIP)
 	if err != nil {
 		slog.WarnContext(ctx, "updater stats: failed to record event", "error", err)
 		return
 	}
 
 	if hub == nil || !hub.Active() {
-		return
-	}
-	eventID, err := res.LastInsertId()
-	if err != nil {
 		return
 	}
 	var client models.UpdaterClient
@@ -304,6 +297,69 @@ func recordUpdaterEvent(ctx context.Context, db *sqlx.DB, r *http.Request, hub *
 			CreatedAt: time.Now().UTC(),
 		},
 	})
+}
+
+// insertUpdaterEvent writes one updater_events row and, in the same
+// transaction, adds it to its hour's updater_event_hourly counter (migration
+// 20). It returns the new row's id.
+//
+// The two go together or not at all: the rollup is what /v2/stats/summary and
+// /v2/stats/events actually read, so a raw insert that committed without its
+// increment would be an event the dashboard never shows, and no later pass
+// would notice. That is also why the counter is maintained here rather than by
+// a periodic aggregation job - the number a dashboard reads is exactly as live
+// as the event itself, which is what keeps /v2/stats/stream real-time now that
+// it no longer touches raw rows.
+//
+// The bucket is derived from the inserted row's own created_at rather than a
+// second NOW(), so every event lands in the bucket a GROUP BY over the raw
+// rows would put it in - no row slipping into the next hour because the two
+// statements straddled the boundary. That is what makes migration 20's
+// backfill statement usable as a repair.
+//
+// Deletes are the other direction and deliberately do not follow: pruning
+// (internal/eventprune) and DeleteStatsClient both remove raw rows without
+// touching these counters, so the rollup is the fleet's aggregate history and
+// keeps events the raw table no longer has. A repair can therefore only
+// rebuild the retained window - which is the trade that lets the charts keep
+// full history while the raw table stays bounded.
+//
+// Cost on this hot path is one extra primary-key lookup and one upsert against
+// a handful of rows - the current hour's (product, event_type) pairs - which
+// is why the read side can stop scanning half a million.
+func insertUpdaterEvent(ctx context.Context, db *sqlx.DB, clientID int64, eventType, product string, version, ip *string) (int64, error) {
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op once Commit has run
+
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO updater_events (client_id, event_type, product, version, ip_address) VALUES (?, ?, ?, ?, ?)`,
+		clientID, eventType, product, version, ip,
+	)
+	if err != nil {
+		return 0, err
+	}
+	eventID, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO updater_event_hourly (bucket_hour, product, event_type, count)
+		 SELECT DATE_FORMAT(created_at, `+hourBucketExpr+`), product, event_type, 1
+		   FROM updater_events WHERE id = ?
+		 ON DUPLICATE KEY UPDATE count = count + 1`,
+		eventID,
+	); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return eventID, nil
 }
 
 // upsertUpdaterClient records one client sighting and returns its row id.

@@ -16,17 +16,23 @@ const maxTTLCacheEntries = 512
 // ttlCache memoizes a handler payload for a short TTL and collapses callers
 // racing on the same key into a single computation.
 //
-// It exists because GET /v2/stats/summary serves 24h aggregates that polling
-// dashboards request far faster than the numbers can meaningfully change - a
-// ~200-client fleet was driving roughly one request per second, and every one
-// of them re-scanned each updater_events row of the last day. One rebuild per
-// TTL is indistinguishable to a human reading the page and takes the endpoint
-// off the database's hot path.
+// It exists because GET /v2/stats/summary and GET /v2/stats/events serve
+// aggregates over a day and a month that polling dashboards request far faster
+// than the numbers can meaningfully change - a ~200-client fleet was driving
+// roughly one request per second, and every one of them re-scanned raw
+// updater_events rows. One rebuild per TTL is indistinguishable to a human
+// reading the page and takes both endpoints off the database's hot path.
 //
-// Only the polled REST path is cached. The WS stream (stats_stream.route.go)
-// calls fetchStatsSummary directly, because it recomputes on an actual event
-// or tick rather than on client demand - putting it behind this cache would
-// buy nothing and could push a stale snapshot to a subscriber.
+// It is the second of two defences, not the only one: those queries now read
+// the updater_event_hourly rollup (migration 20), so even a cache miss sums a
+// few hundred rows rather than scanning half a million.
+//
+// Only the polled REST paths are cached. The WS stream (stats_stream.route.go)
+// calls fetchStatsSummary/fetchStatsEvents directly, because it recomputes on
+// an actual event or tick rather than on client demand - putting it behind this
+// cache would buy nothing and could push a stale snapshot to a subscriber. Its
+// own protection against recompute storms is coalescing, not memoization: see
+// wsCoalesceWindow.
 type ttlCache[T any] struct {
 	ttl time.Duration
 

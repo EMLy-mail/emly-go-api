@@ -20,6 +20,7 @@ import (
 
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/configmirror"
+	"emly-api-go/internal/eventprune"
 	"emly-api-go/internal/database"
 	"emly-api-go/internal/database/schema"
 	"emly-api-go/internal/handlers"
@@ -225,6 +226,13 @@ func main() {
 	// open GET /v2/client/ws connection (see internal/presencehub package
 	// doc). Single-instance, like statsHub above.
 	presenceHub := presencehub.New(presencehub.DefaultGraceDuration)
+
+	// Background loop that keeps updater_events from growing without bound
+	// (see internal/eventprune package doc). It only trims raw rows past
+	// EVENTS_RETENTION_DAYS - the updater_event_hourly rollup the dashboard
+	// aggregates read is never pruned - and does nothing at all when that is
+	// 0. Stopped via backgroundCancel like the loops above.
+	go eventprune.Start(backgroundCtx, db, time.Duration(cfg.EventsRetentionDays)*24*time.Hour)
 
 	r := chi.NewRouter()
 

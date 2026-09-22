@@ -38,6 +38,24 @@ const (
 	wsPingInterval = 30 * time.Second
 	wsIdleTimeout  = 90 * time.Second
 	wsWriteTimeout = 10 * time.Second
+
+	// wsCoalesceWindow bounds how often a connection recomputes its channels
+	// in response to ingest. Hub events only mark what went stale (see
+	// noteHubEvent); the queries happen here, at most once per window per
+	// connection, no matter how many events arrived in between.
+	//
+	// Recomputing per event was quadratic in the wrong two dimensions: every
+	// updater_events row re-ran the summary and the 30-day event rollup once
+	// per open connection, so a fleet checking in steadily kept the database
+	// busy in proportion to fleet size times dashboards connected. Coalescing
+	// makes that cost a constant per second per connection instead.
+	//
+	// One second is chosen to stay under human perception: a dashboard counter
+	// still moves "as you watch" while the database sees one refresh a second
+	// at worst. It is deliberately much shorter than
+	// STATS_STREAM_TICK_INTERVAL, which is the resync floor, not the latency
+	// budget.
+	wsCoalesceWindow = time.Second
 )
 
 var validWSChannels = map[string]bool{channelSummary: true, channelClients: true, channelEvents: true}
@@ -93,10 +111,33 @@ type wsConn struct {
 	subMu sync.Mutex
 	sub   wsSubData
 
+	// pendingMu guards the coalescing state: what hub events have invalidated
+	// since the last flush. Held only for the marking and for lifting the
+	// state out in flush, never across a query or a send.
+	pendingMu sync.Mutex
+	pending   wsPending
+
 	// presence backs the "online" field this connection's stats:clients
 	// snapshots/updates carry (design doc for GET /v2/client/ws §5). May be
 	// nil (tests); presencehub.Hub.Online tolerates that.
 	presence *presencehub.Hub
+}
+
+// wsPending is what one connection owes its client at the next flush, built up
+// by noteHubEvent as events arrive. Everything here is a "this went stale"
+// marker rather than a payload, so marking is a couple of map writes and
+// nothing queries the database until flush (see wsCoalesceWindow).
+type wsPending struct {
+	// summary/events mean "recompute and push this channel".
+	summary bool
+	events  bool
+	// clientsSnapshot means the tick asked for a full stats:clients resync,
+	// which subsumes any accumulated per-client delta.
+	clientsSnapshot bool
+	// clients holds the freshest row seen per client id, keyed so a machine
+	// checking in repeatedly inside one window is pushed once, in its latest
+	// state, instead of once per event.
+	clients map[int]models.UpdaterClient
 }
 
 func newWSConn(ws *websocket.Conn, presence *presencehub.Hub) *wsConn {
@@ -325,60 +366,106 @@ func wsEventMatchesSubscription(ev *models.UpdaterEvent, s wsSubData) bool {
 	return true
 }
 
-// handleUpdaterEventPush reacts to one ingested updater_events row (design
-// doc §6.1). stats:clients never needs a query here - the hub already
-// carries the fresh client row recordUpdaterEvent fetched at ingest time.
-func (cn *wsConn) handleUpdaterEventPush(ctx context.Context, db *sqlx.DB, ev statshub.Event) {
+// noteHubEvent records what one hub notification invalidated for this
+// connection, and queries nothing - flush does the work, at most once per
+// wsCoalesceWindow.
+//
+// For an ingested updater_events row (design doc §6.1) that means marking
+// stats:summary stale, stashing the fresh client row the hub already carries
+// (recordUpdaterEvent fetched it at ingest time, so stats:clients still costs
+// no query here), and marking stats:events stale only when the row falls
+// inside this connection's filter.
+//
+// For the hub's periodic EventKindTick (design doc §6.2) it means marking
+// stats:summary stale - connected_clients decays by the clock alone, with no
+// event to trigger it - and asking for a full stats:clients resnapshot, which
+// is how each client's derived "online" state stays current.
+func (cn *wsConn) noteHubEvent(ev statshub.Event) {
 	s := cn.subSnapshot()
 
-	if s.channels[channelSummary] {
+	cn.pendingMu.Lock()
+	defer cn.pendingMu.Unlock()
+
+	switch ev.Kind {
+	case statshub.EventKindUpdaterEvent:
+		if s.channels[channelSummary] {
+			cn.pending.summary = true
+		}
+		if s.channels[channelClients] && ev.Client != nil {
+			if cn.pending.clients == nil {
+				cn.pending.clients = make(map[int]models.UpdaterClient)
+			}
+			cn.pending.clients[ev.Client.ID] = *ev.Client
+		}
+		if s.channels[channelEvents] && ev.EventEntry != nil && wsEventMatchesSubscription(ev.EventEntry, s) {
+			cn.pending.events = true
+		}
+
+	case statshub.EventKindTick:
+		if s.channels[channelSummary] {
+			cn.pending.summary = true
+		}
+		if s.channels[channelClients] {
+			cn.pending.clientsSnapshot = true
+		}
+	}
+}
+
+// takePending lifts the accumulated state out and resets it, so flush can
+// query and send without holding pendingMu. The bool reports whether anything
+// was owed at all - the common case on a quiet server is nothing, and then
+// flush costs one mutex acquisition.
+func (cn *wsConn) takePending() (wsPending, bool) {
+	cn.pendingMu.Lock()
+	defer cn.pendingMu.Unlock()
+
+	p := cn.pending
+	if !p.summary && !p.events && !p.clientsSnapshot && len(p.clients) == 0 {
+		return wsPending{}, false
+	}
+	cn.pending = wsPending{}
+	return p, true
+}
+
+// flush pushes whatever accumulated since the last one: one recompute per
+// stale channel, however many events fed into it.
+func (cn *wsConn) flush(ctx context.Context, db *sqlx.DB) {
+	p, any := cn.takePending()
+	if !any {
+		return
+	}
+	s := cn.subSnapshot()
+
+	if p.summary {
 		if summary, err := fetchStatsSummary(ctx, db, s.windowMinutes, s.product); err == nil {
 			_ = cn.send(ctx, "update", channelSummary, summary)
 		}
 	}
 
-	if s.channels[channelClients] && ev.Client != nil {
-		client := *ev.Client
-		client.Online = cn.presence.Online(int64(client.ID))
+	switch {
+	case p.clientsSnapshot:
+		// A full resync carries every client's current state, so the
+		// per-client deltas accumulated alongside it are already included.
+		cn.sendSnapshot(ctx, db, channelClients)
+	case len(p.clients) > 0:
+		upserted := make([]models.UpdaterClient, 0, len(p.clients))
+		for _, client := range p.clients {
+			client.Online = cn.presence.Online(int64(client.ID))
+			upserted = append(upserted, client)
+		}
+		// Map iteration order is random; sort so a delta carrying several
+		// clients is reproducible for a reader (and for a test).
+		sort.Slice(upserted, func(i, j int) bool { return upserted[i].ID < upserted[j].ID })
 		_ = cn.send(ctx, "update", channelClients, map[string]interface{}{
-			"upserted":    []models.UpdaterClient{client},
+			"upserted":    upserted,
 			"removed_ids": []int{},
 		})
 	}
 
-	if s.channels[channelEvents] && ev.EventEntry != nil && wsEventMatchesSubscription(ev.EventEntry, s) {
+	if p.events {
 		if resp, err := fetchStatsEvents(ctx, db, s.eventsBucket, s.eventsEventType, s.product, s.eventsFrom, s.eventsTo); err == nil {
 			_ = cn.send(ctx, "update", channelEvents, resp)
 		}
-	}
-}
-
-// handleTick reacts to the hub's periodic EventKindTick (design doc §6.2):
-// connected_clients (part of stats:summary) and each client's derived
-// "online" state (which the dashboard computes from last_seen_at - see the
-// design doc's implementation notes) both go stale purely from time passing,
-// with no new updater_events row to trigger a push. stats:clients has no
-// per-tick delta to compute, so it gets a full resnapshot instead - cheap at
-// the fleet sizes this serves (design doc §1).
-func (cn *wsConn) handleTick(ctx context.Context, db *sqlx.DB) {
-	s := cn.subSnapshot()
-
-	if s.channels[channelSummary] {
-		if summary, err := fetchStatsSummary(ctx, db, s.windowMinutes, s.product); err == nil {
-			_ = cn.send(ctx, "update", channelSummary, summary)
-		}
-	}
-	if s.channels[channelClients] {
-		cn.sendSnapshot(ctx, db, channelClients)
-	}
-}
-
-func (cn *wsConn) handleHubEvent(ctx context.Context, db *sqlx.DB, ev statshub.Event) {
-	switch ev.Kind {
-	case statshub.EventKindUpdaterEvent:
-		cn.handleUpdaterEventPush(ctx, db, ev)
-	case statshub.EventKindTick:
-		cn.handleTick(ctx, db)
 	}
 }
 
@@ -419,9 +506,20 @@ func (cn *wsConn) pingLoop(ctx context.Context) {
 }
 
 // eventLoop subscribes to hub and pushes whatever it publishes through to
-// this connection, filtered by its current subscriptions. A nil hub (not
-// expected outside tests) just idles until the connection closes, same as a
-// hub with nobody publishing to it.
+// this connection, filtered by its current subscriptions and coalesced into
+// at most one refresh per wsCoalesceWindow. A nil hub (not expected outside
+// tests) just idles until the connection closes, same as a hub with nobody
+// publishing to it.
+//
+// Draining the hub channel is the loop's first duty: statshub.Publish drops
+// an event rather than blocking on a full buffer, so marking must stay cheap
+// enough that no burst of ingest can outrun it. That is exactly why the
+// queries moved to the ticker branch.
+//
+// The ticker runs regardless of traffic. A flush with nothing owed is one
+// mutex acquisition (see takePending), so a per-second wakeup on an idle
+// connection is cheaper than the bookkeeping that arming a timer per event
+// would need.
 func (cn *wsConn) eventLoop(ctx context.Context, hub *statshub.Hub, db *sqlx.DB) {
 	if hub == nil {
 		<-ctx.Done()
@@ -429,12 +527,18 @@ func (cn *wsConn) eventLoop(ctx context.Context, hub *statshub.Hub, db *sqlx.DB)
 	}
 	ch, unsubscribe := hub.Subscribe()
 	defer unsubscribe()
+
+	t := time.NewTicker(wsCoalesceWindow)
+	defer t.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case ev := <-ch:
-			cn.handleHubEvent(ctx, db, ev)
+			cn.noteHubEvent(ev)
+		case <-t.C:
+			cn.flush(ctx, db)
 		}
 	}
 }

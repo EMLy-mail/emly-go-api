@@ -68,6 +68,7 @@ type Config struct {
 	ConfigUpstreamAPIKey    string
 	StatsStreamTickInterval time.Duration
 	StatsCacheTTL           time.Duration
+	EventsRetentionDays     int
 	UseS3APIFileStorage     bool
 	UseS3UpdatesStorage     bool
 	RateLimit               RateLimitConfig
@@ -180,7 +181,14 @@ func load() *Config {
 		// be. It is the REST path's counterpart to the stream's tick: clients
 		// that poll instead of subscribing get the same figures, recomputed
 		// once per TTL rather than once per request.
-		StatsCacheTTL:       envDuration("STATS_CACHE_TTL", 30*time.Second),
+		StatsCacheTTL: envDuration("STATS_CACHE_TTL", 30*time.Second),
+		// EventsRetentionDays bounds how long raw updater_events rows are
+		// kept. Only the per-client event history on GET /v2/stats/clients/{id}
+		// reads them: the aggregates are served from the updater_event_hourly
+		// rollup, which is never pruned, so this trims detail and not history.
+		// 0 keeps everything, the same way LOG_RETENTION_DAYS=0 does - and the
+		// same way this table behaved before pruning existed.
+		EventsRetentionDays: envInt("EVENTS_RETENTION_DAYS", 30),
 		UseS3APIFileStorage: strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_API_FILE_STORAGE"))) == "true",
 		UseS3UpdatesStorage: strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_UPDATES_STORAGE"))) == "true",
 		Otel: OtelConfig{

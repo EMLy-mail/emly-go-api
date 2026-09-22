@@ -20,8 +20,8 @@ import (
 // unused); handlers.StatsStream and recordUpdaterEvent both tolerate that.
 // presence backs the "online" field on GET /stats/clients and the
 // stats:clients WS channel; nil is fine (see internal/presencehub). cfg
-// carries StatsCacheTTL, which bounds how stale the polled /summary may be -
-// see handlers.GetStatsSummary.
+// carries StatsCacheTTL, which bounds how stale the polled /summary and
+// /events may be - see handlers.GetStatsSummary and handlers.GetStatsEvents.
 func registerStats(r chi.Router, db *sqlx.DB, cfg *config.Config, hub *statshub.Hub, presence *presencehub.Hub) {
 	r.Route("/stats", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
@@ -31,7 +31,7 @@ func registerStats(r chi.Router, db *sqlx.DB, cfg *config.Config, hub *statshub.
 			r.Get("/summary", handlers.GetStatsSummary(db, cfg))
 			r.Get("/clients", handlers.ListStatsClients(db, presence))
 			r.Get("/clients/{id}", handlers.GetStatsClientDetail(db, presence))
-			r.Get("/events", handlers.GetStatsEvents(db))
+			r.Get("/events", handlers.GetStatsEvents(db, cfg))
 		})
 
 		// /stream does its own X-Admin-Key check (with a query-string

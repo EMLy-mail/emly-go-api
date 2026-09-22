@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -30,7 +31,8 @@ const defaultConnectedWindowMinutes = 15
 const maxConnectedWindowMinutes = 7 * 24 * 60
 
 // eventProductFilter reads the optional ?product= query param and returns the
-// SQL fragment + arg constraining updater_events. It defaults to "emly" so
+// SQL fragment + arg constraining updater_events/updater_event_hourly (they
+// share the product column, so one filter serves both). It defaults to "emly" so
 // existing dashboards keep counting EMLy client traffic only, unaffected by
 // the updater's own self-update checks; pass product=updater for those, or
 // product=all for both.
@@ -59,6 +61,13 @@ type EventCount struct {
 	EventType string `db:"event_type" json:"event_type"`
 	Count     int    `db:"count"      json:"count"`
 }
+
+// hourBucketExpr renders a DATETIME down to the top of its hour, the
+// expression updater_event_hourly.bucket_hour is keyed by. It is the same
+// literal format migration 20 backfilled with and the same one the raw-row
+// queries used to group by, so buckets stay where they have always been -
+// change it in one place and the other two stop lining up.
+const hourBucketExpr = `'%Y-%m-%d %H:00:00'`
 
 // VersionCount is one row of StatsSummary.ClientsByVersion.
 type VersionCount struct {
@@ -104,9 +113,19 @@ func fetchStatsSummary(ctx context.Context, db *sqlx.DB, windowMinutes int, prod
 		return summary, err
 	}
 
+	// Summed from the updater_event_hourly rollup (migration 20), not from
+	// updater_events: the raw form of this query re-scanned every event of the
+	// last day, and it runs again on each ingested event for each open
+	// /v2/stats/stream connection. Here it reads 24 hours x one row per
+	// (product, event_type) - a few dozen rows.
+	//
+	// The window is hour-aligned as a result: it covers the 24 whole hours
+	// before the current one plus the current partial hour, so the figure can
+	// include up to an hour more than a rolling exact 24h. It is a dashboard
+	// volume indicator, and rounding it up is the harmless direction.
 	if err := db.SelectContext(ctx, &summary.EventsLast24h,
-		`SELECT event_type, COUNT(*) AS count FROM updater_events
-		 WHERE created_at >= NOW() - INTERVAL 24 HOUR`+productClause+`
+		`SELECT event_type, CAST(SUM(count) AS UNSIGNED) AS count FROM updater_event_hourly
+		 WHERE bucket_hour >= DATE_FORMAT(NOW() - INTERVAL 24 HOUR, `+hourBucketExpr+`)`+productClause+`
 		 GROUP BY event_type`,
 		productArgs...,
 	); err != nil {
@@ -314,6 +333,12 @@ func GetStatsClientDetail(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFu
 // internal/routes/v2/stats.go, next to GetStatsClientDetail, and documenting
 // it in ROUTES.md.
 //
+// The cascade does not touch updater_event_hourly: the fleet-wide charts keep
+// counting the traffic this machine produced while it existed. That is
+// deliberate - a dashboard's history should not rewrite itself because an
+// operator tidied up a decommissioned box - and it is the same reason the
+// retention pruner leaves the rollup alone (see internal/eventprune).
+//
 // Deleting a client is not a way to keep a machine out. The next request
 // carrying its headers recreates the row through upsertUpdaterClient, with
 // the counters back at zero - this only forgets what was seen so far, which
@@ -392,18 +417,31 @@ type StatsEventsResponse struct {
 // fetchStatsEvents backs both GET /v2/stats/events and the stats:events WS
 // channel. bucket and product must already be validated (see
 // validEventBuckets / productFilter).
+//
+// Served from the updater_event_hourly rollup (migration 20). Against the raw
+// table this was the single most expensive query in the API: grouping by
+// DATE(created_at) cannot use an index, so a default 30-day window meant
+// scanning the range into a temporary table and sorting it - and the WS
+// stream re-ran it per ingested event, per connection. Summing hourly rows
+// instead reads 720 of them for the same 30 days.
+//
+// One behavioural consequence: hour is the finest bucket the API offers, so
+// the from/to filter now has hourly granularity. from is floored to the top
+// of its hour, meaning a range starting mid-hour includes that whole hour -
+// the right direction for a daily chart, which otherwise shows a clipped
+// first column.
 func fetchStatsEvents(ctx context.Context, db *sqlx.DB, bucket, eventType, product string, from, to time.Time) (StatsEventsResponse, error) {
 	_, productClause, productArgs, _ := productFilter(product)
 
-	bucketExpr := "DATE(created_at)"
+	bucketExpr := "DATE(bucket_hour)"
 	if bucket == "hour" {
-		bucketExpr = `DATE_FORMAT(created_at, '%Y-%m-%d %H:00:00')`
+		bucketExpr = `DATE_FORMAT(bucket_hour, ` + hourBucketExpr + `)`
 	}
 
-	query := `SELECT ` + bucketExpr + ` AS bucket, event_type, COUNT(*) AS count
-	          FROM updater_events
-	          WHERE created_at BETWEEN ? AND ?`
-	args := []interface{}{from, to}
+	query := `SELECT ` + bucketExpr + ` AS bucket, event_type, CAST(SUM(count) AS UNSIGNED) AS count
+	          FROM updater_event_hourly
+	          WHERE bucket_hour BETWEEN ? AND ?`
+	args := []interface{}{from.Truncate(time.Hour), to}
 	query += productClause
 	args = append(args, productArgs...)
 	if eventType != "" {
@@ -412,13 +450,26 @@ func fetchStatsEvents(ctx context.Context, db *sqlx.DB, bucket, eventType, produ
 	}
 	query += ` GROUP BY bucket, event_type ORDER BY bucket ASC`
 
+	// From/To report the window as the caller asked for it, not the floored
+	// bound the query used: the response describes the request, and a client
+	// echoing it back must not drift an hour earlier on every round trip.
 	resp := StatsEventsResponse{Bucket: bucket, Product: product, From: from, To: to}
 	err := db.SelectContext(ctx, &resp.Data, query, args...)
 	return resp, err
 }
 
 // GetStatsEvents returns time-bucketed event counts for dashboard charts.
-func GetStatsEvents(db *sqlx.DB) http.HandlerFunc {
+//
+// Memoized for cfg.StatsCacheTTL like GetStatsSummary, and for the same
+// reason: a chart that plots whole days is polled far faster than a day-long
+// bucket can move. The cache key includes every param that shapes the query,
+// with the timestamps rounded down to a TTL-wide step - without that, the
+// default window ends at time.Now() and no two requests would ever share a
+// key. Two callers whose windows differ by less than the TTL therefore share
+// one payload, which is the staleness the TTL already licenses.
+func GetStatsEvents(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
+	cache := newTTLCache[StatsEventsResponse](cfg.StatsCacheTTL)
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		bucket := r.URL.Query().Get("bucket")
 		if bucket == "" {
@@ -457,12 +508,35 @@ func GetStatsEvents(db *sqlx.DB) http.HandlerFunc {
 			}
 		}
 
-		resp, err := fetchStatsEvents(r.Context(), db, bucket, eventType, product, from, to)
+		key := strings.Join([]string{
+			bucket, product, eventType,
+			quantize(from, cfg.StatsCacheTTL).Format(time.RFC3339),
+			quantize(to, cfg.StatsCacheTTL).Format(time.RFC3339),
+		}, "|")
+
+		resp, err := cache.get(key, func() (StatsEventsResponse, error) {
+			return fetchStatsEvents(r.Context(), db, bucket, eventType, product, from, to)
+		})
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "failed to fetch events")
 			return
 		}
 
+		// Same private browser caching as /summary: a dashboard left open
+		// stops reaching the process at all between refreshes.
+		if cfg.StatsCacheTTL > 0 {
+			w.Header().Set("Cache-Control", "private, max-age="+strconv.Itoa(int(cfg.StatsCacheTTL.Seconds())))
+		}
 		jsonOK(w, resp)
 	}
+}
+
+// quantize rounds t down to a multiple of step, so timestamps that differ by
+// less than step collapse onto one cache key. A non-positive step (caching
+// disabled) returns t untouched.
+func quantize(t time.Time, step time.Duration) time.Time {
+	if step <= 0 {
+		return t
+	}
+	return t.Truncate(step)
 }

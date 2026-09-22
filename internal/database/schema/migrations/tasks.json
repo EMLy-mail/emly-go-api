@@ -146,5 +146,29 @@
         { "type": "column_not_exists", "table": "updater_clients", "column": "os_version" }
       ]
     }
+    ,{
+      "id": "18_updater_events_client_created_index",
+      "sql_file": "18_updater_events_client_created_index.sql",
+      "description": "Add a (client_id, created_at) index to updater_events so GET /v2/stats/clients/{id} reads its 50 most recent events as a bounded backwards scan instead of reading and sorting that client's whole history.",
+      "conditions": [
+        { "type": "index_not_exists", "table": "updater_events", "index": "idx_client_created" }
+      ]
+    }
+    ,{
+      "id": "19_drop_updater_events_client_id",
+      "sql_file": "19_drop_updater_events_client_id.sql",
+      "description": "Drop updater_events.idx_client_id, now redundant against the composite index from task 18 (which also satisfies the foreign key), to cut write amplification on the insert-heavy event path. Runs after task 18 in file order, so the replacement index always exists first.",
+      "conditions": [
+        { "type": "index_exists", "table": "updater_events", "index": "idx_client_id" }
+      ]
+    }
+    ,{
+      "id": "20_updater_event_hourly",
+      "sql_file": "20_updater_event_hourly.sql",
+      "description": "Create the updater_event_hourly rollup table, backfilled from existing updater_events rows, so /v2/stats/summary and /v2/stats/events read pre-aggregated counts instead of scanning raw events on every call and every WS push.",
+      "conditions": [
+        { "type": "table_not_exists", "table": "updater_event_hourly" }
+      ]
+    }
   ]
 }
