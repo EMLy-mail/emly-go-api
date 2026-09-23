@@ -183,6 +183,41 @@ func IdentityFromWSPayload(r *http.Request, p WSIdentityPayload) Identity {
 	}
 }
 
+// LoggedUserFromWS builds the logged-user half of an Identity from a
+// session.changed event (CLIENT_WS_PROTOCOL.md §8.1), with the same
+// conversion rules as the X-EMLy-LoggedUser* headers. uaVersion is the
+// updater version from the upgrade request's User-Agent: it decides whether
+// an absent user means "nobody" (see reportsNobodyLoggedOn).
+func LoggedUserFromWS(uaVersion, user, state, disconnectedAt string) Identity {
+	st, at := parseLoggedUserSession(state, disconnectedAt)
+	loggedUser := dbvalue.Truncate(user, 255)
+	return Identity{
+		LoggedUser:               loggedUser,
+		LoggedUserState:          st,
+		LoggedUserDisconnectedAt: at,
+		NobodyLoggedOn:           reportsNobodyLoggedOn(loggedUser, uaVersion),
+	}
+}
+
+// UpdateLoggedUser writes only the logged-user columns of one client row,
+// with the same COALESCE/NULLIF rules as Upsert, and deliberately leaves
+// last_seen_at alone: a session event says who is at the machine, not that
+// the machine polled.
+func UpdateLoggedUser(ctx context.Context, db *sqlx.DB, clientID int64, id Identity) error {
+	_, err := db.ExecContext(ctx,
+		`UPDATE updater_clients
+		 SET logged_user = IF(?, NULL, COALESCE(NULLIF(?, ''), logged_user)),
+		     logged_user_disconnected_at = IF(? OR ? <> '', ?, logged_user_disconnected_at),
+		     logged_user_state = IF(?, NULL, COALESCE(NULLIF(?, ''), logged_user_state))
+		 WHERE id = ?`,
+		id.NobodyLoggedOn, id.LoggedUser,
+		id.NobodyLoggedOn, id.LoggedUserState, dbvalue.NullTime(id.LoggedUserDisconnectedAt),
+		id.NobodyLoggedOn, id.LoggedUserState,
+		clientID,
+	)
+	return err
+}
+
 // Values of X-EMLy-LoggedUserState, and of updater_clients.logged_user_state.
 // They are a wire contract with the EMLy Updater (machineinfo.SessionState).
 const (

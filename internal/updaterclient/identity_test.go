@@ -197,3 +197,20 @@ func TestClientIdentityTruncatesToColumnWidth(t *testing.T) {
 		t.Errorf("OSVersion kept %d runes, want 128", n)
 	}
 }
+
+func TestLoggedUserFromWS(t *testing.T) {
+	got := LoggedUserFromWS("1.9.0", `CORP\m.rossi`, "disconnected", "2026-09-23T07:58:10Z")
+	if got.LoggedUser != `CORP\m.rossi` || got.LoggedUserState != "disconnected" ||
+		!got.LoggedUserDisconnectedAt.Equal(time.Date(2026, 9, 23, 7, 58, 10, 0, time.UTC)) || got.NobodyLoggedOn {
+		t.Fatalf("got %+v", got)
+	}
+	// A v2 updater (>= loggedUserSessionMinUpdaterVersion) reporting no
+	// user is an answer: nobody is logged on.
+	if nobody := LoggedUserFromWS("1.9.0", "", "", ""); !nobody.NobodyLoggedOn {
+		t.Fatalf("empty user from 1.9.0 must mean nobody logged on: %+v", nobody)
+	}
+	// An unknown state is dropped exactly like the header path drops it.
+	if odd := LoggedUserFromWS("1.9.0", "u", "sleeping", ""); odd.LoggedUserState != "" {
+		t.Fatalf("unknown state kept: %+v", odd)
+	}
+}
