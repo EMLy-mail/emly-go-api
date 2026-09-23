@@ -16,6 +16,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"emly-api-go/internal/clientproto"
@@ -329,7 +330,12 @@ func (h *Hub) Events(clientID int64) []EventRecord {
 }
 
 // Notify sends a notify to the listed clients (nil = every v2 session)
-// that declared the topic, and returns how many it reached.
+// that declared the topic, and returns how many it reached. Sends fan out
+// one goroutine per target so the whole call is bounded by a single
+// sendTimeout rather than by len(targets)*sendTimeout in the worst case - a
+// few stalled sockets must not make every other target, or the caller,
+// wait for them one at a time. Never calls a Sender while holding h.mu:
+// targets are collected under lock, then dispatched after it is released.
 func (h *Hub) Notify(ctx context.Context, clientIDs []int64, topic string, payload any) int {
 	if h == nil {
 		return 0
@@ -358,22 +364,39 @@ func (h *Hub) Notify(ctx context.Context, clientIDs []int64, topic string, paylo
 	}
 	h.mu.Unlock()
 
-	sent := 0
+	var sent atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(len(targets))
 	for _, send := range targets {
-		sctx, cancel := context.WithTimeout(ctx, sendTimeout)
-		if send(sctx, frame) == nil {
-			sent++
-		}
-		cancel()
+		go func(send Sender) {
+			defer wg.Done()
+			sctx, cancel := context.WithTimeout(ctx, sendTimeout)
+			defer cancel()
+			if send(sctx, frame) == nil {
+				sent.Add(1)
+			}
+		}(send)
 	}
-	return sent
+	wg.Wait()
+	return int(sent.Load())
 }
 
-// NotifyConfigPublished satisfies configapi.ConfigNotifier.
+// NotifyConfigPublished satisfies configapi.ConfigNotifier. The fan-out (and
+// its log line) runs in its own goroutine and this call returns immediately:
+// it is invoked synchronously from inside the POST /v2/config/revisions,
+// .../publish and /rollback handlers, and Notify's own bounded fan-out is
+// still "one sendTimeout" - up to 10s - which an admin's HTTP response must
+// never wait on. A nil receiver returns without spawning anything, which is
+// still a no-op.
 func (h *Hub) NotifyConfigPublished(revision int64) {
-	n := h.Notify(context.Background(), nil, clientproto.TopicConfigPublished,
-		clientproto.ConfigPublished{Revision: revision, JitterSeconds: configJitterSeconds})
-	slog.Info("client ws: config.published sent", "revision", revision, "clients", n)
+	if h == nil {
+		return
+	}
+	go func() {
+		n := h.Notify(context.Background(), nil, clientproto.TopicConfigPublished,
+			clientproto.ConfigPublished{Revision: revision, JitterSeconds: configJitterSeconds})
+		slog.Info("client ws: config.published sent", "revision", revision, "clients", n)
+	}()
 }
 
 // Prune drops finished commands older than recordRetention and events of

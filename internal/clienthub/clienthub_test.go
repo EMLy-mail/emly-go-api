@@ -270,6 +270,81 @@ func TestHubNotifyOnlyV2WithCapability(t *testing.T) {
 	}
 }
 
+// TestHubNotifyFansOutConcurrently proves Notify dispatches to its targets
+// in parallel rather than one at a time: three sessions each block ~200ms in
+// their Sender, so a sequential fan-out would take ~600ms+ but a concurrent
+// one bounded by a single sendTimeout should return in a small multiple of
+// 200ms, not three of them.
+func TestHubNotifyFansOutConcurrently(t *testing.T) {
+	h, _ := newHub()
+	const delay = 200 * time.Millisecond
+	slow := func(_ context.Context, _ []byte) error {
+		time.Sleep(delay)
+		return nil
+	}
+	h.Attach(1, clientproto.ProtocolV2, allCaps, slow)
+	h.Attach(2, clientproto.ProtocolV2, allCaps, slow)
+	h.Attach(3, clientproto.ProtocolV2, allCaps, slow)
+
+	start := time.Now()
+	n := h.Notify(context.Background(), nil, clientproto.TopicConfigPublished,
+		clientproto.ConfigPublished{Revision: 1, JitterSeconds: 120})
+	elapsed := time.Since(start)
+
+	if n != 3 {
+		t.Fatalf("sent = %d, want 3", n)
+	}
+	// Sequential would be >= 3*delay (600ms); concurrent should land close
+	// to one delay. Give generous scheduling slack while staying well under
+	// what a sequential fan-out would take.
+	if elapsed >= 2*delay {
+		t.Fatalf("Notify took %v for 3 targets at %v each; fan-out does not look concurrent", elapsed, delay)
+	}
+}
+
+// TestHubNotifyConfigPublishedReturnsImmediately proves the config.published
+// fan-out never makes the caller (a config publish/rollback HTTP handler)
+// wait on a client socket: NotifyConfigPublished must return long before the
+// blocked Sender is unblocked, and the send must still eventually happen.
+func TestHubNotifyConfigPublishedReturnsImmediately(t *testing.T) {
+	h, _ := newHub()
+	unblock := make(chan struct{})
+	sent := make(chan struct{})
+	send := func(_ context.Context, _ []byte) error {
+		<-unblock
+		close(sent)
+		return nil
+	}
+	h.Attach(1, clientproto.ProtocolV2, allCaps, send)
+
+	start := time.Now()
+	h.NotifyConfigPublished(7)
+	elapsed := time.Since(start)
+	if elapsed > 50*time.Millisecond {
+		t.Fatalf("NotifyConfigPublished took %v, want near-immediate return", elapsed)
+	}
+
+	select {
+	case <-sent:
+		t.Fatal("send completed before the sender was unblocked")
+	default:
+	}
+
+	close(unblock)
+	select {
+	case <-sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("send never happened after unblocking")
+	}
+}
+
+// TestHubNotifyConfigPublishedNilHubIsNoOp guards the nil-receiver path: it
+// must not panic and must not spawn anything observable.
+func TestHubNotifyConfigPublishedNilHubIsNoOp(t *testing.T) {
+	var nilHub *Hub
+	nilHub.NotifyConfigPublished(1) // must not panic
+}
+
 func TestHubPruneDropsOldFinishedCommands(t *testing.T) {
 	h, clk := newHub()
 	h.Attach(7, clientproto.ProtocolV2, allCaps, (&capture{}).send)
