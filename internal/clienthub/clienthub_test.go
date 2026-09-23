@@ -72,6 +72,40 @@ func TestHubIssueSendsCommand(t *testing.T) {
 	}
 }
 
+// TestHubIssueSnapshotDoesNotRaceWithConcurrentAck exercises the window
+// between Issue's unlocked send and its final read of rec: the ack for this
+// very command can arrive (and mutate the same *CommandRecord under lock)
+// before Issue takes its own lock to snapshot it. Run with -race; a bare
+// `return h.snapshot(rec), nil` without re-acquiring h.mu after send
+// triggers a data race here.
+func TestHubIssueSnapshotDoesNotRaceWithConcurrentAck(t *testing.T) {
+	h, _ := newHub()
+	var wg sync.WaitGroup
+	send := func(_ context.Context, frame []byte) error {
+		var env clientproto.Envelope
+		if err := json.Unmarshal(frame, &env); err != nil {
+			return err
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.HandleAck(7, env.ID, clientproto.Ack{Accepted: true})
+		}()
+		return nil
+	}
+	h.Attach(7, clientproto.ProtocolV2, allCaps, send)
+
+	rec, err := h.Issue(context.Background(), 7, clientproto.CmdMachineInfo, nil, time.Hour, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+
+	if got, ok := h.Command(rec.ID); !ok || got.Status != StatusAcked || got.AckedAt == nil {
+		t.Fatalf("got %+v ok=%v", got, ok)
+	}
+}
+
 func TestHubIssueErrors(t *testing.T) {
 	h, _ := newHub()
 	ctx := context.Background()

@@ -188,7 +188,14 @@ func (h *Hub) Issue(ctx context.Context, clientID int64, name string, args json.
 		h.mu.Unlock()
 		return CommandRecord{}, ErrOffline
 	}
-	return h.snapshot(rec), nil
+	// rec was registered (and reachable from HandleAck/HandleResult/Command/
+	// Prune) before send; the send itself can race a client's ack arriving
+	// before Issue returns, so the final read must take the lock too, same
+	// as Command does.
+	h.mu.Lock()
+	result := h.snapshot(rec)
+	h.mu.Unlock()
+	return result, nil
 }
 
 // ownCommand returns the record replyTo names if it belongs to clientID.
