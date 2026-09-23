@@ -64,7 +64,12 @@ type Document struct {
 	// `"clientWs":null` it never had, changing its ETag and breaking
 	// internal/configmirror's ETag comparison on every site mirror in the
 	// field the moment either side upgrades (see TestCanonical_OmitsNilClientWS).
-	ClientWS *ToggleOnly `json:"clientWs,omitempty"`
+	//
+	// From protocol v2, clientWs also carries commands: the allowlist of
+	// remote-command names the client will execute over the channel
+	// (CLIENT_WS_PROTOCOL.md §12.3). See ClientWS below for why Commands
+	// itself is also omitempty.
+	ClientWS *ClientWS `json:"clientWs,omitempty"`
 
 	Overrides []Override `json:"overrides"`
 }
@@ -166,6 +171,24 @@ type ResolverTuning struct {
 // an enabled flag.
 type ToggleOnly struct {
 	Enabled bool `json:"enabled"`
+}
+
+// ClientWS is the clientWs section: the presence channel's kill switch and,
+// from protocol v2, the allowlist of commands the client will execute
+// (CLIENT_WS_PROTOCOL.md §12.3). Commands is omitempty for the same ETag
+// reason ClientWS itself is: a document that never sets it must canonicalize
+// byte-identically to one written before the field existed. Absent means
+// the client's own default (read-only commands only), never "all".
+type ClientWS struct {
+	Enabled  bool     `json:"enabled"`
+	Commands []string `json:"commands,omitempty"`
+}
+
+// KnownClientWSCommands is every value clientWs.commands may contain. It
+// mirrors clientproto.Commands; internal/clientws pins the two equal.
+var KnownClientWSCommands = []string{
+	"machine.info", "emly.manifest.check", "updater.manifest.check",
+	"apps.list_upgradable", "service.restart", "machine.reboot",
 }
 
 type Logging struct {

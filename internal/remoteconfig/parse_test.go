@@ -325,6 +325,51 @@ func TestParse_ClientWSIsPatchable(t *testing.T) {
 	}
 }
 
+func TestParse_ClientWSCommandsAccepted(t *testing.T) {
+	doc, problems := Parse([]byte(`{
+		"schemaVersion": 1,
+		"servers": {"api": "https://api.example.test"},
+		"defaultServer": "api",
+		"clientWs": {"enabled": true, "commands": ["machine.info", "machine.reboot"]}
+	}`))
+	if len(problems) != 0 {
+		t.Fatalf("problems = %v", problems)
+	}
+	if got := doc.ClientWS.Commands; len(got) != 2 || got[1] != "machine.reboot" {
+		t.Fatalf("Commands = %v", got)
+	}
+}
+
+func TestParse_ClientWSUnknownCommandRejected(t *testing.T) {
+	_, problems := Parse([]byte(`{
+		"schemaVersion": 1,
+		"servers": {"api": "https://api.example.test"},
+		"defaultServer": "api",
+		"clientWs": {"enabled": true, "commands": ["machine.format_disk"]}
+	}`))
+	if len(problems) != 1 || problems[0].Path != "/clientWs/commands/0" {
+		t.Fatalf("problems = %v, want one at /clientWs/commands/0", problems)
+	}
+}
+
+// A document that only sets enabled must canonicalize exactly as before the
+// commands field existed, or every mirror's ETag changes.
+func TestCanonical_ClientWSWithoutCommandsUnchanged(t *testing.T) {
+	doc, problems := Parse([]byte(`{
+		"schemaVersion": 1,
+		"servers": {"api": "https://api.example.test"},
+		"defaultServer": "api",
+		"clientWs": {"enabled": true}
+	}`))
+	if len(problems) != 0 {
+		t.Fatalf("problems = %v", problems)
+	}
+	b, _ := Canonical(doc)
+	if !strings.Contains(string(b), `"clientWs":{"enabled":true}`) {
+		t.Fatalf("canonical = %s", b)
+	}
+}
+
 // --- shared conformance fixtures (testdata/remoteconfig, §6 of the API design doc) ---
 
 func TestFixtures_Valid(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +53,7 @@ func Parse(data []byte) (*Document, []Problem) {
 	problems = append(problems, validateControl(doc.Control)...)
 	problems = append(problems, validateUpdater(doc.Updater)...)
 	problems = append(problems, validateLogging(doc.Logging)...)
+	problems = append(problems, validateClientWS(doc.ClientWS)...)
 	problems = append(problems, validateOverridesShape(&doc)...)
 
 	// Dry-run every override against an all-matching synthetic host, so a
@@ -269,6 +271,19 @@ func validateLogging(l *Logging) []Problem {
 	}
 	if l.Backups < 0 || l.Backups > 50 {
 		problems = append(problems, problemf("/logging/backups", "must be in [0, 50]"))
+	}
+	return problems
+}
+
+func validateClientWS(c *ClientWS) []Problem {
+	if c == nil {
+		return nil
+	}
+	var problems []Problem
+	for i, name := range c.Commands {
+		if !slices.Contains(KnownClientWSCommands, name) {
+			problems = append(problems, problemf(fmt.Sprintf("/clientWs/commands/%d", i), "unknown command %q", name))
+		}
 	}
 	return problems
 }

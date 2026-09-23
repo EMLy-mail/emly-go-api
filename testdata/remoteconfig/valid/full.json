@@ -57,7 +57,10 @@
     "compress": true,
     "eventLog": true
   },
-  "clientWs": { "enabled": true },
+  "clientWs": {
+    "enabled": true,
+    "commands": ["machine.info", "emly.manifest.check", "updater.manifest.check", "apps.list_upgradable"]
+  },
   "overrides": [
     {
       "id": "pilot-beta",
