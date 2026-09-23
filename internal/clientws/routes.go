@@ -26,5 +26,11 @@ func RegisterV2(r chi.Router, db *sqlx.DB, presence *presencehub.Hub, hub *clien
 
 			r.Get("/ws", ClientWS(db, presence, hub))
 		})
+
+		r.Group(func(r chi.Router) {
+			r.Use(apimw.AdminKeyAuth(db))
+			r.Use(apimw.RouteLimitByIP(30, time.Minute))
+			mountAdmin(r, hub)
+		})
 	})
 }
