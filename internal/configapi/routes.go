@@ -14,7 +14,10 @@ import (
 // RegisterV2 mounts /v2/config: the public policy document (API-key
 // protected like the updater manifest) and its admin routes (admin-key
 // protected), per docs/superpowers/specs/2026-09-04-remote-config-api-design.md §5/§7.
-func RegisterV2(r chi.Router, db *sqlx.DB, cfg *config.Config) {
+// notifier is told about every publish (create-with-publish, publish,
+// rollback) so machines holding a v2 client channel can be nudged to
+// re-fetch immediately; nil is fine (see notifyPublished).
+func RegisterV2(r chi.Router, db *sqlx.DB, cfg *config.Config, notifier ConfigNotifier) {
 	r.Route("/config", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.APIKeyAuth(db))
@@ -31,12 +34,12 @@ func RegisterV2(r chi.Router, db *sqlx.DB, cfg *config.Config) {
 			r.Post("/preview", PreviewConfig(db))
 
 			r.Get("/revisions", ListConfigRevisions(db))
-			r.Post("/revisions", CreateConfigRevision(db, cfg))
+			r.Post("/revisions", CreateConfigRevision(db, cfg, notifier))
 			r.Get("/revisions/{revision}", GetConfigRevision(db))
 			r.Delete("/revisions/{revision}", DeleteConfigRevision(db, cfg))
-			r.Post("/revisions/{revision}/publish", PublishConfigRevision(db, cfg))
+			r.Post("/revisions/{revision}/publish", PublishConfigRevision(db, cfg, notifier))
 
-			r.Post("/rollback", RollbackConfig(db, cfg))
+			r.Post("/rollback", RollbackConfig(db, cfg, notifier))
 		})
 	})
 }

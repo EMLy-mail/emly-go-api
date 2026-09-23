@@ -4,6 +4,7 @@ import (
 	"emly-api-go/internal/admin"
 	"emly-api-go/internal/bans"
 	"emly-api-go/internal/bugreports"
+	"emly-api-go/internal/clienthub"
 	"emly-api-go/internal/clientws"
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/configapi"
@@ -29,10 +30,13 @@ import (
 // /v2/stats/stream (nil is fine - the route degrades to snapshots-only, no
 // pushed updates; see statshub and stats.StatsStream). presence backs
 // GET /v2/client/ws and the "online" field on GET /v2/stats/clients /
-// stats:clients (nil is fine; see internal/presencehub). bans is the live
-// block-list snapshot the admin routes refresh after a write; nil is fine in
-// tests, where the write lands in the table and nothing needs to enforce it.
-func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror health.ConfigMirrorReporter, hub *statshub.Hub, presence *presencehub.Hub, reloader bans.BanReloader) http.Handler {
+// stats:clients (nil is fine; see internal/presencehub). clients is protocol
+// v2 of GET /v2/client/ws - sessions, issued commands, recent events, and
+// the config.published notify on a config publish (nil is fine; see
+// internal/clienthub). bans is the live block-list snapshot the admin
+// routes refresh after a write; nil is fine in tests, where the write lands
+// in the table and nothing needs to enforce it.
+func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror health.ConfigMirrorReporter, hub *statshub.Hub, presence *presencehub.Hub, clients *clienthub.Hub, reloader bans.BanReloader) http.Handler {
 	r := chi.NewRouter()
 
 	rl := emlyMiddleware.NewRateLimiter(config.Load())
@@ -51,9 +55,9 @@ func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, c
 
 	updates.RegisterV2(r, db, updatesS3conn, config.Load().UpdatesS3Prefix, config.Load().UpdaterS3Prefix, hub)
 	stats.RegisterV2(r, db, config.Load(), hub, presence)
-	configapi.RegisterV2(r, db, config.Load())
+	configapi.RegisterV2(r, db, config.Load(), clients)
 	bans.RegisterV2(r, db, reloader)
-	clientws.RegisterV2(r, db, presence, nil)
+	clientws.RegisterV2(r, db, presence, clients)
 
 	r.Route("/api", func(r chi.Router) {
 		admin.RegisterV2(r, db)

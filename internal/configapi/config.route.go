@@ -29,6 +29,23 @@ const remoteConfigSelectCols = `
 
 var validRevisionStatus = map[string]bool{"draft": true, "published": true, "superseded": true}
 
+// ConfigNotifier is told when a revision becomes the published one, so the
+// machines holding a v2 client channel re-fetch GET /v2/config now instead
+// of at their next refresh (CLIENT_WS_PROTOCOL.md §9.2). The notify is only
+// a hint: the machine still validates what it downloads.
+type ConfigNotifier interface {
+	NotifyConfigPublished(revision int64)
+}
+
+// notifyPublished tolerates a nil notifier so tests need no special case.
+// A typed-nil *clienthub.Hub is also safe: its methods are nil-receiver safe.
+func notifyPublished(n ConfigNotifier, revision int64) {
+	if n == nil {
+		return
+	}
+	n.NotifyConfigPublished(revision)
+}
+
 // jsonProblems writes a 4xx response carrying every remoteconfig.Problem
 // found, not just the first (API design doc §7.2/§7.7), so a dashboard can
 // show them all at once.
@@ -299,7 +316,7 @@ func DeleteConfigRevision(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
 // CreateConfigRevision handles POST /v2/config/revisions (API design doc
 // §7.2). document must not carry revision/generatedAt - both are assigned
 // here and any submitted value is reported as a warning, never an error.
-func CreateConfigRevision(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
+func CreateConfigRevision(db *sqlx.DB, cfg *config.Config, notifier ConfigNotifier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if cfg.ConfigUpstreamURL != "" {
 			response.Error(w, http.StatusMethodNotAllowed, "this instance mirrors "+cfg.ConfigUpstreamURL+"; publish there")
@@ -383,6 +400,7 @@ func CreateConfigRevision(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
 		if req.Publish {
 			slog.InfoContext(r.Context(), "config revision published", "revision", revision,
 				"created_by", createdBy, "client_ip", updaterclient.ClientIP(r), "notes", req.Notes)
+			notifyPublished(notifier, revision)
 		}
 
 		response.Created(w, map[string]interface{}{
@@ -435,7 +453,7 @@ func notesOrNil(s *string) *string {
 
 // PublishConfigRevision handles POST /v2/config/revisions/{revision}/publish
 // (API design doc §7.3).
-func PublishConfigRevision(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
+func PublishConfigRevision(db *sqlx.DB, cfg *config.Config, notifier ConfigNotifier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if cfg.ConfigUpstreamURL != "" {
 			response.Error(w, http.StatusMethodNotAllowed, "this instance mirrors "+cfg.ConfigUpstreamURL+"; publish there")
@@ -494,6 +512,7 @@ func PublishConfigRevision(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
 
 		slog.InfoContext(r.Context(), "config revision published", "revision", revision,
 			"created_by", session.Username(r, db), "client_ip", updaterclient.ClientIP(r))
+		notifyPublished(notifier, revision)
 
 		var row models.RemoteConfigRevision
 		if err := db.GetContext(r.Context(), &row, `SELECT`+remoteConfigSelectCols+`FROM remote_config_revisions WHERE revision = ?`, revision); err != nil {
@@ -508,7 +527,7 @@ func PublishConfigRevision(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
 // The only rollback mechanism: clones an old revision's content into a new,
 // higher-numbered one and publishes it, so a lagging mirror can never see a
 // lower revision than what the fleet already has.
-func RollbackConfig(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
+func RollbackConfig(db *sqlx.DB, cfg *config.Config, notifier ConfigNotifier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if cfg.ConfigUpstreamURL != "" {
 			response.Error(w, http.StatusMethodNotAllowed, "this instance mirrors "+cfg.ConfigUpstreamURL+"; publish there")
@@ -586,6 +605,7 @@ func RollbackConfig(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
 			response.Error(w, http.StatusInternalServerError, "failed to commit")
 			return
 		}
+		notifyPublished(notifier, newRevision)
 
 		slog.InfoContext(r.Context(), "config rolled back", "revision", newRevision, "based_on", req.To,
 			"created_by", createdBy, "client_ip", updaterclient.ClientIP(r), "notes", req.Notes)

@@ -3,6 +3,7 @@ package routes
 import (
 	"emly-api-go/internal/bans"
 	"emly-api-go/internal/bugreports"
+	"emly-api-go/internal/clienthub"
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/health"
 	apimw "emly-api-go/internal/middleware"
@@ -27,9 +28,12 @@ import (
 // pass nil to run without the real-time stats stream (it degrades to
 // snapshots-only, see statshub). presence backs GET /v2/client/ws and the
 // "online" field on the stats routes; pass nil to run without presence
-// tracking (see internal/presencehub). bans is the live permanent-block
-// snapshot the /v2/bans admin routes refresh after a write.
-func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror health.ConfigMirrorReporter, statsHub *statshub.Hub, presence *presencehub.Hub, bans bans.BanReloader) {
+// tracking (see internal/presencehub). clients is protocol v2 of
+// GET /v2/client/ws - sessions, issued commands, recent events, and the
+// config.published notify on a config publish; pass nil to run without it
+// (see internal/clienthub). bans is the live permanent-block snapshot the
+// /v2/bans admin routes refresh after a write.
+func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror health.ConfigMirrorReporter, statsHub *statshub.Hub, presence *presencehub.Hub, clients *clienthub.Hub, bans bans.BanReloader) {
 	dbName := config.Load().Database
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +44,7 @@ func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storag
 	})
 
 	r.Mount("/v1", v1.NewRouter(db, apiFileS3conn))
-	r.Mount("/v2", v2.NewRouter(db, apiFileS3conn, updatesS3conn, configMirror, statsHub, presence, bans))
+	r.Mount("/v2", v2.NewRouter(db, apiFileS3conn, updatesS3conn, configMirror, statsHub, presence, clients, bans))
 	// Redirect /health to /v1/health
 	r.Get("/health", health.Health(db))
 

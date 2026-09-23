@@ -18,6 +18,7 @@ import (
 	"github.com/joho/godotenv"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"emly-api-go/internal/clienthub"
 	"emly-api-go/internal/clientws"
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/configmirror"
@@ -228,6 +229,23 @@ func main() {
 	// doc). Single-instance, like statsHub above.
 	presenceHub := presencehub.New(presencehub.DefaultGraceDuration)
 
+	// clientHub holds protocol v2 of GET /v2/client/ws: sessions, commands
+	// issued to machines and their recent events (internal/clienthub).
+	// In-memory and single-instance, like presenceHub.
+	clientHub := clienthub.New(time.Now)
+	go func() {
+		t := time.NewTicker(10 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-backgroundCtx.Done():
+				return
+			case <-t.C:
+				clientHub.Prune()
+			}
+		}
+	}()
+
 	// Background loop that keeps updater_events from growing without bound
 	// (see internal/eventprune package doc). It only trims raw rows past
 	// EVENTS_RETENTION_DAYS - the updater_event_hourly rollup the dashboard
@@ -263,7 +281,7 @@ func main() {
 	rl := emlyMiddleware.NewRateLimiter(cfg)
 	r.Use(rl.Handler)
 
-	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub, presenceHub, bans)
+	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub, presenceHub, clientHub, bans)
 
 	// GET /v2/stats/stream hijacks the connection to complete its WebSocket
 	// upgrade (coder/websocket.Accept requires the ResponseWriter to
@@ -305,7 +323,7 @@ func main() {
 	// reason (see the comment above): apimw.APIKeyAuth replaces the inline
 	// admin-key check /v2/stats/stream needs, since this route has no
 	// query-string key fallback to support.
-	clientWSHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(clientws.ClientWS(db, presenceHub, nil))
+	clientWSHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(clientws.ClientWS(db, presenceHub, clientHub))
 	clientWSHandler = emlyMiddleware.APIKeyAuth(db)(clientWSHandler)
 	clientWSHandler = rl.Handler(clientWSHandler)
 	clientWSHandler = bans.Handler(clientWSHandler)
