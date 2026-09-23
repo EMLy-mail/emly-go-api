@@ -53,7 +53,7 @@ func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, c
 	stats.RegisterV2(r, db, config.Load(), hub, presence)
 	configapi.RegisterV2(r, db, config.Load())
 	bans.RegisterV2(r, db, reloader)
-	clientws.RegisterV2(r, db, presence)
+	clientws.RegisterV2(r, db, presence, nil)
 
 	r.Route("/api", func(r chi.Router) {
 		admin.RegisterV2(r, db)

@@ -305,7 +305,7 @@ func main() {
 	// reason (see the comment above): apimw.APIKeyAuth replaces the inline
 	// admin-key check /v2/stats/stream needs, since this route has no
 	// query-string key fallback to support.
-	clientWSHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(clientws.ClientWS(db, presenceHub))
+	clientWSHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(clientws.ClientWS(db, presenceHub, nil))
 	clientWSHandler = emlyMiddleware.APIKeyAuth(db)(clientWSHandler)
 	clientWSHandler = rl.Handler(clientWSHandler)
 	clientWSHandler = bans.Handler(clientWSHandler)

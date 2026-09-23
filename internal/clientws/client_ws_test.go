@@ -12,7 +12,10 @@ import (
 	"github.com/coder/websocket"
 	"github.com/jmoiron/sqlx"
 
+	"emly-api-go/internal/clienthub"
+	"emly-api-go/internal/clientproto"
 	"emly-api-go/internal/presencehub"
+	"emly-api-go/internal/remoteconfig"
 	"emly-api-go/internal/updaterclient"
 )
 
@@ -67,7 +70,7 @@ func TestClientIdentityFromWSPayloadUnidentified(t *testing.T) {
 // (design doc §3.1): the server speaks first. It never sends an identity
 // back, so the handler never reaches updaterclient.Upsert - nil db is safe.
 func TestClientWSSendsHelloOnConnect(t *testing.T) {
-	srv := httptest.NewServer(ClientWS(nil, presencehub.New(presencehub.DefaultGraceDuration)))
+	srv := httptest.NewServer(ClientWS(nil, presencehub.New(presencehub.DefaultGraceDuration), nil))
 	defer srv.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -98,7 +101,7 @@ func TestClientWSSendsHelloOnConnect(t *testing.T) {
 // (design doc §3.1) rather than left to time out - deterministic and fast,
 // and never reaches updaterclient.Upsert, so nil db is safe here too.
 func TestClientWSRejectsNonIdentityFirstMessage(t *testing.T) {
-	srv := httptest.NewServer(ClientWS(nil, presencehub.New(presencehub.DefaultGraceDuration)))
+	srv := httptest.NewServer(ClientWS(nil, presencehub.New(presencehub.DefaultGraceDuration), nil))
 	defer srv.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -142,7 +145,7 @@ func TestClientWSRejectsNonIdentityFirstMessage(t *testing.T) {
 // carrying neither hwid nor hostname is rejected the same way (design doc
 // §3.1's "non identificato"). Also never reaches updaterclient.Upsert.
 func TestClientWSRejectsUnidentifiedIdentity(t *testing.T) {
-	srv := httptest.NewServer(ClientWS(nil, presencehub.New(presencehub.DefaultGraceDuration)))
+	srv := httptest.NewServer(ClientWS(nil, presencehub.New(presencehub.DefaultGraceDuration), nil))
 	defer srv.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -212,7 +215,7 @@ func TestClientWSIdentityMarksClientOnline(t *testing.T) {
 	// of this test doesn't need to sleep for the real 15s default.
 	presence := presencehub.New(50 * time.Millisecond)
 
-	srv := httptest.NewServer(ClientWS(nil, presence))
+	srv := httptest.NewServer(ClientWS(nil, presence, nil))
 	defer srv.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -265,4 +268,235 @@ func TestClientWSIdentityMarksClientOnline(t *testing.T) {
 	waitFor(t, 2*time.Second, "presence.Online(fakeClientID) to become false after close + grace period", func() bool {
 		return !presence.Online(fakeClientID)
 	})
+}
+
+// dialV2 connects, answers hello with a v2 identity and returns the conn
+// and the welcome it got.
+func dialV2(t *testing.T, srvURL string, caps []string) (*websocket.Conn, clientproto.Welcome) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srvURL, "http"), nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	var hello clientproto.Envelope
+	readJSON(t, c, &hello)
+	var h clientproto.Hello
+	if err := json.Unmarshal(hello.Data, &h); err != nil || h.Protocol != clientproto.ProtocolV2 {
+		t.Fatalf("hello data = %s", hello.Data)
+	}
+	writeJSON(t, c, map[string]any{"type": "identity", "id": clientproto.NewID(), "data": map[string]any{
+		"hwid": "HW-1", "hostname": "PC-01", "protocol": 2, "capabilities": caps,
+	}})
+	var env clientproto.Envelope
+	readJSON(t, c, &env)
+	if env.Type != clientproto.TypeWelcome {
+		t.Fatalf("got %s, want welcome", env.Type)
+	}
+	var w clientproto.Welcome
+	_ = json.Unmarshal(env.Data, &w)
+	return c, w
+}
+
+func readJSON(t *testing.T, c *websocket.Conn, v any) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, b, err := c.Read(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if err := json.Unmarshal(b, v); err != nil {
+		t.Fatalf("unmarshal %s: %v", b, err)
+	}
+}
+
+func writeJSON(t *testing.T, c *websocket.Conn, v any) {
+	t.Helper()
+	b, _ := json.Marshal(v)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.Write(ctx, websocket.MessageText, b); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+func stubUpsert(t *testing.T, id int64) {
+	t.Helper()
+	prev := upsertClientFn
+	upsertClientFn = func(context.Context, *sqlx.DB, updaterclient.Identity) (int64, error) { return id, nil }
+	t.Cleanup(func() { upsertClientFn = prev })
+}
+
+func TestClientWSV2WelcomeIntersectsCapabilities(t *testing.T) {
+	stubUpsert(t, 42)
+	hub := clienthub.New(nil)
+	srv := httptest.NewServer(ClientWS(nil, presencehub.New(time.Second), hub))
+	defer srv.Close()
+
+	c, w := dialV2(t, srv.URL, []string{"machine.info", "future.thing"})
+	defer c.CloseNow()
+	if len(w.AcceptedCapabilities) != 1 || w.AcceptedCapabilities[0] != "machine.info" {
+		t.Fatalf("accepted = %v", w.AcceptedCapabilities)
+	}
+	if w.Limits != clientproto.DefaultLimits {
+		t.Fatalf("limits = %+v", w.Limits)
+	}
+}
+
+func TestClientWSV1ClientGetsNoWelcome(t *testing.T) {
+	stubUpsert(t, 42)
+	srv := httptest.NewServer(ClientWS(nil, presencehub.New(time.Second), clienthub.New(nil)))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	var hello clientproto.Envelope
+	readJSON(t, c, &hello)
+	writeJSON(t, c, map[string]any{"type": "identity", "data": map[string]any{"hwid": "HW-1"}})
+	// The next frame must be the first ping (10s), not a welcome.
+	var next clientproto.Envelope
+	rctx, rcancel := context.WithTimeout(ctx, 12*time.Second)
+	defer rcancel()
+	_, b, err := c.Read(rctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = json.Unmarshal(b, &next)
+	if next.Type != clientproto.TypePing || string(b) != `{"type":"ping"}` {
+		t.Fatalf("v1 client got %s", b)
+	}
+}
+
+func TestClientWSCommandRoundTrip(t *testing.T) {
+	stubUpsert(t, 42)
+	hub := clienthub.New(nil)
+	srv := httptest.NewServer(ClientWS(nil, presencehub.New(time.Second), hub))
+	defer srv.Close()
+	c, _ := dialV2(t, srv.URL, []string{"machine.info"})
+	defer c.CloseNow()
+
+	rec, err := hub.Issue(context.Background(), 42, "machine.info", nil, time.Minute, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cmd clientproto.Envelope
+	readJSON(t, c, &cmd)
+	if cmd.Type != "command" || cmd.ID != rec.ID {
+		t.Fatalf("got %+v", cmd)
+	}
+	writeJSON(t, c, map[string]any{"type": "ack", "id": clientproto.NewID(), "reply_to": rec.ID, "data": map[string]any{"accepted": true}})
+	writeJSON(t, c, map[string]any{"type": "result", "id": clientproto.NewID(), "reply_to": rec.ID,
+		"data": map[string]any{"status": "ok", "payload": map[string]any{"hostname": "PC-01"}}})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, _ := hub.Command(rec.ID); got.Status == clienthub.StatusDone {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	got, _ := hub.Command(rec.ID)
+	t.Fatalf("command never finished: %+v", got)
+}
+
+func TestClientWSSessionChangedUpdatesLoggedUser(t *testing.T) {
+	stubUpsert(t, 42)
+	type call struct {
+		id  int64
+		who updaterclient.Identity
+	}
+	calls := make(chan call, 1)
+	prev := updateLoggedUserFn
+	updateLoggedUserFn = func(_ context.Context, _ *sqlx.DB, id int64, who updaterclient.Identity) error {
+		calls <- call{id, who}
+		return nil
+	}
+	t.Cleanup(func() { updateLoggedUserFn = prev })
+
+	hub := clienthub.New(nil)
+	srv := httptest.NewServer(ClientWS(nil, presencehub.New(time.Second), hub))
+	defer srv.Close()
+	c, _ := dialV2(t, srv.URL, []string{"session.changed"})
+	defer c.CloseNow()
+
+	writeJSON(t, c, map[string]any{"type": "event", "id": clientproto.NewID(), "data": map[string]any{
+		"name": "session.changed", "payload": map[string]any{
+			"events": []string{"logon"}, "session_id": 2, "changed": true,
+			"logged_user": map[string]any{"user": `CORP\m.rossi`, "state": "active-console"},
+		}}})
+	select {
+	case got := <-calls:
+		if got.id != 42 || got.who.LoggedUser != `CORP\m.rossi` || got.who.LoggedUserState != "active-console" {
+			t.Fatalf("got %+v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("UpdateLoggedUser never called")
+	}
+	if evs := hub.Events(42); len(evs) != 1 || evs[0].Name != "session.changed" {
+		t.Fatalf("events = %+v", evs)
+	}
+}
+
+func TestClientWSEventRateLimit(t *testing.T) {
+	stubUpsert(t, 42)
+	srv := httptest.NewServer(ClientWS(nil, presencehub.New(time.Second), clienthub.New(nil)))
+	defer srv.Close()
+	c, _ := dialV2(t, srv.URL, []string{"machine.info"})
+	defer c.CloseNow()
+
+	ev := map[string]any{"type": "event", "data": map[string]any{"name": "update.started", "payload": map[string]any{}}}
+	for i := 0; i < clientproto.DefaultLimits.MaxEventsPerMinute+1; i++ {
+		writeJSON(t, c, ev)
+	}
+	var env clientproto.Envelope
+	readJSON(t, c, &env)
+	if env.Type != "error" || !strings.Contains(string(env.Data), clientproto.ErrRateLimited) {
+		t.Fatalf("got %s %s", env.Type, env.Data)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, err := c.Read(ctx)
+	if websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+		t.Fatalf("close = %v", err)
+	}
+}
+
+func TestClientWSOversizedMessageClosesConnection(t *testing.T) {
+	stubUpsert(t, 42)
+	srv := httptest.NewServer(ClientWS(nil, presencehub.New(time.Second), clienthub.New(nil)))
+	defer srv.Close()
+	c, _ := dialV2(t, srv.URL, []string{"machine.info"})
+	defer c.CloseNow()
+	big := strings.Repeat("x", clientproto.DefaultLimits.MaxMessageBytes+1)
+	writeJSON(t, c, map[string]any{"type": "event", "data": map[string]any{"name": "machine.info", "payload": big}})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for {
+		_, _, err := c.Read(ctx)
+		if err != nil {
+			if websocket.CloseStatus(err) != websocket.StatusMessageTooBig {
+				t.Fatalf("close = %v, want 1009", err)
+			}
+			return
+		}
+	}
+}
+
+// remoteconfig keeps its own list to stay free of feature imports; this
+// pins it to the protocol's.
+func TestKnownClientWSCommandsMatchProtocol(t *testing.T) {
+	if len(remoteconfig.KnownClientWSCommands) != len(clientproto.Commands) {
+		t.Fatalf("remoteconfig knows %v, clientproto %d commands", remoteconfig.KnownClientWSCommands, len(clientproto.Commands))
+	}
+	for _, name := range remoteconfig.KnownClientWSCommands {
+		if _, ok := clientproto.Commands[name]; !ok {
+			t.Errorf("%s is in remoteconfig but not in clientproto", name)
+		}
+	}
 }
