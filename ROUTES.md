@@ -721,6 +721,10 @@ Un `type` sconosciuto da uno dei due lati viene ignorato, non chiude la
 connessione — è così che un futuro comando si aggiunge senza rompere un
 Updater già distribuito.
 
+Il formato completo dei messaggi — incluso il protocollo v2 (comandi,
+eventi, notify) ancora da implementare — è in
+[`CLIENT_WS_PROTOCOL.md`](CLIENT_WS_PROTOCOL.md).
+
 **Presenza**: tracciata solo in memoria (`internal/presencehub`), con una
 finestra di grazia di 15s alla disconnessione prima di segnare il client
 offline — assorbe un calo di rete breve o una riconnessione. Una nuova
