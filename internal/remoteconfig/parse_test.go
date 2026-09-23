@@ -370,6 +370,26 @@ func TestCanonical_ClientWSWithoutCommandsUnchanged(t *testing.T) {
 	}
 }
 
+// An override that patches clientWs.commands to an unknown value must be
+// caught by the dry-run, same as an override that patches
+// pollIntervalMinutes to an invalid value - otherwise a document that is
+// valid on its face can still push an unknown command to a matched host.
+func TestParse_OverrideDryRunCatchesUnknownClientWSCommand(t *testing.T) {
+	_, problems := Parse([]byte(`{
+		"schemaVersion": 1,
+		"servers": {"api": "https://api.example.test"},
+		"defaultServer": "api",
+		"overrides": [{
+			"id": "o1",
+			"match": {"all": true},
+			"patch": {"clientWs": {"commands": ["machine.format_disk"]}}
+		}]
+	}`))
+	if len(problems) != 1 || problems[0].Path != "/overrides/0/patch/clientWs/commands/0" {
+		t.Fatalf("problems = %v, want one at /overrides/0/patch/clientWs/commands/0", problems)
+	}
+}
+
 // --- shared conformance fixtures (testdata/remoteconfig, §6 of the API design doc) ---
 
 func TestFixtures_Valid(t *testing.T) {

@@ -383,6 +383,7 @@ func dryRunOverrides(doc *Document) []Problem {
 		problems = append(problems, reprefix(path+"/control", validateControl(patched.Control))...)
 		problems = append(problems, reprefix(path+"/updater", validateUpdater(patched.Updater))...)
 		problems = append(problems, reprefix(path+"/logging", validateLogging(patched.Logging))...)
+		problems = append(problems, reprefix(path+"/clientWs", validateClientWS(patched.ClientWS))...)
 	}
 	return problems
 }
