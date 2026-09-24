@@ -771,10 +771,19 @@ client WS.
 ```
 
 `args` segue le regole del comando (`CLIENT_WS_PROTOCOL.md` §7); `ttl_seconds`
-default `600`, deve stare in `[1, 86400]`. Risposta `202` con lo stesso
-`CommandRecord` che `GET .../commands/{command_id}` restituisce (`status`
-iniziale sempre `sent`). Codici di errore: `400` `client_id`/corpo JSON/`args`/
-`ttl_seconds` non validi; `409` la macchina non ha una connessione v2/v1
+default `600`, deve stare in `[1, 86400]` (il controllo avviene sul numero di
+secondi grezzo, prima di convertirlo in `time.Duration`, altrimenti un valore
+enorme può mandare in overflow la conversione e superare il controllo per
+puro caso); `issued_by` è opzionale ma se presente deve stare entro 64
+caratteri ed essere fatto solo di rune stampabili (nessun carattere di
+controllo). Risposta `202` con lo stesso `CommandRecord` che
+`GET .../commands/{command_id}` restituisce. `status` è `sent` solo nel caso
+comune: il comando è registrato nel hub **prima** dell'invio sul socket
+(`CLIENT_WS_PROTOCOL.md` §13), ma nulla impedisce a un `ack` (o, più
+raramente, anche a un `result`) di arrivare più veloce della risposta HTTP
+stessa — la `202` può quindi già mostrare `acked` o oltre, non è garantito
+`sent`. Codici di errore: `400` `client_id`/corpo JSON/`args`/`ttl_seconds`/
+`issued_by` non validi; `409` la macchina non ha una connessione v2/v1
 aperta in questo momento (nessuna sessione per quel `client_id`); `422` il
 `name` non esiste nel catalogo, o esiste ma questa connessione non l'ha
 dichiarato fra le sue `capabilities` (updater v1 compreso: sempre `422`, non
@@ -784,7 +793,12 @@ dichiarato fra le sue `capabilities` (updater v1 compreso: sempre `422`, non
 se l'id non esiste (mai esistito o già rimosso dal prune di 24h, vedi sotto).
 
 **`GET /v2/client/{client_id}/events`**: `200` con `{"events": [...]}`, lista
-vuota (mai `404`) se quel client non ha eventi registrati o non esiste.
+vuota (mai `404`) se quel client non ha eventi registrati o non esiste. Il
+`payload` di un `EventRecord` non è garantito: è conservato solo se il
+`name` dell'evento è fra le `capabilities` accettate per quella sessione
+(altrimenti l'evento resta comunque in lista, ma senza `payload`) e solo
+fino a 8 KiB, oltre i quali viene scartato e `truncated: true` compare
+invece (`CLIENT_WS_PROTOCOL.md` §13).
 
 **`POST /v2/client/notify` — corpo JSON**
 

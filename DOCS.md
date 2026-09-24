@@ -973,6 +973,33 @@ chiudere il comando a `done`: lato server la domanda a cui si risponde non
 e' "il comando e' andato a buon fine" ma "la macchina si e' riconnessa entro
 il timeout", e non c'e' altro modo di saperlo.
 
+**Trappola di rollout: `clientWs.commands` e i mirror di sede non
+aggiornati.** `internal/configmirror` non si fida ciecamente di quello che
+riceve da monte: prende il documento, lo fa passare dal proprio
+`remoteconfig.Parse`/`Canonical` (la stessa validazione e lo stesso
+serializzatore che usa l'istanza cloud) e confronta l'hash che ne viene fuori
+con l'`ETag` che il monte ha mandato — e' un checksum a fine download, non
+una verifica dell'autorita' del mittente. Il problema e' che quel confronto
+usa **la struct del binario del mirror**, non quella di chi ha pubblicato: se
+il mirror gira ancora su una build precedente all'introduzione di
+`clientWs.commands`, il suo `Document` non ha proprio quel campo, `Parse` lo
+scarta silenziosamente (un unknown field JSON, non un errore) e il
+`Canonical` che ne calcola l'hash produce byte diversi da quelli di monte.
+Risultato: "hash mismatch", e il mirror rifiuta **l'intero documento**, non
+solo `clientWs.commands` — esattamente come un consumer Kafka con uno schema
+Avro vecchio che non decodifica un campo nuovo e scarta tutto il messaggio
+invece di ignorare il campo. Fino a quando quel sito non aggiorna il binario,
+resta congelato sull'ultima revisione che era riuscito a sincronizzare, per
+qualunque cosa cambi nel documento, non solo per il canale client — la
+policy operativa e' quindi aggiornare ogni mirror di sede **prima** di
+pubblicare un documento che imposta `clientWs.commands` (un documento che
+non lo tocca affatto continua a canonicalizzare esattamente come prima, quel
+percorso non e' a rischio). Il modo per non doversene piu' preoccupare a ogni
+campo nuovo sarebbe far hashare al mirror i byte grezzi ricevuti dal monte
+invece di ri-derivarli dalla propria struct — coerente con quello che gia'
+fa per il contenuto salvato (verbatim, non ri-serializzato) — ma non e' stato
+fatto in questo giro.
+
 ### Volume degli eventi updater — rollup, coalescing e retention
 
 `updater_events` prende una riga per ogni manifest check di ogni macchina, a

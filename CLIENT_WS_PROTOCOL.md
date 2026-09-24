@@ -781,10 +781,18 @@ Valori di default, comunicati dal server in `welcome.data.limits`:
 { "max_message_bytes": 65536, "max_events_per_minute": 60, "ack_timeout_seconds": 5 }
 ```
 
-- **Dimensione**: 64 KiB per messaggio, in entrambe le direzioni. Il server
-  chiude con `error` `message_too_large` + close 1009. Il client, per i
-  `result` che possono crescere (`apps.list_upgradable`, `machine.info`),
-  taglia e mette `truncated: true` invece di superarlo.
+- **Dimensione**: 64 KiB per messaggio, in entrambe le direzioni. Lato
+  server questo è `websocket.Conn.SetReadLimit` (`internal/clientws`): la
+  libreria (`coder/websocket`) chiude direttamente con 1009
+  (`StatusMessageTooBig`) appena un singolo messaggio in arrivo lo supera,
+  **senza** mandare prima un frame `error` — a quel punto la libreria ha già
+  deciso di chiudere il socket, non c'è più occasione di scriverci sopra.
+  `message_too_large` in tabella (§10) resta quindi un codice del
+  catalogo per il lato client (un client che decide da sé di segnalarlo)
+  piuttosto che qualcosa che questa implementazione emette come frame prima
+  del close. Il client, per i `result` che possono crescere
+  (`apps.list_upgradable`, `machine.info`), taglia e mette
+  `truncated: true` invece di superarlo.
 - **Frequenza**: 60 eventi/minuto per connessione (i `pong`, `ack` e `result`
   non contano). Oltre: `error` `rate_limited` + close 1008. Una raffica di
   `session.changed` è già coalescita da `sessionSettle`, quindi il limite non
@@ -855,6 +863,14 @@ agent-channel §4.5), il client applica un'allowlist dal documento remoto:
 - Default, assente o legacy: solo i comandi di **lettura**. I due distruttivi
   vanno abilitati esplicitamente, e si possono pilotare su pochi host con un
   override `match: {hostnames: [...]}`, come `clientWs.enabled` oggi.
+- `"commands": []` (lista **presente** ma vuota) è diverso da `commands`
+  assente: significa esplicitamente "nessun comando", non "default del
+  client" (i comandi di sola lettura). Sul wire, `Commands` è un puntatore a
+  slice (`*[]string`, `internal/remoteconfig.ClientWS`) proprio per poter
+  distinguere i due casi — una `[]string` con `omitempty` marshalla sia nil
+  che `[]string{}` come "assente", che avrebbe reso impossibile spegnere
+  tutti i comandi mantenendo `clientWs.enabled: true` per la sola
+  telemetria/`notify`.
 - **In questa implementazione il server non filtra `accepted_capabilities`
   con `clientWs.commands`.** `welcome.accepted_capabilities` è la sola
   intersezione fra le capability dichiarate dal client (`identity.capabilities`)
@@ -874,6 +890,22 @@ agent-channel §4.5), il client applica un'allowlist dal documento remoto:
   `AGENTS.md` dell'updater per un campo nuovo del documento: `document.go`,
   `parse.go`, `legacy.go` e le fixture condivise in `testdata/remoteconfig/`
   **in entrambi i repo**.
+- **Rischio di rollout**: un mirror di sito rimasto su una build precedente
+  a `clientWs.commands` ri-canonicalizza il documento con il vecchio tipo
+  `ToggleOnly` (solo `{enabled}`) invece dell'attuale `ClientWS`
+  (`{enabled, commands}`) — il campo `commands` viene silenziosamente
+  perso alla ri-canonicalizzazione, l'ETag calcolato da quel mirror non
+  corrisponde più a quello upstream, e `internal/configmirror` rifiuta il
+  documento per intero ("hash mismatch"), non solo la sezione `clientWs`:
+  quel sito smette di sincronizzare **tutta** la configurazione, non solo i
+  comandi. Regola operativa: aggiornare ogni mirror di sito **prima** di
+  pubblicare un documento che imposta `clientWs.commands` (assente o solo
+  `enabled` continua a canonicalizzare com'è sempre stato, vedi
+  `TestCanonical_ClientWSWithoutCommandsUnchanged`, quindi non è a rischio).
+  Il seguito naturale è far hashare al mirror i byte grezzi ricevuti invece
+  di ri-canonicalizzarli lui stesso (coerente con "inserisce il documento
+  upstream verbatim" che già fa oggi per il contenuto, non ancora per la
+  verifica dell'ETag) — non fatto in questo giro.
 
 ### 12.4 Isolamento
 
@@ -920,13 +952,16 @@ come `Hub.Notify` (§9 nota sotto).
   "issued_by": "admin:f.fois",
   "issued_at": "2026-09-23T08:15:02Z",
   "expires_at": "2026-09-23T08:25:02Z",
-  "status": "sent",
-  "acked_at": null,
-  "finished_at": null,
-  "error": null,
-  "result": null
+  "status": "sent"
 }
 ```
+
+`args`, `issued_by`, `acked_at`, `finished_at`, `error` e `result` sono tutti
+`omitempty` sul tipo Go: appaiono solo una volta impostati (`args` se il
+comando ne prevede, `acked_at` dopo l'`ack`, e così via) e sono **assenti**,
+non `null`, fino a quel momento — l'esempio sopra è la forma reale di un
+comando appena accettato (`202`, `status: "sent"`), non un placeholder con
+tutti i campi elencati a `null`.
 
 `status`: `sent` → `acked` → `done` | `failed` | `rejected` | `timeout`
 (§5.2/§5.3, applicato lato server con lo stesso significato). `rejected` è
@@ -959,6 +994,29 @@ resta comunque visibile nella cronologia. Comandi ed eventi sono pruned da
 un ticker ogni 10 minuti: i comandi conclusi (`done`/`failed`/`rejected`/
 `timeout`) più vecchi di 24h vengono rimossi, così come gli eventi di un
 client senza nulla di più recente di 24h.
+
+Cosa viene effettivamente conservato del `payload` di un evento è limitato
+su due assi indipendenti, perché chiunque abbia la fleet API key può aprire
+una sessione per hwid e mandare eventi con qualsiasi `name` — senza limiti
+sarebbero fino a 50 × 64 KiB di payload grezzo per `client_id`, tenuti fino
+a 24h:
+
+- il `payload` è conservato solo se il `name` dell'evento è fra le
+  `capabilities` che quella sessione ha dichiarato in `identity` ed è
+  finito in `welcome.accepted_capabilities` — un `name` non dichiarato è
+  registrato comunque (per la cronologia), ma senza `payload`, come un
+  `name` sconosciuto;
+- anche un `payload` accettato è scartato oltre 8 KiB, e l'`EventRecord`
+  riporta `truncated: true` per distinguere "payload troppo grande" da
+  "`name` non dichiarato" (che non è mai `truncated`).
+
+`internal/clienthub` limita anche quanti `client_id` distinti l'anello degli
+eventi può tenere contemporaneamente (5000): oltre quella soglia, registrare
+un evento per un `client_id` mai visto prima fa sfrattare il `client_id` meno
+di recente attivo (quello il cui evento più recente è il più vecchio fra
+tutti) — un limite su quante *identità* si possono accumulare, non solo su
+quanti byte per identità, perché anche un evento senza `payload` costa una
+voce nella mappa.
 
 ## 14. Esempi di sequenza completi
 
