@@ -18,7 +18,6 @@ WORKDIR /app
 
 COPY --from=builder /build/emly-api .
 COPY --from=builder /build/internal/database/schema ./internal/database/schema
-COPY --from=builder /build/internal/handlers/templates ./internal/handlers/templates
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
