@@ -32,11 +32,19 @@ nil-DB-safe subset of handlers in `internal/routes/v2` and
 stream (routing + admin-key gating in `internal/routes/v2`; auth gating, the
 query-string key fallback, and a full ping/pong handshake over a real
 listener in `internal/handlers`), the presence hub (connect/disconnect/
-grace-period/supersede semantics, nil-Hub safety, in `internal/presencehub`)
-and the `GET /v2/client/ws` handshake (identity conversion, hello/identity/
-error framing, and a full identity->presence-online round trip over a real
-listener, in `internal/handlers`), and the daily log files (naming, day
-rotation, retention in `internal/logfile`).
+grace-period/supersede semantics, nil-Hub safety, in `internal/presencehub`),
+the client ws protocol v2 wire format (envelope framing, ULID
+generation/ordering, command argument validation, in `internal/clientproto`),
+its in-memory hub (session attach/detach and supersede, command
+issue/ack/result lifecycle including nil-Hub safety and the lazy
+timeout/prune sweep, the event ring, concurrent notify fan-out, in
+`internal/clienthub`), the `GET /v2/client/ws` handshake (identity
+conversion, hello/identity/error framing, the v1/v2 branch on
+`identity.protocol`, welcome/capability negotiation, command/event dispatch
+and rate limiting, and a full identity->presence-online round trip over a
+real listener, in `internal/clientws`), its admin routes (issue/get command,
+list events, notify, in `internal/clientws`), and the daily log files
+(naming, day rotation, retention in `internal/logfile`).
 
 ## Architecture
 
@@ -216,6 +224,21 @@ equivalent.
   open `GET /v2/client/ws` connection, with a short grace period on
   disconnect so a brief drop/reconnect never flickers "offline".
   Single-instance only, same limit as `statshub`.
+- `internal/clientproto/` — HTTP- and DB-free: the wire format of protocol
+  v2 of `GET /v2/client/ws` (`CLIENT_WS_PROTOCOL.md`) — the `Envelope`,
+  `Command`/`Ack`/`Result`/`Event`/`Notify` payload types, command/event/
+  notify name and error-code constants, `ValidateArgs`, `NewID` (ULID).
+  `id.go` is copied verbatim into `emly-updater/internal/wsclient/id.go`
+  (package name aside) so both ends mint identically-shaped IDs — the two
+  repos share no Go module, so nothing enforces that automatically.
+- `internal/clienthub/` — HTTP- and DB-free like `internal/presencehub`: an
+  in-process `Hub` holding protocol v2's session/command/event state — which
+  client has a v2 connection open and what it declared it can do, the
+  commands issued to machines and their outcome, and a 50-entry ring of each
+  machine's recent events. Nil-receiver safe throughout, same as
+  `presencehub`. Single-instance only, same limit as `statshub`/
+  `presencehub`; a ticker in `main.go` prunes finished commands/events older
+  than 24h every 10 minutes.
 
 ### Handler conventions
 
@@ -285,10 +308,16 @@ equivalent.
   holds `is_current`; clearing it everywhere is the kill-switch.
 - Same reasoning for `GET /v2/config`: **never return 404** for "nothing
   published yet" — answer **204** instead.
-- `GET /v2/client/ws`'s envelope `type` field is deliberately open-ended:
-  today only `hello`/`identity`/`ping`/`pong` exist, and an unrecognized
-  `type` on either side is logged and ignored rather than closing the
-  connection.
+- `GET /v2/client/ws`'s envelope `type` field is deliberately open-ended. v1
+  is `hello`/`identity`/`ping`/`pong`/`error`; protocol v2
+  (`identity.protocol >= 2`) adds `welcome`, `command`, `ack`, `result`,
+  `event`, `notify` (`internal/clientproto`; `CLIENT_WS_PROTOCOL.md` is the
+  normative wire format, mirrored by hand in `emly-updater/internal/wsclient`
+  — no shared Go module between the two repos). An unrecognized `type` on
+  either side is still logged and ignored rather than closing the
+  connection. That tolerance stops at the command level: an
+  unsupported/unknown command `name` is explicitly **refused** with `ack`
+  (`unsupported_command`), not silently ignored.
 - `GET /v2/stats/summary` memoizes its payload behind a `ttlCache`
   (`statscache.go`), keyed by `product|window_minutes`, sized by
   `STATS_CACHE_TTL`. Concurrent callers on a cold key collapse into one

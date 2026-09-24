@@ -91,7 +91,7 @@ emly-api-go/
     ├── updates/                     # release EMLy + self-update dell'Updater
     ├── configapi/                   # /v2/config: documento e revisioni (HTTP)
     ├── stats/                       # /v2/stats/* REST + /v2/stats/stream (WS)
-    ├── clientws/                    # /v2/client/ws: connessione sempre aperta
+    ├── clientws/                    # /v2/client/ws: connessione sempre aperta + route admin comandi/eventi/notify
     ├── bans/                        # block list permanente (admin)
     ├── health/                       # /health
     │
@@ -113,6 +113,8 @@ emly-api-go/
     ├── configmirror/                # replica /v2/config da un'istanza upstream
     ├── statshub/                    # bus di eventi in-process per lo stream stats
     ├── presencehub/                 # registro di chi e' online adesso
+    ├── clientproto/                 # formato sul filo di GET /v2/client/ws v2 (senza HTTP ne' DB)
+    ├── clienthub/                   # stato in memoria del protocollo v2: sessioni, comandi, eventi
     ├── eventprune/                  # retention delle righe grezze di updater_events
     ├── logfile/                     # file di log giornalieri con retention
     ├── storage/                     # client S3 (due bucket indipendenti)
@@ -911,6 +913,65 @@ senza mirror di sito) che si riconnettono tutte insieme dopo un riavvio
 dell'API possono quindi finire limitate a ~30 riconnessioni al minuto — un
 limite noto e accettato, non ancora affrontato in attesa di conferme sulla
 topologia di rete reale della flotta.
+
+#### Protocollo v2: comandi, eventi, notify (`internal/clientproto` e `internal/clienthub`)
+
+Quanto sopra e' il protocollo v1 (presenza pura: `hello`/`identity`/`ping`/
+`pong`). Dalla v2 la stessa connessione porta anche comandi dal server verso
+la macchina (riavvia il servizio, controlla se c'e' un aggiornamento, elenca
+i pacchetti winget da aggiornare, ...), eventi spontanei dalla macchina, e
+notifiche "vai a controllare" dal server. Il formato e' tutto in
+[`CLIENT_WS_PROTOCOL.md`](CLIENT_WS_PROTOCOL.md) (in italiano, e' il
+documento normativo del formato sul filo); qui la parte per chi viene da
+Node/PHP e' come i due package coinvolti si dividono il lavoro.
+
+`internal/clientproto` e' **solo tipi e regole**, zero HTTP e zero DB — se
+vieni da un monorepo Node/TypeScript, e' l'equivalente di un package
+`@acme/protocol-types` condiviso fra client e server: struct come `Envelope`,
+`Command`, `Result`, costanti come i nomi dei comandi (`CmdMachineInfo`,
+`CmdServiceRestart`, ...) e la funzione che valida gli argomenti di un
+comando (`ValidateArgs`). Non ha stato e non sa niente di connessioni aperte;
+per questo lo stesso file puo' essere (ed e', per `id.go`, generazione degli
+ULID) copiato verbatim nell'altro repo, `emly-updater/internal/wsclient`: due
+implementazioni diverse, un solo contratto.
+
+`internal/clienthub` e' invece **lo stato**: chi ha una connessione v2 aperta
+in questo momento e cosa sa fare, i comandi inviati e il loro esito, gli
+ultimi eventi di ogni macchina. Se `internal/presencehub` e' "chi e' online"
+in una map protetta da mutex, `clienthub.Hub` e' la stessa idea con tre map
+al posto di una — pensalo come le "room" di una libreria realtime stile
+Socket.IO tenute in un `Map` di processo invece che in Redis: quando una
+connessione manda `identity` con `capabilities: [...]`, e' come un client
+socket.io che fa `join` di una room che si chiama "so fare questi comandi".
+Un comando (`Hub.Issue`) scrive in quella stessa mappa e poi scrive sul
+socket — cosi' un `ack` che arriva prima che la chiamata HTTP sia tornata
+trova comunque il record. Vale la stessa avvertenza a istanza singola di
+`presencehub`/`statshub`: niente Postgres LISTEN/NOTIFY o Redis in questo
+stack, quindi un comando lanciato su una macchina connessa alla replica A
+non e' visibile né eseguibile dalla replica B, e tutto (sessioni, comandi,
+eventi) sparisce a un riavvio dell'API — non e' un log di controllo, e' cache
+di lavoro. Un ticker in `main.go` la pota ogni 10 minuti (comandi conclusi e
+eventi piu' vecchi di 24h).
+
+**Ciclo di vita di un comando**: `sent` (appena inviato, in attesa di `ack`)
+→ `acked` (la macchina ha confermato di eseguirlo) → uno stato finale,
+`done` (successo), `failed` (la macchina ha risposto con un errore),
+`rejected` (l'`ack` stesso ha detto `accepted: false`, es. `busy` o
+`disabled_by_policy` — non e' mai partito) o `timeout` (nessuna risposta nei
+tempi, applicato pigramente alla lettura, non da un timer che gira in
+background). E' esattamente lo stato di `clienthub.CommandRecord` che
+`GET /v2/client/commands/{id}` restituisce (ROUTES.md §5.9).
+
+**Perche' `service.restart` e `machine.reboot` non hanno mai uno stato
+`done` "normale"**: sono gli unici due comandi il cui esito non puo' mai
+arrivare come `result`, perche' il processo che dovrebbe mandarlo muore
+prima (si sta riavviando il servizio, o il PC). Il client manda solo l'`ack`
+e poi, alla riconnessione dopo il riavvio, un evento `service.started` che
+elenca gli id dei comandi completati in `completed_commands`. E' quell'
+evento — non un `result` — che `clienthub.CompleteByRestart` legge per
+chiudere il comando a `done`: lato server la domanda a cui si risponde non
+e' "il comando e' andato a buon fine" ma "la macchina si e' riconnessa entro
+il timeout", e non c'e' altro modo di saperlo.
 
 ### Volume degli eventi updater — rollup, coalescing e retention
 

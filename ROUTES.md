@@ -682,9 +682,13 @@ sempre lo stato corrente, non un flusso di eventi.
 
 ### 5.9 Presenza client — `/v2/client/ws`
 
-| Metodo | Path              | Auth      | Cosa fa |
-|--------|-------------------|-----------|---------|
-| `GET`  | `/v2/client/ws`   | `API` | Upgrade WebSocket che l'EMLy Updater tiene aperta per tutta la vita del servizio, per la presenza online/offline in tempo reale. |
+| Metodo | Path                                 | Auth      | Cosa fa |
+|--------|--------------------------------------|-----------|---------|
+| `GET`  | `/v2/client/ws`                      | `API`   | Upgrade WebSocket che l'EMLy Updater tiene aperta per tutta la vita del servizio, per la presenza online/offline in tempo reale e, dal protocollo v2, per comandi/eventi/notify. |
+| `POST` | `/v2/client/{client_id}/commands`    | `ADMIN` | Invia un comando (§7 di `CLIENT_WS_PROTOCOL.md`) alla macchina connessa con quell'`updater_clients.id`. |
+| `GET`  | `/v2/client/commands/{command_id}`   | `ADMIN` | Legge lo stato/esito di un comando già inviato. |
+| `GET`  | `/v2/client/{client_id}/events`      | `ADMIN` | Ultimi eventi (`event`, §8) ricevuti da quella macchina — un anello in memoria, non uno storico permanente. |
+| `POST` | `/v2/client/notify`                  | `ADMIN` | Manda un `notify` (§9) a una o più macchine connesse, o a tutte quelle che dichiarano quel `topic`. |
 
 L'autenticazione (`X-Api-Key`) avviene tramite lo stesso middleware
 `apimw.APIKeyAuth` del manifest self-update dell'Updater, come middleware di
@@ -722,7 +726,8 @@ connessione — è così che un futuro comando si aggiunge senza rompere un
 Updater già distribuito.
 
 Il formato completo dei messaggi — incluso il protocollo v2 (comandi,
-eventi, notify) ancora da implementare — è in
+eventi, notify, implementato lato API in `internal/clientproto` +
+`internal/clienthub`) — è in
 [`CLIENT_WS_PROTOCOL.md`](CLIENT_WS_PROTOCOL.md).
 
 **Presenza**: tracciata solo in memoria (`internal/presencehub`), con una
@@ -753,6 +758,57 @@ dell'API può quindi essere limitata a ~30 riconnessioni al minuto. È un limite
 noto e accettato finché non si conferma la reale topologia di rete della
 flotta — non è stato toccato in questo giro di fix.
 
+**Route admin (comandi, eventi, notify)** — `internal/clientws/admin.route.go`,
+montate da `RegisterV2` dietro `AdminKeyAuth` (a differenza di `GET /ws`, qui
+la sigla è proprio `ADMIN`, controllo ordinario di route). Sono il modo per
+la dashboard di pilotare una macchina connessa senza aprire essa stessa un
+client WS.
+
+**`POST /v2/client/{client_id}/commands` — corpo JSON**
+
+```json
+{ "name": "apps.list_upgradable", "args": {}, "ttl_seconds": 600, "issued_by": "admin:f.fois" }
+```
+
+`args` segue le regole del comando (`CLIENT_WS_PROTOCOL.md` §7); `ttl_seconds`
+default `600`, deve stare in `[1, 86400]`. Risposta `202` con lo stesso
+`CommandRecord` che `GET .../commands/{command_id}` restituisce (`status`
+iniziale sempre `sent`). Codici di errore: `400` `client_id`/corpo JSON/`args`/
+`ttl_seconds` non validi; `409` la macchina non ha una connessione v2/v1
+aperta in questo momento (nessuna sessione per quel `client_id`); `422` il
+`name` non esiste nel catalogo, o esiste ma questa connessione non l'ha
+dichiarato fra le sue `capabilities` (updater v1 compreso: sempre `422`, non
+`409`, per distinguere "non lo sa fare" da "non è raggiungibile").
+
+**`GET /v2/client/commands/{command_id}`**: `200` col `CommandRecord`, `404`
+se l'id non esiste (mai esistito o già rimosso dal prune di 24h, vedi sotto).
+
+**`GET /v2/client/{client_id}/events`**: `200` con `{"events": [...]}`, lista
+vuota (mai `404`) se quel client non ha eventi registrati o non esiste.
+
+**`POST /v2/client/notify` — corpo JSON**
+
+```json
+{ "topic": "release.published",
+  "payload": { "target": "emly", "channel": "stable", "version": "3.5.0", "jitter_seconds": 600 },
+  "client_ids": [42, 57] }
+```
+
+`topic`/`payload` validati con le stesse regole di `CLIENT_WS_PROTOCOL.md`
+§9; `client_ids` assente = tutte le sessioni v2 che dichiarano quel `topic`.
+Risposta `200` con `{"sent": N}`, il numero di destinatari effettivamente
+raggiunti (non il numero di client_ids passati); `400` se `topic`/`payload`
+non superano la validazione.
+
+**Stato in memoria, non un audit log.** Sessioni, comandi ed eventi vivono
+solo in `internal/clienthub`: nessuna tabella, nessuna persistenza. Un
+riavvio dell'API perde tutto (una macchina riconnessa ricostruisce solo la
+sua sessione, non lo storico), ed è per-istanza come `presencehub`/
+`statshub` — un comando lanciato su una macchina connessa a una replica non
+è visibile né eseguibile dall'altra. Un ticker in `main.go` pota ogni 10
+minuti: i comandi conclusi (`done`/`failed`/`rejected`/`timeout`) e gli
+eventi più vecchi di 24h vengono scartati.
+
 ---
 
 ## 6. Riepilogo autenticazione
@@ -760,7 +816,7 @@ flotta — non è stato toccato in questo giro di fix.
 | Header            | Dove viene usato | Fallimento |
 |-------------------|------------------|------------|
 | `X-API-Key`       | Creazione bug report, manifest dell'Updater, `GET /v2/config`, `GET /v2/client/ws` | `401` |
-| `X-Admin-Key`     | Tutte le route admin, releases, config writes, bans, stats | `401` |
+| `X-Admin-Key`     | Tutte le route admin, releases, config writes, bans, stats, comandi/eventi/notify di `/v2/client` | `401` |
 | `X-Dashboard-Key` | Bypass di entrambi i rate limiter, globale e per gruppo di route | nessuno, la richiesta prosegue limitata |
 | `X-Session-Token` | `auth/validate`, `auth/logout` | `401` o `403` |
 

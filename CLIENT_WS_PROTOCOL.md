@@ -3,10 +3,14 @@
 Formato dei messaggi scambiati fra l'API e l'EMLy Updater sulla connessione
 WebSocket persistente `GET /v2/client/ws`.
 
-- **Stato**: proposta di formato. La v1 (presenza: `hello` / `identity` /
-  `ping` / `pong` / `error`) è quella implementata oggi in
-  `internal/clientws` e in `emly-updater/internal/wsclient`; tutto il resto di
-  questo documento è la v2, da implementare.
+- **Stato**: v2 implementata lato API (branch `feat/client-ws-v2`): envelope,
+  negoziazione `hello`/`identity`/`welcome`, comandi/`ack`/`result`,
+  eventi/`notify`, limiti e le route admin (§13), in `internal/clientproto`
+  (formato, senza HTTP né stato), `internal/clienthub` (stato in memoria delle
+  sessioni v2, dei comandi e degli eventi) e `internal/clientws` (handler
+  WebSocket + route admin). Lato Updater (`emly-updater/internal/wsclient`)
+  resta v1 (`hello` / `identity` / `ping` / `pong` / `error`): l'implementazione
+  della v2 su quel lato segue il proprio piano.
 - **Fonte di verità**: questo file è il riferimento normativo del *formato sul
   filo* per `/v2/client/ws`. Il comportamento di ciascun lato (quando si
   connette, come esegue un comando, cosa mostra la dashboard) resta nei
@@ -38,8 +42,9 @@ WebSocket persistente `GET /v2/client/ws`.
 10. [Codici di errore](#10-codici-di-errore)
 11. [Limiti, timeout, chiusura](#11-limiti-timeout-chiusura)
 12. [Sicurezza](#12-sicurezza)
-13. [Esempi di sequenza completi](#13-esempi-di-sequenza-completi)
-14. [Checklist di implementazione](#14-checklist-di-implementazione)
+13. [Superficie REST (admin)](#13-superficie-rest-admin)
+14. [Esempi di sequenza completi](#14-esempi-di-sequenza-completi)
+15. [Checklist di implementazione](#15-checklist-di-implementazione)
 
 ---
 
@@ -471,8 +476,12 @@ vincolo lato client descritto in §12.
 Check **a secco**: esegue la stessa risoluzione di `resolveTarget` (catena di
 server del ciclo corrente, stessi header `X-EMLy-*`) e si ferma alla giuntura
 prima di `Downloads.Ensure`. Non scarica, non installa, non tocca
-`state.json`, non sveglia `RunLoop`. Se un `Cycle` è in corso risponde
-`busy` invece di aspettare: i due non devono sovrapporsi (§2.4).
+`state.json`, non sveglia `RunLoop`. Proprio perché è di sola lettura e non
+tocca `state.json`, l'updater lo esegue anche mentre un `Cycle` è già in
+corso, invece di rispondere `busy`: `busy` (§10) è riservato allo stesso
+comando già in esecuzione (un secondo `emly.manifest.check` mentre il primo
+gira), non a un `Cycle` concorrente — non c'è stato condiviso da
+serializzare fra i due.
 
 Per chi vuole che la macchina *aggiorni adesso* il verbo giusto è un
 `update_now` futuro, che sveglia il loop (spec agent-channel §7.3) — non questo.
@@ -603,10 +612,12 @@ Integra il `TODO(presence WS)` di `watchSessions`
 | `changed` | `logged_user` diverso da quello dell'evento precedente. |
 | `at` | Ora di ricezione dell'ultima notifica. |
 
-Lato server: se `changed` è `true`, aggiorna `logged_user`,
+Lato server: se `changed` è `true`, `internal/clientws.handleEvent` chiama
+`updaterclient.UpdateLoggedUser`, che aggiorna `logged_user`,
 `logged_user_state`, `logged_user_disconnected_at` della riga
 `updater_clients` con la stessa semantica COALESCE/NULLIF di `upsert` (§2.6),
-senza toccare `last_seen_at`. Con `changed: false` (es. `lock`/`unlock` dello
+**senza toccare `last_seen_at`**: un evento di sessione dice chi c'è alla
+macchina, non che la macchina ha fatto poll. Con `changed: false` (es. `lock`/`unlock` dello
 stesso utente) l'evento è solo audit/telemetria. Questo supera la regola v1
 "i campi mutevoli restano quelli dell'ultimo `identity`" (design presenza
 §3.2): in v2 una connessione aperta **può** aggiornare l'utente loggato, ma
@@ -747,7 +758,7 @@ Usati in `error.code` di `error`, `ack`, `result` e degli eventi `update.*`.
 | `unsupported_command` | `ack` | `name` sconosciuto a questa build. |
 | `invalid_args` | `ack` | Argomento mancante, fuori limite, o sconosciuto. |
 | `expired` | `ack` | Ricevuto dopo `expires_at`. |
-| `busy` | `ack` | Stesso comando già in esecuzione, `Cycle` in corso, installazione in corso. |
+| `busy` | `ack` | Stesso comando (stesso `name`) già in esecuzione, o un'installazione (EMLy/self-update) in corso per `service.restart`/`machine.reboot`. **Non** per un `Cycle` concorrente: `emly.manifest.check`/`updater.manifest.check` sono a secco e girano comunque (§7.2, §7.3). |
 | `disabled_by_policy` | `ack` | Il documento remoto non abilita questo comando per questa macchina (§12.3). |
 | `insecure_transport` | `ack` | Comando distruttivo ricevuto su `ws://` (§12.2). |
 | `user_active` | `ack` | `machine.reboot` con `when_user_active: "skip"` e un utente attivo. |
@@ -844,9 +855,21 @@ agent-channel §4.5), il client applica un'allowlist dal documento remoto:
 - Default, assente o legacy: solo i comandi di **lettura**. I due distruttivi
   vanno abilitati esplicitamente, e si possono pilotare su pochi host con un
   override `match: {hostnames: [...]}`, come `clientWs.enabled` oggi.
-- Il server usa la stessa lista per costruire `accepted_capabilities` in
-  `welcome`, così non propone comandi che il client rifiuterebbe; il client la
-  applica comunque (non si fida del server, regola 1).
+- **In questa implementazione il server non filtra `accepted_capabilities`
+  con `clientWs.commands`.** `welcome.accepted_capabilities` è la sola
+  intersezione fra le capability dichiarate dal client (`identity.capabilities`)
+  e quelle che il server conosce (`clientproto.ServerCapabilities`) —
+  `clientproto.Intersect`, in `internal/clientws.ClientWS`. Il motivo è che, a
+  questo punto della connessione, il server conosce la macchina solo da
+  `hwid`/`hostname` (l'`identity`) e non può valutare gli override
+  `match: {dcs: […]}`/`match: {subnets: […]}` della policy da lì: quel
+  matching di sito è lavoro dell'Updater (`beginCycle`), non dell'API.
+  L'allowlist è quindi applicata **solo dal client**: un comando il cui `name`
+  non è in `clientWs.commands` viene rifiutato con `ack` `disabled_by_policy`
+  (§10), anche se il server lo aveva proposto in `accepted_capabilities` e
+  anche se l'ha effettivamente inviato — regola 1 (il canale non porta
+  autorità) vale anche al contrario, il client non si fida di ciò che il
+  server propone.
 - Aggiungere `commands` alla sezione `clientWs` segue la procedura di
   `AGENTS.md` dell'updater per un campo nuovo del documento: `document.go`,
   `parse.go`, `legacy.go` e le fixture condivise in `testdata/remoteconfig/`
@@ -859,9 +882,87 @@ dall'`identity`. Nessun campo di un messaggio sceglie un destinatario o legge
 lo stato di un'altra macchina. Gli `event` aggiornano solo la riga del client
 della connessione su cui arrivano.
 
-## 13. Esempi di sequenza completi
+## 13. Superficie REST (admin)
 
-### 13.1 Handshake v2 e snapshot iniziale
+Il canale WebSocket non è l'unico modo di toccare il protocollo: quattro
+route `X-Admin-Key` (`internal/clientws/admin.route.go`, montate da
+`RegisterV2` sotto `/v2/client`) sono quello che la dashboard chiama per
+lanciare un comando su una macchina connessa, leggerne l'esito, vedere i suoi
+ultimi eventi o mandare un `notify` senza passare da `POST /v2/config`. Sono
+un front-end HTTP allo stato in memoria di `internal/clienthub` (§2, "in
+memoria, a istanza singola, perso a un riavvio" — vale anche qui, non solo
+per le sessioni WS: uno storico di comandi/eventi non sopravvive a un
+riavvio dell'API e un comando lanciato su una macchina connessa a un replica
+non è visibile dall'altra). Il dettaglio dei corpi/codici è anche in
+[`ROUTES.md`](ROUTES.md) §5.9; questa tabella è la vista rapida.
+
+| Metodo | Path | Corpo | Risposta | Codici |
+|---|---|---|---|---|
+| `POST` | `/v2/client/{client_id}/commands` | `{"name", "args"?, "ttl_seconds"?, "issued_by"?}` | `CommandRecord` (sotto) | `202` inviato; `400` `client_id`, JSON, `args` o `ttl_seconds` non validi; `409` macchina non connessa; `422` `name` sconosciuto, o non nella lista `capabilities` che questa connessione ha dichiarato (v1 compreso: sempre `422`, mai `409`, così l'admin vede il motivo) |
+| `GET` | `/v2/client/commands/{command_id}` | — | `CommandRecord` | `200`; `404` `command_id` sconosciuto |
+| `GET` | `/v2/client/{client_id}/events` | — | `{"events": [EventRecord, …]}` | `200` (lista vuota se non ci sono eventi, mai `404`) |
+| `POST` | `/v2/client/notify` | `{"topic", "payload", "client_ids"?}` (§9) | `{"sent": N}` | `200`; `400` `topic`/`payload` non validi (stessa validazione di §9) |
+
+`ttl_seconds` (default `600`, massimo `86400`) è quanto l'admin è disposto ad
+aspettare prima che il comando scada (`expires_at` di §5.1); non è il timeout
+di `ack`/`result` di §7, che resta quello del catalogo. `client_ids` assente
+su `notify` significa "tutte le sessioni v2 che dichiarano quel `topic`",
+come `Hub.Notify` (§9 nota sotto).
+
+`CommandRecord` (`internal/clienthub.CommandRecord`, la stessa forma per
+`POST .../commands` e `GET .../commands/{id}`):
+
+```json
+{
+  "id": "01J8ZQ6T3M6X9K2V7B4N1C5D8E",
+  "client_id": 42,
+  "name": "apps.list_upgradable",
+  "issued_by": "admin:f.fois",
+  "issued_at": "2026-09-23T08:15:02Z",
+  "expires_at": "2026-09-23T08:25:02Z",
+  "status": "sent",
+  "acked_at": null,
+  "finished_at": null,
+  "error": null,
+  "result": null
+}
+```
+
+`status`: `sent` → `acked` → `done` | `failed` | `rejected` | `timeout`
+(§5.2/§5.3, applicato lato server con lo stesso significato). `rejected` è
+un `ack` con `accepted: false`; `timeout` è applicato pigramente alla
+lettura (`Hub.Command`/`Hub.Prune`), non da un timer in background — un
+record letto tra la scadenza e il prossimo `Prune` la riflette comunque.
+Un comando `POST` risposto `202` (`sent`) è sempre presente da subito in un
+successivo `GET /v2/client/commands/{id}`: è registrato nel hub **prima**
+dell'invio sul socket, apposta perché un `ack` che corre più veloce della
+risposta HTTP non trovi il record assente.
+
+`config.published` è annunciato in modo **asincrono**: le route di
+`POST /v2/config/revisions`, `.../publish` e `.../rollback`
+(`internal/configapi`) chiamano `Hub.NotifyConfigPublished` come loro
+`ConfigNotifier`, che fa il fan-out in una goroutine propria — la risposta
+HTTP di quelle route non aspetta un solo socket client. `Hub.Notify` (usato
+anche da questa `POST /v2/client/notify`) manda a ogni destinatario in
+goroutine separate, il tutto delimitato da un singolo timeout di invio
+(10s) e non da (timeout) × (numero di destinatari): un socket bloccato non
+fa aspettare gli altri né il chiamante HTTP. `POST /v2/client/notify` resta
+comunque sincrono con il proprio fan-out (a differenza di
+`config.published`) e la sua risposta riporta quanti destinatari sono stati
+effettivamente raggiunti (`sent`).
+
+Ogni evento ricevuto (`type: "event"`, §5.4) viene registrato nell'anello
+per-client di `internal/clienthub` (ultimi 50, `GET .../events`) **prima**
+che i suoi effetti (aggiornare `logged_user*`, chiudere un comando via
+`service.started`) vengano applicati — così un evento non interpretabile
+resta comunque visibile nella cronologia. Comandi ed eventi sono pruned da
+un ticker ogni 10 minuti: i comandi conclusi (`done`/`failed`/`rejected`/
+`timeout`) più vecchi di 24h vengono rimossi, così come gli eventi di un
+client senza nulla di più recente di 24h.
+
+## 14. Esempi di sequenza completi
+
+### 14.1 Handshake v2 e snapshot iniziale
 
 ```
 S→C {"type":"hello","data":{"protocol":2,"server_version":"2.14.0","server_time":"2026-09-23T08:00:00Z"}}
@@ -873,7 +974,7 @@ S→C {"type":"ping"}
 C→S {"type":"pong"}
 ```
 
-### 13.2 Lista aggiornamenti winget
+### 14.2 Lista aggiornamenti winget
 
 ```
 S→C {"type":"command","id":"01J…X","data":{"name":"apps.list_upgradable","args":{},"expires_at":"…"}}
@@ -882,7 +983,7 @@ C→S {"type":"ack","id":"01J…Y","reply_to":"01J…X","data":{"accepted":true}
 C→S {"type":"result","id":"01J…Z","reply_to":"01J…X","data":{"status":"ok","duration_ms":8421,"payload":{"packages":[…],"collected_at":"…"}}}
 ```
 
-### 13.3 Riavvio PC
+### 14.3 Riavvio PC
 
 ```
 S→C {"type":"command","id":"01J…R","data":{"name":"machine.reboot","args":{"delay_seconds":300,"when_user_active":"warn"},"expires_at":"…"}}
@@ -895,7 +996,7 @@ S→C {"type":"welcome", …}
 C→S {"type":"event","id":"01J…T","data":{"name":"service.started","payload":{"reason":"boot","completed_commands":["01J…R"], …}}}
 ```
 
-### 13.4 Nuova release EMLy annunciata e applicata
+### 14.4 Nuova release EMLy annunciata e applicata
 
 ```
 S→C {"type":"notify","id":"01J…N","data":{"topic":"release.published","payload":{"target":"emly","channel":"stable","version":"3.5.0","jitter_seconds":600}}}
@@ -905,14 +1006,14 @@ C→S {"type":"event","data":{"name":"update.started","payload":{"target":"emly"
 C→S {"type":"event","data":{"name":"update.applied","payload":{"target":"emly","from_version":"3.4.1","to_version":"3.5.0","duration_ms":48210,"reinstalled":false}}}
 ```
 
-### 13.5 Cambio sessione (riconnessione RDP)
+### 14.5 Cambio sessione (riconnessione RDP)
 
 ```
       (SCM: remote-disconnect, remote-connect, unlock — coalescite in 1.5s)
 C→S {"type":"event","data":{"name":"session.changed","payload":{"events":["remote-disconnect","remote-connect","unlock"],"session_id":2,"logged_user":{"user":"CORP\\m.rossi","state":"active-rdp"},"changed":true, …}}}
 ```
 
-## 14. Checklist di implementazione
+## 15. Checklist di implementazione
 
 **API (`emly-go-api`)**
 
