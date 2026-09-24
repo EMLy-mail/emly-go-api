@@ -208,13 +208,24 @@ func main() {
 		}
 	}
 
+	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
+	defer backgroundCancel()
+
+	// clientHub holds protocol v2 of GET /v2/client/ws: sessions, commands
+	// issued to machines and their recent events (internal/clienthub).
+	// In-memory and single-instance, like presenceHub/statsHub below.
+	// Created before configmirror.Start so a site mirror can hand it the
+	// same Hub as its ConfigNotifier (I5): a newly replicated revision
+	// then reaches this instance's own connected clients over the client
+	// channel, exactly as a direct publish/rollback does on the cloud
+	// instance via internal/configapi.
+	clientHub := clienthub.New(time.Now)
+
 	// Background loop that replicates /v2/config from CONFIG_UPSTREAM_URL
 	// when this instance is a site mirror; a no-op State on the cloud/
 	// primary instance (config.Load().ConfigUpstreamURL == ""). Stopped via
 	// backgroundCancel during graceful shutdown below.
-	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
-	defer backgroundCancel()
-	configMirrorState := configmirror.Start(backgroundCtx, db, cfg)
+	configMirrorState := configmirror.Start(backgroundCtx, db, cfg, clientHub)
 
 	// In-process event bus behind GET /v2/stats/stream (see internal/statshub
 	// package doc for why this is in-process rather than Postgres LISTEN/NOTIFY
@@ -229,10 +240,6 @@ func main() {
 	// doc). Single-instance, like statsHub above.
 	presenceHub := presencehub.New(presencehub.DefaultGraceDuration)
 
-	// clientHub holds protocol v2 of GET /v2/client/ws: sessions, commands
-	// issued to machines and their recent events (internal/clienthub).
-	// In-memory and single-instance, like presenceHub.
-	clientHub := clienthub.New(time.Now)
 	go func() {
 		t := time.NewTicker(10 * time.Minute)
 		defer t.Stop()
