@@ -1017,15 +1017,28 @@ C→S {"type":"event","data":{"name":"session.changed","payload":{"events":["rem
 
 **API (`emly-go-api`)**
 
-- [ ] `internal/clientws`: envelope con `id`/`reply_to`/`ts`; `hello.data`,
+- [x] `internal/clientws`: envelope con `id`/`reply_to`/`ts`; `hello.data`,
       `welcome`; ramo v1/v2 per connessione in base a `identity.protocol`.
-- [ ] Parsing di `event` (`session.changed` → aggiornamento `logged_user*`
-      senza toccare `last_seen_at`; gli altri → telemetria/stats).
-- [ ] Registro comandi in memoria per connessione (`id` → stato,
-      timeout di `ack`/`result`), poi persistenza come da spec agent-channel §8.
-- [ ] Limiti §11 (dimensione, eventi/minuto) e codici di chiusura.
-- [ ] `clientWs.commands` in `internal/remoteconfig` + fixture condivise.
-- [ ] `ROUTES.md` §5.9 e `DOCS.md` aggiornati quando la v2 viene implementata.
+- [x] Parsing di `event` (`session.changed` → aggiornamento `logged_user*`
+      senza toccare `last_seen_at`; gli altri → registrati nell'anello di
+      `internal/clienthub` e loggati, `service.started` chiude i comandi
+      `ResultViaEvent` via `completed_commands`).
+- [x] Registro comandi in memoria per connessione (`id` → stato, timeout di
+      `ack`/`result`) — `internal/clienthub.Hub` (`Issue`/`HandleAck`/
+      `HandleResult`/`applyTimeout`).
+- [ ] Persistenza dei comandi/eventi come da spec agent-channel §8: in questa
+      implementazione restano solo in memoria (`internal/clienthub`, pruned
+      dopo 24h) — nessuna tabella, nessuno storico che sopravviva a un
+      riavvio dell'API (§13).
+- [x] Limiti §11 (dimensione messaggio, eventi/minuto) e i codici di
+      chiusura 1000/1008/1009/1011.
+- [ ] Codice di chiusura 1012 (riavvio lato server): lo shutdown di
+      `main.go` non chiude esplicitamente le connessioni `/v2/client/ws` con
+      quel codice, si affida al drop della connessione.
+- [x] `clientWs.commands` in `internal/remoteconfig` + fixture condivise
+      (`testdata/remoteconfig/invalid/clientws-unknown-command*`,
+      `override-clientws-unknown-command*`).
+- [x] `ROUTES.md` §5.9 e `DOCS.md` aggiornati (questo giro).
 
 **Updater (`emly-updater`)**
 
