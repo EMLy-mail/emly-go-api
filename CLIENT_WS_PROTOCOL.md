@@ -3,14 +3,16 @@
 Formato dei messaggi scambiati fra l'API e l'EMLy Updater sulla connessione
 WebSocket persistente `GET /v2/client/ws`.
 
-- **Stato**: v2 implementata lato API (branch `feat/client-ws-v2`): envelope,
-  negoziazione `hello`/`identity`/`welcome`, comandi/`ack`/`result`,
+- **Stato**: v2 implementata sia lato API (branch `feat/client-ws-v2`):
+  envelope, negoziazione `hello`/`identity`/`welcome`, comandi/`ack`/`result`,
   eventi/`notify`, limiti e le route admin (§13), in `internal/clientproto`
   (formato, senza HTTP né stato), `internal/clienthub` (stato in memoria delle
   sessioni v2, dei comandi e degli eventi) e `internal/clientws` (handler
-  WebSocket + route admin). Lato Updater (`emly-updater/internal/wsclient`)
-  resta v1 (`hello` / `identity` / `ping` / `pong` / `error`): l'implementazione
-  della v2 su quel lato segue il proprio piano.
+  WebSocket + route admin); sia lato Updater (`emly-updater`, stesso branch
+  `feat/client-ws-v2`), in `internal/wsclient` (negoziazione, dispatch
+  comandi/eventi/notify) e `internal/service/client*.go` (esecuzione dei
+  comandi, catalogo eventi, gestione dei notify) - si veda la checklist §15
+  per lo stato comando per comando.
 - **Fonte di verità**: questo file è il riferimento normativo del *formato sul
   filo* per `/v2/client/ws`. Il comportamento di ciascun lato (quando si
   connette, come esegue un comando, cosa mostra la dashboard) resta nei
@@ -637,8 +639,14 @@ stesso utente) l'evento è solo audit/telemetria. Questo supera la regola v1
 solo tramite questo evento.
 
 Il client non manda l'evento se il canale è spento o non connesso: il
-prossimo poll porta lo stesso valore negli header (regola 3). Nessuna coda
-persistente degli eventi di sessione.
+prossimo poll porta lo stesso valore negli header (regola 3). A differenza
+degli altri eventi (`machine.info`, `update.*`, `service.started`), che
+restano in un buffer in memoria da massimo 32 voci fino alla prossima
+`welcome`, `session.changed` **non** viene messo in coda in quel buffer -
+viene scartato: per quando il canale torna su è comunque superato da quello
+che il prossimo poll porterebbe, quindi non vale lo spazio nel buffer che un
+evento genuinamente ancora valido (un aggiornamento in corso, per esempio)
+merita di più.
 
 ### 8.2 `update.available`
 
@@ -756,7 +764,21 @@ Se `revision` è maggiore di quella in uso, dopo il jitter il client rifà
 `GET /v2/config` e lo valida all-or-nothing come sempre. È anche il modo in
 cui `clientWs.enabled: false` arriva in secondi invece che al prossimo poll
 (oggi `clientws.go` rilegge il ciclo ogni 15s: con questo notify può farlo
-subito).
+subito). Come `release.published`, `jitter_seconds` ha un minimo lato client,
+più basso di quello di §9.1 (il documento è già in cache e solo stantio, non
+mancante del tutto): **30s**.
+
+Un notify che forza il refresh (`revision` più recente) marca comunque il
+prossimo poll come "fetch obbligatorio" anche quando il risveglio anticipato
+sotto è scartato dalla regola successiva - solo quel risveglio è filtrato,
+non l'effetto del notify sul poll che segue.
+
+Sui due topic insieme vale inoltre un limite lato client: **al massimo un
+risveglio anticipato di `RunLoop` ogni 10 minuti**. Un `release.published` o
+un `config.published` che arriva mentre la finestra è ancora aperta non
+sveglia `RunLoop` una seconda volta - il poll ordinario resta comunque
+attivo e recupera al giro successivo - così una raffica di notify (più siti,
+un publisher che ritenta) non genera una raffica di cicli anticipati.
 
 ## 10. Codici di errore
 
@@ -1121,9 +1143,13 @@ C→S {"type":"event","data":{"name":"session.changed","payload":{"events":["rem
       (`internal/service/sessionwatch.go`).
 - [x] `internal/winget` dietro `apps.list_upgradable` (merge di
       `feat/winget-upgradable`).
-- [x] `emly.manifest.check` / `updater.manifest.check` come check a secco,
-      mai in parallelo a `Cycle` (`resolveTargetWith`/`resolveUpdaterManifestWith`
-      con `notePreferred=false`, `internal/service/clientcmd.go`).
+- [x] `emly.manifest.check` / `updater.manifest.check` come check a secco: di
+      sola lettura, non tocca `state.json` né la preferenza di server, quindi
+      **può** girare anche mentre un `Cycle` è già in corso invece di
+      rispondere `busy` (§7.2) - `busy` resta per lo stesso comando già in
+      esecuzione, non per un `Cycle` concorrente
+      (`resolveTargetWith`/`resolveUpdaterManifestWith` con
+      `notePreferred=false`, `internal/service/clientcmd.go`).
 - [x] `release.published` / `config.published` come trigger con jitter sulla
       `select` di `RunLoop` (`internal/service/clientnotify.go`, canale
       `u.wake` a uno slot).
