@@ -45,6 +45,22 @@ const (
 	sendTimeout = 10 * time.Second
 	// configJitterSeconds is the jitter announced with config.published.
 	configJitterSeconds = 120
+	// eventPayloadCapBytes bounds what RecordEvent keeps of a single event's
+	// payload: with eventRingSize (50) events per client and
+	// clientproto.DefaultLimits.MaxMessageBytes (64 KiB) as the only other
+	// cap, a client (or anyone minting client ids via the fleet API key,
+	// see RecordEvent) could otherwise park 50 x 64 KiB of raw payload per
+	// id for up to recordRetention. A payload over this cap is dropped
+	// (Payload nil, Truncated true) rather than truncated to it - the
+	// dashboard already treats "no payload" and "large" the same way it
+	// would a truncated one, and this avoids keeping a second, partial copy.
+	eventPayloadCapBytes = 8 * 1024
+	// maxEventClients bounds how many distinct client ids h.events can hold
+	// at once, so minting new client ids (new hwids) cannot grow the map
+	// without bound even at name-only, zero-payload records. Past the cap,
+	// RecordEvent evicts the least recently active client (the one whose
+	// newest event is oldest) to make room for the new arrival.
+	maxEventClients = 5000
 )
 
 // ackGrace is ack_timeout_seconds plus slack for the round trip. Not a
@@ -80,6 +96,12 @@ type EventRecord struct {
 	ReceivedAt time.Time       `json:"received_at"`
 	ClientTS   string          `json:"client_ts,omitempty"`
 	Payload    json.RawMessage `json:"payload,omitempty"`
+	// Truncated is true when the event carried a payload but it exceeded
+	// eventPayloadCapBytes and was dropped rather than stored (I1). It is
+	// never set for an event recorded name-only because its name was not
+	// among the session's accepted capabilities - that is a policy
+	// decision, not a size cut.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 type session struct {
@@ -181,7 +203,13 @@ func (h *Hub) Issue(ctx context.Context, clientID int64, name string, args json.
 	h.commands[rec.ID] = rec
 	h.mu.Unlock()
 
-	sctx, cancel := context.WithTimeout(ctx, sendTimeout)
+	// context.WithoutCancel detaches from ctx's cancellation while still
+	// respecting sendTimeout below (M3): ctx here is the admin HTTP
+	// request's context, and coder/websocket's Conn.Write closes the
+	// whole connection if the context it was given is cancelled mid-write
+	// - an admin aborting or timing out their own HTTP request must not
+	// be able to drop the client's socket out from under it.
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sendTimeout)
 	defer cancel()
 	if err := s.send(sctx, frame); err != nil {
 		h.mu.Lock()
@@ -192,8 +220,11 @@ func (h *Hub) Issue(ctx context.Context, clientID int64, name string, args json.
 	// rec was registered (and reachable from HandleAck/HandleResult/Command/
 	// Prune) before send; the send itself can race a client's ack arriving
 	// before Issue returns, so the final read must take the lock too, same
-	// as Command does.
+	// as Command does. applyTimeout here too (I3): the ttl/ack-timeout
+	// window is normally far longer than a send takes, but the outcome
+	// must not depend on how long the send happened to take either.
 	h.mu.Lock()
+	h.applyTimeout(rec)
 	result := h.snapshot(rec)
 	h.mu.Unlock()
 	return result, nil
@@ -216,7 +247,16 @@ func (h *Hub) HandleAck(clientID int64, replyTo string, ack clientproto.Ack) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	rec, ok := h.ownCommand(clientID, replyTo)
-	if !ok || rec.Status != StatusSent {
+	if !ok {
+		return
+	}
+	// A lazy timeout is only ever materialized when something reads the
+	// record (Command/Prune/Issue's own snapshot); without this, an ack
+	// that arrives after the deadline but before any such read would still
+	// find Status == StatusSent and flip it to acked/rejected, silently
+	// overriding a timeout that "should" already have happened (I3).
+	h.applyTimeout(rec)
+	if rec.Status != StatusSent {
 		return
 	}
 	now := h.now()
@@ -234,7 +274,14 @@ func (h *Hub) HandleResult(clientID int64, replyTo string, res clientproto.Resul
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	rec, ok := h.ownCommand(clientID, replyTo)
-	if !ok || (rec.Status != StatusSent && rec.Status != StatusAcked) {
+	if !ok {
+		return
+	}
+	// Same reasoning as HandleAck: apply the lazy timeout before trusting
+	// rec.Status, so a result that arrives after the deadline but before
+	// any read cannot override a timeout that should already apply (I3).
+	h.applyTimeout(rec)
+	if rec.Status != StatusSent && rec.Status != StatusAcked {
 		return
 	}
 	now := h.now()
@@ -306,17 +353,72 @@ func (h *Hub) snapshot(rec *CommandRecord) CommandRecord {
 	return c
 }
 
+// RecordEvent appends ev to its client's ring, gating the payload it
+// actually keeps (I1): anyone holding the fleet API key can open a session
+// per hwid and send events under any name, so without a cap this is
+// 50 x 64 KiB of raw payload per client id, retained for up to
+// recordRetention. Two independent limits apply, in order:
+//
+//  1. the payload is kept only when ev.Name is one of the connecting
+//     session's accepted capabilities (welcome.accepted_capabilities,
+//     tracked in h.sessions since Attach) - an event whose name the
+//     session never declared is recorded name-only, no payload, same as an
+//     unknown name;
+//  2. even an accepted payload is dropped (Truncated: true) past
+//     eventPayloadCapBytes.
+//
+// The session lookup uses ev.ClientID under the same lock RecordEvent
+// already takes, rather than a capability list threaded in from the
+// caller: h.sessions is the one place that already holds "what this
+// connection is allowed to talk about" (Issue and Notify read it for the
+// same reason), so this reuses it instead of duplicating it.
 func (h *Hub) RecordEvent(ev EventRecord) {
 	if h == nil {
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if s, ok := h.sessions[ev.ClientID]; !ok || !s.caps[ev.Name] {
+		ev.Payload = nil
+	} else if len(ev.Payload) > eventPayloadCapBytes {
+		ev.Payload = nil
+		ev.Truncated = true
+	}
+
+	_, existed := h.events[ev.ClientID]
 	ring := append(h.events[ev.ClientID], ev)
 	if len(ring) > eventRingSize {
 		ring = ring[len(ring)-eventRingSize:]
 	}
 	h.events[ev.ClientID] = ring
+
+	if !existed && len(h.events) > maxEventClients {
+		h.evictLeastRecentEventsClientLocked()
+	}
+}
+
+// evictLeastRecentEventsClientLocked drops the tracked client id whose
+// newest event is the oldest across every client in h.events - i.e. the
+// one that has been quietest the longest - to keep h.events within
+// maxEventClients when the fleet mints more distinct client ids than that.
+// Caller holds h.mu.
+func (h *Hub) evictLeastRecentEventsClientLocked() {
+	var oldestID int64
+	var oldestAt time.Time
+	found := false
+	for id, ring := range h.events {
+		if len(ring) == 0 {
+			continue
+		}
+		newest := ring[len(ring)-1].ReceivedAt
+		if !found || newest.Before(oldestAt) {
+			oldestID, oldestAt, found = id, newest, true
+		}
+	}
+	if found {
+		delete(h.events, oldestID)
+	}
 }
 
 // Events returns the client's recent events, oldest first.
@@ -370,7 +472,10 @@ func (h *Hub) Notify(ctx context.Context, clientIDs []int64, topic string, paylo
 	for _, send := range targets {
 		go func(send Sender) {
 			defer wg.Done()
-			sctx, cancel := context.WithTimeout(ctx, sendTimeout)
+			// Same reasoning as Issue (M3): detach from ctx's cancellation
+			// so an admin's aborted/timed-out notify request cannot drop a
+			// target's socket via a cancelled write context.
+			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sendTimeout)
 			defer cancel()
 			if send(sctx, frame) == nil {
 				sent.Add(1)

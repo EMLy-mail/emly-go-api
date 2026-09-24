@@ -345,6 +345,173 @@ func TestHubNotifyConfigPublishedNilHubIsNoOp(t *testing.T) {
 	nilHub.NotifyConfigPublished(1) // must not panic
 }
 
+// TestHubLateAckAfterTimeoutStaysTimeout pins I3: with no intervening read
+// (no h.Command call) between the ack deadline passing and the late ack
+// arriving, the outcome must still be timeout, not whatever the late ack
+// says - HandleAck must apply the lazy timeout itself rather than relying
+// on some earlier read to have already materialized it.
+func TestHubLateAckAfterTimeoutStaysTimeout(t *testing.T) {
+	h, clk := newHub()
+	h.Attach(7, clientproto.ProtocolV2, allCaps, (&capture{}).send)
+	rec, _ := h.Issue(context.Background(), 7, clientproto.CmdMachineInfo, nil, time.Hour, "")
+	clk.add(ackGrace + time.Second)
+	h.HandleAck(7, rec.ID, clientproto.Ack{Accepted: true})
+	if got, _ := h.Command(rec.ID); got.Status != StatusTimeout {
+		t.Fatalf("late ack overrode timeout: %+v", got)
+	}
+}
+
+// TestHubLateResultAfterTimeoutStaysTimeout is the HandleResult half of I3:
+// a result that arrives after the post-ack result timeout, with nothing
+// reading the record in between, must not flip an already-due timeout to
+// done/failed.
+func TestHubLateResultAfterTimeoutStaysTimeout(t *testing.T) {
+	h, clk := newHub()
+	h.Attach(7, clientproto.ProtocolV2, allCaps, (&capture{}).send)
+	rec, _ := h.Issue(context.Background(), 7, clientproto.CmdMachineInfo, nil, time.Hour, "")
+	h.HandleAck(7, rec.ID, clientproto.Ack{Accepted: true})
+	clk.add(31 * time.Second) // machine.info's result timeout is 30s from the ack
+	h.HandleResult(7, rec.ID, clientproto.Result{Status: clientproto.ResultOK})
+	if got, _ := h.Command(rec.ID); got.Status != StatusTimeout {
+		t.Fatalf("late result overrode timeout: %+v", got)
+	}
+}
+
+// TestHubIssueSendContextSurvivesCallerCancellation pins M3: cancelling the
+// context Issue was called with (an admin HTTP request's context aborting
+// or timing out) must not cancel the context handed to the Sender, or
+// coder/websocket.Conn.Write would close the whole client connection out
+// from under an otherwise-healthy socket.
+func TestHubIssueSendContextSurvivesCallerCancellation(t *testing.T) {
+	h, _ := newHub()
+	ctx, cancel := context.WithCancel(context.Background())
+	var sctxDone bool
+	done := make(chan struct{})
+	send := func(sctx context.Context, _ []byte) error {
+		cancel() // cancel the caller's context from inside the send itself
+		select {
+		case <-sctx.Done():
+			sctxDone = true
+		case <-time.After(100 * time.Millisecond):
+		}
+		close(done)
+		return nil
+	}
+	h.Attach(7, clientproto.ProtocolV2, allCaps, send)
+	if _, err := h.Issue(ctx, 7, clientproto.CmdMachineInfo, nil, time.Minute, ""); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if sctxDone {
+		t.Fatal("send's context was cancelled by the caller's context cancellation")
+	}
+}
+
+// TestHubNotifySendContextSurvivesCallerCancellation is the Notify half of
+// M3, same reasoning as TestHubIssueSendContextSurvivesCallerCancellation.
+func TestHubNotifySendContextSurvivesCallerCancellation(t *testing.T) {
+	h, _ := newHub()
+	ctx, cancel := context.WithCancel(context.Background())
+	var sctxDone bool
+	done := make(chan struct{})
+	send := func(sctx context.Context, _ []byte) error {
+		cancel()
+		select {
+		case <-sctx.Done():
+			sctxDone = true
+		case <-time.After(100 * time.Millisecond):
+		}
+		close(done)
+		return nil
+	}
+	h.Attach(7, clientproto.ProtocolV2, allCaps, send)
+	h.Notify(ctx, nil, clientproto.TopicConfigPublished, clientproto.ConfigPublished{Revision: 1})
+	<-done
+	if sctxDone {
+		t.Fatal("send's context was cancelled by the caller's context cancellation")
+	}
+}
+
+// TestHubRecordEventPayloadOnlyForAcceptedCapability pins I1(b): an event
+// whose name the session did not declare among its accepted capabilities is
+// recorded name-only - no payload, and not marked Truncated (that field is
+// reserved for the size cap, a different rule).
+func TestHubRecordEventPayloadOnlyForAcceptedCapability(t *testing.T) {
+	h, _ := newHub()
+	h.Attach(7, clientproto.ProtocolV2, []string{clientproto.CmdMachineInfo}, (&capture{}).send)
+
+	h.RecordEvent(EventRecord{ClientID: 7, Name: clientproto.EvtServiceStarted, Payload: json.RawMessage(`{"reason":"boot"}`)})
+	got := h.Events(7)
+	if len(got) != 1 || got[0].Payload != nil || got[0].Truncated {
+		t.Fatalf("undeclared capability: got %+v", got)
+	}
+
+	h2, _ := newHub()
+	h2.Attach(8, clientproto.ProtocolV2, allCaps, (&capture{}).send)
+	h2.RecordEvent(EventRecord{ClientID: 8, Name: clientproto.EvtServiceStarted, Payload: json.RawMessage(`{"reason":"boot"}`)})
+	got2 := h2.Events(8)
+	if len(got2) != 1 || string(got2[0].Payload) != `{"reason":"boot"}` {
+		t.Fatalf("declared capability: got %+v", got2)
+	}
+}
+
+// TestHubRecordEventCapsPayloadSize pins I1(a): a payload over
+// eventPayloadCapBytes is dropped, not truncated to it, and the record is
+// marked Truncated so a reader can tell "large" apart from "no payload
+// sent".
+func TestHubRecordEventCapsPayloadSize(t *testing.T) {
+	h, _ := newHub()
+	h.Attach(7, clientproto.ProtocolV2, allCaps, (&capture{}).send)
+
+	big := make(json.RawMessage, eventPayloadCapBytes+1)
+	for i := range big {
+		big[i] = 'a'
+	}
+	h.RecordEvent(EventRecord{ClientID: 7, Name: clientproto.EvtServiceStarted, Payload: big})
+	got := h.Events(7)
+	if len(got) != 1 || got[0].Payload != nil || !got[0].Truncated {
+		t.Fatalf("oversized payload: got payload_len=%d truncated=%v", len(got[0].Payload), got[0].Truncated)
+	}
+
+	small := json.RawMessage(`{"reason":"boot"}`)
+	h.RecordEvent(EventRecord{ClientID: 7, Name: clientproto.EvtServiceStarted, Payload: small})
+	got = h.Events(7)
+	last := got[len(got)-1]
+	if last.Truncated || string(last.Payload) != string(small) {
+		t.Fatalf("payload at the cap: got %+v", last)
+	}
+}
+
+// TestHubRecordEventCapsTotalClients pins I1(c): once h.events already
+// tracks maxEventClients distinct client ids, RecordEvent for a new id
+// evicts the least recently active one (the one whose newest event is
+// oldest) rather than growing without bound.
+func TestHubRecordEventCapsTotalClients(t *testing.T) {
+	h, clk := newHub()
+	for id := int64(1); id <= maxEventClients; id++ {
+		h.RecordEvent(EventRecord{ClientID: id, Name: clientproto.EvtMachineInfo, ReceivedAt: clk.now()})
+		clk.add(time.Millisecond)
+	}
+	if got := len(h.Events(1)); got != 1 {
+		t.Fatalf("client 1 events = %d before eviction, want 1", got)
+	}
+
+	// One more distinct client id past the cap: client 1 (the oldest -
+	// its only event has the earliest ReceivedAt of all) must be evicted.
+	h.RecordEvent(EventRecord{ClientID: maxEventClients + 1, Name: clientproto.EvtMachineInfo, ReceivedAt: clk.now()})
+
+	if got := len(h.Events(1)); got != 0 {
+		t.Fatalf("client 1 (oldest) survived eviction: %d events", got)
+	}
+	if got := len(h.Events(maxEventClients + 1)); got != 1 {
+		t.Fatalf("newest client missing after eviction: %d events", got)
+	}
+	// Total tracked clients stays at the cap.
+	if got := len(h.events); got != maxEventClients {
+		t.Fatalf("len(h.events) = %d, want %d", got, maxEventClients)
+	}
+}
+
 func TestHubPruneDropsOldFinishedCommands(t *testing.T) {
 	h, clk := newHub()
 	h.Attach(7, clientproto.ProtocolV2, allCaps, (&capture{}).send)
