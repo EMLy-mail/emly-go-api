@@ -335,7 +335,10 @@ func TestParse_ClientWSCommandsAccepted(t *testing.T) {
 	if len(problems) != 0 {
 		t.Fatalf("problems = %v", problems)
 	}
-	if got := doc.ClientWS.Commands; len(got) != 2 || got[1] != "machine.reboot" {
+	if doc.ClientWS.Commands == nil {
+		t.Fatalf("Commands = nil, want a non-nil pointer")
+	}
+	if got := *doc.ClientWS.Commands; len(got) != 2 || got[1] != "machine.reboot" {
 		t.Fatalf("Commands = %v", got)
 	}
 }
@@ -367,6 +370,29 @@ func TestCanonical_ClientWSWithoutCommandsUnchanged(t *testing.T) {
 	b, _ := Canonical(doc)
 	if !strings.Contains(string(b), `"clientWs":{"enabled":true}`) {
 		t.Fatalf("canonical = %s", b)
+	}
+}
+
+// An explicit `"commands": []` means "no commands at all" and must survive
+// canonicalisation as `"commands":[]`, not be dropped like an absent field -
+// that would silently turn "no commands" into "client default" for every
+// mirror that re-canonicalises the document (I2).
+func TestParse_ClientWSEmptyCommandsListSurvivesCanonical(t *testing.T) {
+	doc, problems := Parse([]byte(`{
+		"schemaVersion": 1,
+		"servers": {"api": "https://api.example.test"},
+		"defaultServer": "api",
+		"clientWs": {"enabled": true, "commands": []}
+	}`))
+	if len(problems) != 0 {
+		t.Fatalf("problems = %v", problems)
+	}
+	if doc.ClientWS.Commands == nil || len(*doc.ClientWS.Commands) != 0 {
+		t.Fatalf("Commands = %v, want a non-nil empty slice", doc.ClientWS.Commands)
+	}
+	b, _ := Canonical(doc)
+	if !strings.Contains(string(b), `"commands":[]`) {
+		t.Fatalf("canonical = %s, want it to contain \"commands\":[]", b)
 	}
 }
 

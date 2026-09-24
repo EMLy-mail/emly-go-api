@@ -280,7 +280,10 @@ func validateClientWS(c *ClientWS) []Problem {
 		return nil
 	}
 	var problems []Problem
-	for i, name := range c.Commands {
+	if c.Commands == nil {
+		return problems
+	}
+	for i, name := range *c.Commands {
 		if !slices.Contains(KnownClientWSCommands, name) {
 			problems = append(problems, problemf(fmt.Sprintf("/clientWs/commands/%d", i), "unknown command %q", name))
 		}

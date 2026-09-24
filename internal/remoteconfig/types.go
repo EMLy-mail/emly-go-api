@@ -175,13 +175,19 @@ type ToggleOnly struct {
 
 // ClientWS is the clientWs section: the presence channel's kill switch and,
 // from protocol v2, the allowlist of commands the client will execute
-// (CLIENT_WS_PROTOCOL.md §12.3). Commands is omitempty for the same ETag
-// reason ClientWS itself is: a document that never sets it must canonicalize
-// byte-identically to one written before the field existed. Absent means
-// the client's own default (read-only commands only), never "all".
+// (CLIENT_WS_PROTOCOL.md §12.3). Commands is a pointer, unlike every other
+// []string field on Document, so an explicit `"commands": []` ("no commands
+// at all") can be told apart from the field being absent ("client default,
+// read-only commands only"): a plain []string with `omitempty` would drop
+// an empty slice on canonicalisation exactly like a nil one, silently
+// turning "no commands" into "client default". `omitempty` on the pointer
+// itself is for the same ETag reason ClientWS itself has it: nil (absent)
+// canonicalizes byte-identically to a document written before this field
+// existed; a non-nil pointer - even to an empty slice - always marshals
+// (`"commands":[]` for empty, `"commands":["…"]` otherwise).
 type ClientWS struct {
-	Enabled  bool     `json:"enabled"`
-	Commands []string `json:"commands,omitempty"`
+	Enabled  bool      `json:"enabled"`
+	Commands *[]string `json:"commands,omitempty"`
 }
 
 // KnownClientWSCommands is every value clientWs.commands may contain. It
