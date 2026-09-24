@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,9 +64,16 @@ func TestIssueCommandErrors(t *testing.T) {
 		{"/42/commands", `{`, 400},
 		{"/42/commands", `{"name":"machine.reboot","args":{"delay_seconds":9999}}`, 400},
 		{"/42/commands", `{"name":"machine.info","ttl_seconds":90000}`, 400},
+		// M1: a huge ttl_seconds overflows time.Duration(ttl_seconds)*time.Second
+		// (int64) before any post-conversion range check would catch it; the
+		// fix bounds-checks the raw seconds value first.
+		{"/42/commands", `{"name":"machine.info","ttl_seconds":9000000000000000}`, 400},
 		{"/42/commands", `{"name":"machine.format_disk"}`, 422},
 		{"/42/commands", `{"name":"machine.info"}`, 409},
 		{"/1/commands", `{"name":"machine.info"}`, 422},
+		// M2: issued_by is capped at 64 chars and must be printable.
+		{"/42/commands", `{"name":"machine.info","issued_by":"` + strings.Repeat("a", 65) + `"}`, 400},
+		{"/42/commands", `{"name":"machine.info","issued_by":"admin\u0000f.fois"}`, 400},
 	}
 	for _, c := range cases {
 		if rec := do(t, r, "POST", c.path, c.body); rec.Code != c.want {

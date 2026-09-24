@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 
@@ -16,8 +17,10 @@ import (
 
 const (
 	defaultCommandTTL = 600 * time.Second
-	maxCommandTTL     = 86400 * time.Second
+	minTTLSeconds     = 1
+	maxTTLSeconds     = 86400
 	minReleaseJitter  = 60
+	maxIssuedByLen    = 64
 )
 
 // mountAdmin mounts the admin half of the client channel on r (already
@@ -33,6 +36,22 @@ func mountAdmin(r chi.Router, hub *clienthub.Hub) {
 func clientIDParam(r *http.Request) (int64, bool) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "client_id"), 10, 64)
 	return id, err == nil && id > 0
+}
+
+// validIssuedBy rejects an issued_by that could corrupt the local log/Event
+// Log line it ends up in (a control or otherwise non-printable rune) or
+// that is implausibly long for "who launched this command" (M2). Empty is
+// valid: issued_by is optional.
+func validIssuedBy(s string) bool {
+	if len(s) > maxIssuedByLen {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
 }
 
 type issueRequest struct {
@@ -57,10 +76,20 @@ func IssueCommand(hub *clienthub.Hub) http.HandlerFunc {
 		}
 		ttl := defaultCommandTTL
 		if req.TTLSeconds != 0 {
+			// Bounds-check the raw int *before* converting to a
+			// time.Duration (M1): req.TTLSeconds * time.Second overflows
+			// int64 well within what still decodes as a plain JSON number
+			// (e.g. 9e15), and an overflowed Duration can wrap around to a
+			// value that passes a post-conversion range check by
+			// coincidence instead of being rejected.
+			if req.TTLSeconds < minTTLSeconds || req.TTLSeconds > maxTTLSeconds {
+				response.Error(w, http.StatusBadRequest, "ttl_seconds must be between 1 and 86400")
+				return
+			}
 			ttl = time.Duration(req.TTLSeconds) * time.Second
 		}
-		if ttl <= 0 || ttl > maxCommandTTL {
-			response.Error(w, http.StatusBadRequest, "ttl_seconds must be between 1 and 86400")
+		if !validIssuedBy(req.IssuedBy) {
+			response.Error(w, http.StatusBadRequest, "issued_by must be at most 64 characters with no control characters")
 			return
 		}
 		if e := clientproto.ValidateArgs(req.Name, req.Args); e != nil {
