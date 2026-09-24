@@ -53,7 +53,7 @@ WebSocket persistente `GET /v2/client/ws`.
 | Caso d'uso | Messaggio | Direzione | Sorgente lato updater |
 |---|---|---|---|
 | Riavvio servizio | `command` `service.restart` → `ack`, poi `event` `service.started` | S→C, C→S | `svc` manager, `state.json` |
-| Riavvio PC | `command` `machine.reboot` → `ack`, poi `event` `service.started` (`reason: "boot"`) | S→C, C→S | `ExitWindowsEx`/`InitiateSystemShutdownEx`, `notify` (avviso WTS) |
+| Riavvio PC | `command` `machine.reboot` → `ack`, poi `event` `service.started` (`reason: "boot"`) | S→C, C→S | `internal/power` (`InitiateSystemShutdownEx`; conto alla rovescia nativo di Windows, nessun avviso dell'updater) |
 | Lista aggiornamenti app (winget) | `command` `apps.list_upgradable` → `ack` + `result` | S→C, C→S | `internal/winget` (branch `feat/winget-upgradable`) |
 | Info cambio sessione | `event` `session.changed` | C→S | `watchSessions` (branch `feat/session-change-watcher`) |
 | EMLy manifest check | `command` `emly.manifest.check` → `result`; esito spontaneo in `event` `update.available` | S→C, C→S | `resolveTarget` |
@@ -1059,7 +1059,8 @@ C→S {"type":"result","id":"01J…Z","reply_to":"01J…X","data":{"status":"ok"
 ```
 S→C {"type":"command","id":"01J…R","data":{"name":"machine.reboot","args":{"delay_seconds":300,"when_user_active":"warn"},"expires_at":"…"}}
 C→S {"type":"ack","id":"01J…S","reply_to":"01J…R","data":{"accepted":true}}
-      (client: id in state.json, avviso WTS 5 minuti, close 1001, reboot)
+      (client: id in state.json, InitiateSystemShutdownEx con 300s di preavviso
+       (conto alla rovescia nativo di Windows, nessun avviso dell'updater), reboot)
       … la macchina riparte, il servizio si riconnette …
 S→C {"type":"hello","data":{"protocol":2, …}}
 C→S {"type":"identity", …}
