@@ -539,7 +539,16 @@ Sequenza lato client:
    `reason: "command"` e l'`id` in `completed_commands`.
 
 Rifiuti possibili: `busy` se un'installazione (EMLy o self-update) è in corso
-— riavviare a metà setup lascerebbe un'installazione a metà.
+— riavviare a metà setup lascerebbe un'installazione a metà — oppure se un
+`service.restart`/`machine.reboot` è già stato accettato e non si è ancora
+concluso: finché è pending, il client rifiuta ogni altro comando distruttivo
+con `busy` e non avvia nessuna installazione (né EMLy né self-update), così
+un riavvio in corso non viene interrotto a metà da un secondo comando o da
+un ciclo che parte nel frattempo. Lo stato "pending" scade da solo se il
+riavvio/servizio non torna entro un margine oltre il tempo atteso (per non
+restare bloccati per sempre su un `shutdown /a` o un processo di restart
+morto silenziosamente): la macchina torna quindi a rifiutare `busy` solo
+finché serve, non oltre.
 
 ### 7.6 `machine.reboot`
 
@@ -550,22 +559,26 @@ Rifiuti possibili: `busy` se un'installazione (EMLy o self-update) è in corso
 | Arg | Tipo | Default | Limiti | Note |
 |---|---|---|---|---|
 | `delay_seconds` | int | `300` | `0`–`3600` | Attesa prima del riavvio. |
-| `when_user_active` | string | `warn` | `warn` \| `skip` | `warn`: mostra l'avviso WTS nella sessione attiva con il conto alla rovescia di `delay_seconds` (stessa via di `criticalWarningEnabled`), poi riavvia. `skip`: se c'è un utente `active-console` o `active-rdp` rifiuta con `user_active` e non fa nulla. |
+| `when_user_active` | string | `warn` | `warn` \| `skip` | `warn`: pianifica lo spegnimento con `InitiateSystemShutdownEx` e lascia che sia Windows stesso a mostrare il proprio conto alla rovescia (nessun dialogo dell'updater, e quindi nessuna localizzazione lato client), poi riavvia. `skip`: se c'è un utente `active-console` o `active-rdp` rifiuta con `user_active` e non fa nulla. |
 
 Con `delay_seconds < 60` e un utente attivo, `warn` alza comunque l'attesa a
 60s: nessuno deve perdere lavoro senza almeno un minuto di preavviso. Non
-esiste un messaggio libero per l'utente (regola 2): il testo dell'avviso è
-localizzato lato client, come `notify.SourcesUnreachableMessage`.
+c'è alcun avviso WTS costruito dall'updater (regola 2 resta rispettata
+perché non c'è testo libero da mostrare): è il conto alla rovescia nativo di
+Windows a farsi carico dell'avviso, e le applicazioni aperte vengono chiuse
+senza salvare allo scadere del tempo, esattamente come qualunque altro
+riavvio pianificato di Windows.
 
-Sequenza: `ack`, `id` in `state.json`, avviso, `InitiateSystemShutdownEx`
-con reason code "planned / application maintenance". Alla ripartenza del
-servizio, `event` `service.started` con `reason: "boot"` e l'`id` in
-`completed_commands`. Un `ack` seguito da nessun `service.started` entro il
-timeout è un riavvio non avvenuto (o una macchina che non è tornata): il
-server lo segna `timeout`, non `failed`.
+Sequenza: `ack`, `id` in `state.json`, `InitiateSystemShutdownEx` con reason
+code "planned / application maintenance" (il conto alla rovescia lo mostra
+Windows). Alla ripartenza del servizio, `event` `service.started` con
+`reason: "boot"` e l'`id` in `completed_commands`. Un `ack` seguito da
+nessun `service.started` entro il timeout è un riavvio non avvenuto (o una
+macchina che non è tornata): il server lo segna `timeout`, non `failed`.
 
-Rifiuti possibili: `busy` (installazione in corso), `user_active` (con
-`skip`), `disabled_by_policy` (§12.3).
+Rifiuti possibili: `busy` (installazione in corso, oppure un
+`service.restart`/`machine.reboot` già pending — vedi §7.5), `user_active`
+(con `skip`), `disabled_by_policy` (§12.3).
 
 ## 8. Catalogo eventi (client → server)
 
@@ -1100,16 +1113,23 @@ C→S {"type":"event","data":{"name":"session.changed","payload":{"events":["rem
 
 **Updater (`emly-updater`)**
 
-- [ ] `internal/wsclient`: dispatch per `type` + `name`, anello di 64 `id`,
-      `ack` entro 5s, `welcome` opzionale con fallback v1.
-- [ ] `watchSessions`: sostituire il `TODO(presence WS)` con `session.changed`.
-- [ ] `internal/winget` dietro `apps.list_upgradable` (merge di
+- [x] `internal/wsclient`: dispatch per `type` + `name`, anello di 64 `id`
+      (`commandRing`, `internal/service/clientcmd.go`), `ack` entro 5s,
+      `welcome` opzionale con fallback v1.
+- [x] `watchSessions`: sostituito il `TODO(presence WS)` con `session.changed`
+      (`internal/service/sessionwatch.go`).
+- [x] `internal/winget` dietro `apps.list_upgradable` (merge di
       `feat/winget-upgradable`).
-- [ ] `emly.manifest.check` / `updater.manifest.check` come check a secco,
-      mai in parallelo a `Cycle`.
-- [ ] `release.published` / `config.published` come trigger con jitter sulla
-      `select` di `RunLoop`.
-- [ ] `state.json`: `pendingCommands` per `service.restart`/`machine.reboot`.
-- [ ] Vincolo `wss://` per i comandi distruttivi (§12.2).
-- [ ] `AGENTS.md`: convenzione "i `SessionChangeKind` sono contratto sul filo",
-      nuovi event ID per comandi ricevuti/eseguiti/rifiutati.
+- [x] `emly.manifest.check` / `updater.manifest.check` come check a secco,
+      mai in parallelo a `Cycle` (`resolveTargetWith`/`resolveUpdaterManifestWith`
+      con `notePreferred=false`, `internal/service/clientcmd.go`).
+- [x] `release.published` / `config.published` come trigger con jitter sulla
+      `select` di `RunLoop` (`internal/service/clientnotify.go`, canale
+      `u.wake` a uno slot).
+- [x] `state.json`: `pendingCommands` per `service.restart`/`machine.reboot`
+      (`internal/state/state.go`), scritto prima di agire e ripulito da
+      `service.started`.
+- [x] Vincolo `wss://` per i comandi distruttivi (§12.2) —
+      `commandSession.Secure()` in `admitCommand`, `internal/service/clientcmd.go`.
+- [x] `AGENTS.md`: convenzione "i `SessionChangeKind` sono contratto sul filo",
+      nuovi event ID per comandi ricevuti/eseguiti/rifiutati (924/925/926).
