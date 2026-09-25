@@ -170,5 +170,13 @@
         { "type": "table_not_exists", "table": "updater_event_hourly" }
       ]
     }
+    ,{
+      "id": "21_user_oidc",
+      "sql_file": "21_user_oidc.sql",
+      "description": "Add the owner role plus auth_provider/external_id columns to user so accounts created by OIDC single sign-on can be told apart from local ones.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "user", "column": "auth_provider" }
+      ]
+    }
   ]
 }

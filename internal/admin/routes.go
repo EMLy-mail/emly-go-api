@@ -5,11 +5,17 @@ import (
 
 	apimw "emly-api-go/internal/middleware"
 
+	"emly-api-go/internal/config"
+	"emly-api-go/internal/oidc"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 )
 
 func RegisterV2(r chi.Router, db *sqlx.DB) {
+	oidcCfg := config.Load().OIDC
+	verifier := oidc.NewVerifier(oidcCfg)
+
 	r.Route("/admin", func(r chi.Router) {
 		r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
@@ -18,6 +24,10 @@ func RegisterV2(r chi.Router, db *sqlx.DB) {
 			r.Post("/login", LoginUser(db))
 			r.Get("/validate", ValidateSession(db))
 			r.Post("/logout", LogoutSession(db))
+
+			// SSO exchange: called by the dashboard server with the ID token it
+			// got from the identity provider, so it is admin-key gated.
+			r.With(apimw.AdminKeyAuth(db)).Post("/oidc", LoginOIDC(db, verifier, oidcCfg))
 		})
 
 		// User management — protected via Admin Key

@@ -98,6 +98,8 @@ type authUser struct {
 	Displayname string          `json:"displayname"`
 	Role        models.UserRole `json:"role"`
 	Enabled     bool            `json:"enabled"`
+	// AuthProvider is "local" (password) or "oidc" (single sign-on).
+	AuthProvider string `json:"auth_provider"`
 }
 
 
@@ -122,7 +124,7 @@ func LoginUser(db *sqlx.DB) http.HandlerFunc {
 			PasswordHash string `db:"password_hash"`
 		}
 		err := db.GetContext(r.Context(), &row,
-			"SELECT id, username, displayname, password_hash, role, enabled FROM `user` WHERE username = ? LIMIT 1",
+			"SELECT id, username, displayname, password_hash, role, enabled, auth_provider FROM `user` WHERE username = ? AND auth_provider = 'local' LIMIT 1",
 			body.Username,
 		)
 		if err != nil {
@@ -167,6 +169,7 @@ func LoginUser(db *sqlx.DB) http.HandlerFunc {
 				Displayname: row.Displayname,
 				Role:        row.Role,
 				Enabled:     row.Enabled,
+				AuthProvider: row.AuthProvider,
 			},
 		})
 	}
@@ -188,10 +191,11 @@ func ValidateSession(db *sqlx.DB) http.HandlerFunc {
 			Displayname string          `db:"displayname"`
 			Role        models.UserRole `db:"role"`
 			Enabled     bool            `db:"enabled"`
+			AuthProvider string         `db:"auth_provider"`
 			ExpiresAt   time.Time       `db:"expires_at"`
 		}
 		err := db.GetContext(r.Context(), &row,
-			`SELECT u.id, u.username, u.displayname, u.role, u.enabled, s.expires_at
+			`SELECT u.id, u.username, u.displayname, u.role, u.enabled, u.auth_provider, s.expires_at
 			 FROM session s
 			 JOIN user  u ON u.id = s.user_id
 			 WHERE s.id = ? LIMIT 1`,
@@ -222,6 +226,7 @@ func ValidateSession(db *sqlx.DB) http.HandlerFunc {
 				Displayname: row.Displayname,
 				Role:        row.Role,
 				Enabled:     row.Enabled,
+				AuthProvider: row.AuthProvider,
 			},
 		})
 	}

@@ -48,6 +48,27 @@ type LogFileConfig struct {
 	RetentionDays int
 }
 
+// OIDCConfig is the single sign-on (Keycloak or any OIDC provider) setup. The
+// dashboard runs the browser flow and hands the resulting ID token to
+// POST /v2/admin/auth/oidc; the API only verifies it, so it needs no client
+// secret. Empty Issuer or ClientID leaves SSO off.
+type OIDCConfig struct {
+	Issuer   string
+	ClientID string
+	// GroupsClaim is the ID-token claim listing the user's groups.
+	GroupsClaim string
+	// One list per role; the highest role with a matching group wins, and a
+	// user matching none is refused.
+	OwnerGroups []string
+	AdminGroups []string
+	UserGroups  []string
+	// SessionDuration is how long an SSO session lives, after which the user
+	// signs in again and their groups are re-read.
+	SessionDuration time.Duration
+}
+
+func (o OIDCConfig) Enabled() bool { return o.Issuer != "" && o.ClientID != "" }
+
 type Config struct {
 	Port                    string
 	DSN                     string
@@ -75,6 +96,7 @@ type Config struct {
 	S3APIFile               S3BucketConfig
 	S3Updates               S3BucketConfig
 	Otel                    OtelConfig
+	OIDC                    OIDCConfig
 }
 
 var (
@@ -151,6 +173,15 @@ func load() *Config {
 		APIKey:          apiKey,
 		AdminKey:        adminKey,
 		DashboardKey:    os.Getenv("DASHBOARD_KEY"),
+		OIDC: OIDCConfig{
+			Issuer:          strings.TrimRight(strings.TrimSpace(os.Getenv("OIDC_ISSUER")), "/"),
+			ClientID:        strings.TrimSpace(os.Getenv("OIDC_CLIENT_ID")),
+			GroupsClaim:     envString("OIDC_GROUPS_CLAIM", "groups"),
+			OwnerGroups:     envList("OIDC_OWNER_GROUPS"),
+			AdminGroups:     envList("OIDC_ADMIN_GROUPS"),
+			UserGroups:      envList("OIDC_USER_GROUPS"),
+			SessionDuration: envDuration("OIDC_SESSION_DURATION", 7*24*time.Hour),
+		},
 		LogLevel:        strings.ToLower(strings.TrimSpace(envString("LOG_LEVEL", "info"))),
 		LogFile: LogFileConfig{
 			Enabled:       strings.ToLower(strings.TrimSpace(envString("LOG_FILE_ENABLED", "true"))) == "true",
@@ -222,6 +253,17 @@ func load() *Config {
 			AuthBanDur:     envDuration("RL_AUTH_BAN_DUR", 5*time.Minute),
 		},
 	}
+}
+
+// envList reads a comma-separated env var, dropping blanks.
+func envList(key string) []string {
+	var out []string
+	for _, part := range strings.Split(os.Getenv(key), ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func envString(key, fallback string) string {

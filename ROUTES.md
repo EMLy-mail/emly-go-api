@@ -273,6 +273,7 @@ esiste in v2.
 | `POST`   | `/auth/login`                 | `—`       |
 | `GET`    | `/auth/validate`              | `SESSION` |
 | `POST`   | `/auth/logout`                | `SESSION` |
+| `POST`   | `/auth/oidc`                  | `ADMIN`   |
 | `GET`    | `/users/`                     | `ADMIN`   |
 | `POST`   | `/users/`                     | `ADMIN`   |
 | `GET`    | `/users/{id}`                 | `ADMIN`   |
