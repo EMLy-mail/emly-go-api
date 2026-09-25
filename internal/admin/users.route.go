@@ -18,7 +18,7 @@ func ListUsers(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var users []models.User
 		if err := db.SelectContext(r.Context(), &users,
-			"SELECT id, username, displayname, role, enabled, created_at FROM `user` ORDER BY created_at ASC",
+			"SELECT id, username, displayname, role, enabled, auth_provider, created_at FROM `user` ORDER BY created_at ASC",
 		); err != nil {
 			response.Error(w, http.StatusInternalServerError, err.Error())
 			return
@@ -82,7 +82,7 @@ func CreateUser(db *sqlx.DB) http.HandlerFunc {
 
 		var user models.User
 		if err := db.GetContext(r.Context(), &user,
-			"SELECT id, username, displayname, role, enabled, created_at FROM `user` WHERE id = ?", id,
+			"SELECT id, username, displayname, role, enabled, auth_provider, created_at FROM `user` WHERE id = ?", id,
 		); err != nil {
 			response.Error(w, http.StatusInternalServerError, err.Error())
 			return
@@ -102,7 +102,7 @@ func GetUserByID(db *sqlx.DB) http.HandlerFunc {
 
 		var user models.User
 		err := db.GetContext(r.Context(), &user,
-			"SELECT id, username, displayname, role, enabled, created_at FROM `user` WHERE id = ? LIMIT 1", id,
+			"SELECT id, username, displayname, role, enabled, auth_provider, created_at FROM `user` WHERE id = ? LIMIT 1", id,
 		)
 		if errors.Is(err, sql.ErrNoRows) {
 			response.Error(w, http.StatusNotFound, "user not found")
@@ -214,8 +214,9 @@ func ResetPassword(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
+		// SSO accounts have no password to reset - the identity provider owns it.
 		result, err := db.ExecContext(r.Context(),
-			"UPDATE `user` SET password_hash = ? WHERE id = ?", passwordHash, id,
+			"UPDATE `user` SET password_hash = ? WHERE id = ? AND auth_provider = 'local'", passwordHash, id,
 		)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, err.Error())

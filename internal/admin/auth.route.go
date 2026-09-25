@@ -101,8 +101,9 @@ type authUser struct {
 	// Products is the user's assigned products; only ValidateSession fills
 	// it (omitted from the login response).
 	Products *[]string `json:"products,omitempty"`
+	// AuthProvider is "local" (password) or "oidc" (single sign-on).
+	AuthProvider string `json:"auth_provider"`
 }
-
 
 // LoginUser handles POST /v1/api/admin/auth/login
 func LoginUser(db *sqlx.DB) http.HandlerFunc {
@@ -125,7 +126,7 @@ func LoginUser(db *sqlx.DB) http.HandlerFunc {
 			PasswordHash string `db:"password_hash"`
 		}
 		err := db.GetContext(r.Context(), &row,
-			"SELECT id, username, displayname, password_hash, role, enabled FROM `user` WHERE username = ? LIMIT 1",
+			"SELECT id, username, displayname, password_hash, role, enabled, auth_provider FROM `user` WHERE username = ? AND auth_provider = 'local' LIMIT 1",
 			body.Username,
 		)
 		if err != nil {
@@ -165,11 +166,12 @@ func LoginUser(db *sqlx.DB) http.HandlerFunc {
 		response.OK(w, map[string]any{
 			"session_id": sessionID,
 			"user": authUser{
-				ID:          row.ID,
-				Username:    row.Username,
-				Displayname: row.Displayname,
-				Role:        row.Role,
-				Enabled:     row.Enabled,
+				ID:           row.ID,
+				Username:     row.Username,
+				Displayname:  row.Displayname,
+				Role:         row.Role,
+				Enabled:      row.Enabled,
+				AuthProvider: row.AuthProvider,
 			},
 		})
 	}
@@ -186,15 +188,16 @@ func ValidateSession(db *sqlx.DB) http.HandlerFunc {
 		}
 
 		var row struct {
-			ID          string          `db:"id"`
-			Username    string          `db:"username"`
-			Displayname string          `db:"displayname"`
-			Role        models.UserRole `db:"role"`
-			Enabled     bool            `db:"enabled"`
-			ExpiresAt   time.Time       `db:"expires_at"`
+			ID           string          `db:"id"`
+			Username     string          `db:"username"`
+			Displayname  string          `db:"displayname"`
+			Role         models.UserRole `db:"role"`
+			Enabled      bool            `db:"enabled"`
+			AuthProvider string          `db:"auth_provider"`
+			ExpiresAt    time.Time       `db:"expires_at"`
 		}
 		err := db.GetContext(r.Context(), &row,
-			`SELECT u.id, u.username, u.displayname, u.role, u.enabled, s.expires_at
+			`SELECT u.id, u.username, u.displayname, u.role, u.enabled, u.auth_provider, s.expires_at
 			 FROM session s
 			 JOIN user  u ON u.id = s.user_id
 			 WHERE s.id = ? LIMIT 1`,
@@ -230,12 +233,13 @@ func ValidateSession(db *sqlx.DB) http.HandlerFunc {
 		response.OK(w, map[string]any{
 			"success": true,
 			"user": authUser{
-				ID:          row.ID,
-				Username:    row.Username,
-				Displayname: row.Displayname,
-				Role:        row.Role,
-				Enabled:     row.Enabled,
-				Products:    &products,
+				ID:           row.ID,
+				Username:     row.Username,
+				Displayname:  row.Displayname,
+				Role:         row.Role,
+				Enabled:      row.Enabled,
+				Products:     &products,
+				AuthProvider: row.AuthProvider,
 			},
 		})
 	}
