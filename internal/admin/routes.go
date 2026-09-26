@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"log/slog"
 	"time"
 
 	apimw "emly-api-go/internal/middleware"
@@ -15,6 +16,11 @@ import (
 func RegisterV2(r chi.Router, db *sqlx.DB) {
 	oidcCfg := config.Load().OIDC
 	verifier := oidc.NewVerifier(oidcCfg)
+	if verifier.Enabled() {
+		slog.Info("sso: enabled", "issuer", oidcCfg.Issuer, "client_id", oidcCfg.ClientID)
+	} else {
+		slog.Info("sso: disabled (set OIDC_ISSUER and OIDC_CLIENT_ID to enable)")
+	}
 
 	r.Route("/admin", func(r chi.Router) {
 		r.Use(apimw.RouteLimitByIP(30, time.Minute))
