@@ -44,9 +44,15 @@ func RegisterV2(r chi.Router, db *sqlx.DB) {
 			r.Get("/", ListUsers(db))
 			r.Post("/", CreateUser(db))
 			r.Get("/{id}", GetUserByID(db))
-			r.Patch("/{id}", UpdateUser(db))
-			r.Post("/{id}/reset-password", ResetPassword(db))
-			r.Delete("/{id}", DeleteUser(db))
+
+			// Acting on an account: when made on behalf of a signed-in user, the
+			// role rules apply (see canManageUser). Bare admin-key calls are automation.
+			r.Group(func(r chi.Router) {
+				r.Use(ManageGuard(db))
+				r.Patch("/{id}", UpdateUser(db))
+				r.Post("/{id}/reset-password", ResetPassword(db))
+				r.Delete("/{id}", DeleteUser(db))
+			})
 		})
 	})
 }

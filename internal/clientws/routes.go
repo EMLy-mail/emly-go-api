@@ -4,6 +4,7 @@ import (
 	"time"
 
 	apimw "emly-api-go/internal/middleware"
+	"emly-api-go/internal/session"
 
 	"emly-api-go/internal/clienthub"
 	"emly-api-go/internal/presencehub"
@@ -30,6 +31,9 @@ func RegisterV2(r chi.Router, db *sqlx.DB, presence *presencehub.Hub, hub *clien
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.AdminKeyAuth(db))
 			r.Use(apimw.RouteLimitByIP(30, time.Minute))
+			// Remote control is owner-only (a beta page in the dashboard): a
+			// signed-in user who is not an owner is refused; bare admin-key calls pass.
+			r.Use(session.RequireOwner(db))
 			mountAdmin(r, hub)
 		})
 	})
