@@ -143,3 +143,46 @@ func upsertOIDCUser(r *http.Request, db *sqlx.DB, id *oidc.Identity) (authUser, 
 		Role: id.Role, Enabled: true, AuthProvider: models.AuthProviderOIDC,
 	}, 0, nil
 }
+
+// BackchannelLogoutOIDC handles POST /v2/admin/auth/oidc/backchannel-logout.
+//
+// When a user signs out at the identity provider, it tells the dashboard (which
+// forwards the signed logout token here). Every session that user has on this
+// console is dropped, so signing out of Keycloak signs them out of Aryx too.
+// Unknown subjects are a success: the user may simply never have used the
+// console, and the provider must not see an error for that.
+func BackchannelLogoutOIDC(db *sqlx.DB, verifier *oidc.Verifier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !verifier.Enabled() {
+			response.Error(w, http.StatusNotFound, "sso is not enabled")
+			return
+		}
+		var body struct {
+			LogoutToken string `json:"logout_token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.LogoutToken == "" {
+			response.Error(w, http.StatusBadRequest, "logout_token is required")
+			return
+		}
+
+		sub, err := verifier.VerifyLogoutToken(r.Context(), body.LogoutToken)
+		if err != nil {
+			slog.WarnContext(r.Context(), "oidc back-channel logout rejected", "err", err)
+			response.Error(w, http.StatusBadRequest, "invalid logout token")
+			return
+		}
+
+		res, err := db.ExecContext(r.Context(),
+			`DELETE s FROM session s JOIN `+"`user`"+` u ON u.id = s.user_id
+			 WHERE u.external_id = ? AND u.auth_provider = ?`,
+			sub, models.AuthProviderOIDC,
+		)
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		n, _ := res.RowsAffected()
+		slog.InfoContext(r.Context(), "sso back-channel logout", "sessions_removed", n)
+		response.OK(w, map[string]int64{"sessions_removed": n})
+	}
+}

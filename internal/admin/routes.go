@@ -34,6 +34,7 @@ func RegisterV2(r chi.Router, db *sqlx.DB) {
 			// SSO exchange: called by the dashboard server with the ID token it
 			// got from the identity provider, so it is admin-key gated.
 			r.With(apimw.AdminKeyAuth(db)).Post("/oidc", LoginOIDC(db, verifier, oidcCfg))
+			r.With(apimw.AdminKeyAuth(db)).Post("/oidc/backchannel-logout", BackchannelLogoutOIDC(db, verifier))
 		})
 
 		// User management — protected via Admin Key

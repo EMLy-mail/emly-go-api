@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -90,8 +91,19 @@ func (v *Verifier) Verify(ctx context.Context, rawIDToken, nonce string) (*Ident
 		return nil, ErrNonceMismatch
 	}
 
-	role, ok := RoleForGroups(v.cfg, claimStrings(claims[v.cfg.GroupsClaim]))
+	groups := claimStrings(claims[v.cfg.GroupsClaim])
+	role, ok := RoleForGroups(v.cfg, groups)
 	if !ok {
+		// Spell out what was compared: a refusal here is almost always a
+		// missing group mapper in the provider or a name that does not match.
+		slog.Warn("sso: no group grants access",
+			"subject", tok.Subject,
+			"groups_claim", v.cfg.GroupsClaim,
+			"token_groups", groups,
+			"owner_groups", v.cfg.OwnerGroups,
+			"admin_groups", v.cfg.AdminGroups,
+			"user_groups", v.cfg.UserGroups,
+		)
 		return nil, ErrNoAccess
 	}
 
@@ -146,4 +158,43 @@ func claimStrings(v any) []string {
 		return out
 	}
 	return nil
+}
+
+// backchannelLogoutEvent is the marker every OIDC back-channel logout token
+// carries in its `events` claim (OpenID Connect Back-Channel Logout 1.0 §2.4).
+const backchannelLogoutEvent = "http://schemas.openid.net/event/backchannel-logout"
+
+var ErrNotLogoutToken = errors.New("not a back-channel logout token")
+
+// VerifyLogoutToken validates a logout token sent by the provider when a user's
+// session there ends, and returns the subject to sign out. Signature, issuer,
+// audience and expiry are checked like an ID token's; on top of that the spec
+// requires the logout event, forbids a nonce (so an ID token cannot be replayed
+// as one) and needs a subject to know whose sessions to drop.
+func (v *Verifier) VerifyLogoutToken(ctx context.Context, rawToken string) (string, error) {
+	if !v.Enabled() {
+		return "", errors.New("sso is not configured")
+	}
+	iv, err := v.idTokenVerifier(ctx)
+	if err != nil {
+		return "", err
+	}
+	tok, err := iv.Verify(ctx, rawToken)
+	if err != nil {
+		return "", fmt.Errorf("invalid logout token: %w", err)
+	}
+	var claims struct {
+		Events map[string]any `json:"events"`
+		Nonce  *string        `json:"nonce"`
+	}
+	if err := tok.Claims(&claims); err != nil {
+		return "", fmt.Errorf("read claims: %w", err)
+	}
+	if _, ok := claims.Events[backchannelLogoutEvent]; !ok || claims.Nonce != nil {
+		return "", ErrNotLogoutToken
+	}
+	if tok.Subject == "" {
+		return "", errors.New("logout token has no subject")
+	}
+	return tok.Subject, nil
 }
