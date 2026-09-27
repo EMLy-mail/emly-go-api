@@ -830,6 +830,7 @@ vuoto. Popolano la tabella `updater_clients`.
 | `X-EMLy-Product`     | `product`       | Product number / SKU del produttore — su HP il `8XXXXXXX#ABZ` stampato sull'etichetta            |
 | `X-EMLy-OSVersion`   | `os_version`    | Versione di Windows in chiaro, es. `Windows 11 24H2 Professional (Build 26100.4652)`. Salvata cosi' com'e': nessuno la interpreta |
 | `X-EMLy-AppVersion`  | `emly_version`  | Versione di EMLy installata, letta dal `config.ini` di EMLy (`GUI_SEMVER`). Assente se EMLy non e' installato. La versione dell'Updater viaggia invece nello User-Agent |
+| `X-EMLy-Testing`     | —               | **Non lo manda l'Updater.** Traffico sintetico (il load test k6 in `loadtest/k6/`): la richiesta viene servita normalmente ma non scrive niente in `updater_clients`/`updater_events` e non arriva allo stream delle statistiche. Qualsiasi valore tranne `0`/`false` lo attiva. Non apre nessun buco: omettere HWID e hostname ha gia' lo stesso effetto |
 
 Quattro regole da tenere a mente:
 

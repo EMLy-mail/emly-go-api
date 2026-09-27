@@ -214,3 +214,31 @@ func TestLoggedUserFromWS(t *testing.T) {
 		t.Fatalf("unknown state kept: %+v", odd)
 	}
 }
+
+func TestIsTestTraffic(t *testing.T) {
+	for value, want := range map[string]bool{
+		"": false, "0": false, "false": false, "FALSE": false,
+		"1": true, "true": true, "k6": true,
+	} {
+		r := httptest.NewRequest("GET", "/v2/updates/manifest", nil)
+		if value != "" {
+			r.Header.Set(TestingHeader, value)
+		}
+		if got := IsTestTraffic(r); got != want {
+			t.Errorf("%s: %q = %v, want %v", TestingHeader, value, got, want)
+		}
+	}
+}
+
+// A load-test request is fully identified yet must never reach the DB: with a
+// nil *sqlx.DB any Upsert would panic, so returning cleanly proves it stopped
+// before touching it.
+func TestRecordEventSkipsTestTraffic(t *testing.T) {
+	r := httptest.NewRequest("GET", "/v2/updates/manifest", nil)
+	r.Header.Set("User-Agent", "EMLy-Updater/1.6.5 (loadtest)")
+	r.Header.Set("X-EMLy-HWID", "K6-0001")
+	r.Header.Set("X-EMLy-Hostname", "K6-PC-0001")
+	r.Header.Set(TestingHeader, "1")
+
+	RecordEvent(r.Context(), nil, r, nil, "manifest_check", ProductEMLy, "1.6.5")
+}

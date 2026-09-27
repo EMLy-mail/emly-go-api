@@ -53,6 +53,23 @@ const (
 	ProductUpdater = "updater"
 )
 
+// TestingHeader marks synthetic traffic - a k6 load test replaying the
+// updater's cycle - that must be served exactly like the real thing but never
+// recorded: no updater_clients row, no updater_events, nothing on the stats
+// stream. It grants nothing a caller could not already get by leaving out
+// X-EMLy-HWID and X-EMLy-Hostname, which are just as untracked.
+const TestingHeader = "X-EMLy-Testing"
+
+// IsTestTraffic reports whether r carries TestingHeader with any value other
+// than an explicit "0"/"false".
+func IsTestTraffic(r *http.Request) bool {
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get(TestingHeader))) {
+	case "", "0", "false":
+		return false
+	}
+	return true
+}
+
 // updaterUAPattern matches the EMLy Updater's User-Agent, e.g.
 // "EMLy-Updater/1.3.0 (f.fois@3git.eu)".
 var updaterUAPattern = regexp.MustCompile(`^EMLy-Updater/([\w.\-]+)\s*\(([^)]*)\)`)
@@ -334,6 +351,9 @@ func parseLoggedUserSession(state, disconnectedAt string) (string, time.Time) {
 // §6.1). The extra client-row fetch that publish needs only runs when
 // hub.Active() - a quiet server with no dashboard connected pays nothing.
 func RecordEvent(ctx context.Context, db *sqlx.DB, r *http.Request, hub *statshub.Hub, eventType, product, version string) {
+	if IsTestTraffic(r) {
+		return
+	}
 	id := IdentityFromRequest(r)
 	if !id.Identified() {
 		return

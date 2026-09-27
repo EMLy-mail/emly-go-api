@@ -109,6 +109,9 @@ func ifNoneMatchHits(header, etag string) bool {
 // carrying neither X-EMLy-HWID nor X-EMLy-Hostname is served but not
 // tracked, same as recordUpdaterEvent.
 func trackConfigFetch(r *http.Request, db *sqlx.DB, revision int64) {
+	if updaterclient.IsTestTraffic(r) {
+		return
+	}
 	ctx := r.Context()
 	id := updaterclient.IdentityFromRequest(r)
 	if !id.Identified() {
