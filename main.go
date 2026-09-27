@@ -285,6 +285,9 @@ func main() {
 	go bans.Run(backgroundCtx)
 	r.Use(bans.Handler)
 
+	if cfg.RateLimit.Disabled {
+		slog.Warn("rate limiting disabled (RATE_LIMIT_DISABLED=true): every client is unlimited")
+	}
 	rl := emlyMiddleware.NewRateLimiter(cfg)
 	r.Use(rl.Handler)
 

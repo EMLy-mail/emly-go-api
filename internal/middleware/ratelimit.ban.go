@@ -64,6 +64,7 @@ type RateLimiter struct {
 	authCfg      limitConfig
 	cleanEvery   time.Duration
 	dashboardKey string
+	disabled     bool
 }
 
 // NewRateLimiter creates a two-tier rate limiter configured from cfg:
@@ -87,6 +88,11 @@ func NewRateLimiter(cfg *config.Config) *RateLimiter {
 		},
 		cleanEvery:   10 * time.Minute,
 		dashboardKey: cfg.DashboardKey,
+		disabled:     cfg.RateLimit.Disabled,
+	}
+	if rl.disabled {
+		// Nothing is ever recorded, so there is nothing to prune.
+		return rl
 	}
 	go rl.cleanupLoop()
 	return rl
@@ -152,6 +158,9 @@ func (rl *RateLimiter) record(ip string, auth bool) (exceeded bool, failures int
 }
 
 func (rl *RateLimiter) Handler(next http.Handler) http.Handler {
+	if rl.disabled {
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if rl.dashboardKey != "" && r.Header.Get("X-Dashboard-Key") == rl.dashboardKey {
 			next.ServeHTTP(w, r)

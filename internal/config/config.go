@@ -10,6 +10,11 @@ import (
 )
 
 type RateLimitConfig struct {
+	// Disabled turns off both rate-limit layers (the global RateLimiter and
+	// every RouteLimitByIP). Meant for a test instance under a load test,
+	// where every virtual client shares the load generator's one address.
+	Disabled bool
+
 	UnauthMaxReqs  int
 	UnauthWindow   time.Duration
 	UnauthMaxFails int
@@ -243,6 +248,7 @@ func load() *Config {
 			Endpoint:        os.Getenv("S3_UPDATES_ENDPOINT"),
 		},
 		RateLimit: RateLimitConfig{
+			Disabled:       strings.ToLower(strings.TrimSpace(os.Getenv("RATE_LIMIT_DISABLED"))) == "true",
 			UnauthMaxReqs:  envInt("RL_UNAUTH_MAX_REQS", 10),
 			UnauthWindow:   envDuration("RL_UNAUTH_WINDOW", 5*time.Minute),
 			UnauthMaxFails: envInt("RL_UNAUTH_MAX_FAILS", 5),

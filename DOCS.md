@@ -683,6 +683,15 @@ key, ed e' un segreto che resta sul server: la dashboard non la manda mai al
 browser. Se `DASHBOARD_KEY` non e' impostata l'esenzione e' semplicemente
 spenta.
 
+### Spegnere tutto: `RATE_LIMIT_DISABLED`
+
+Con `RATE_LIMIT_DISABLED=true` entrambi i rate limiter diventano un pass-through
+per chiunque, come togliere il middleware da `app.use(...)`. Serve solo su
+un'istanza di test sotto load test (k6 in `loadtest/k6/`), dove tutti i client
+virtuali escono dallo stesso IP. All'avvio l'API scrive un warn per ricordarlo.
+Non vale per i ban permanenti (`BanList`), che restano attivi. **Mai in
+produzione.**
+
 ---
 
 ## 9. Migrazioni del database

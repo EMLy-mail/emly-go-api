@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"emly-api-go/internal/config"
 )
 
 // serveRouteLimit fires n requests from one address through the limiter and
@@ -91,5 +93,27 @@ func TestRouteLimitByIPCountersAreIndependent(t *testing.T) {
 	}
 	if got := serveRouteLimit(b, 5, nil); got != 2 {
 		t.Fatalf("second limiter allowed %d, want 2", got)
+	}
+}
+
+// RATE_LIMIT_DISABLED turns the route limiter into a pass-through.
+func TestNoRouteLimitPassesEverything(t *testing.T) {
+	if got := serveRouteLimit(noRouteLimit, 100, nil); got != 100 {
+		t.Fatalf("disabled limiter let %d/100 requests through", got)
+	}
+}
+
+// ...and the global limiter too, even from a public address with no key.
+func TestRateLimiterDisabledPassesEverything(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RateLimit.Disabled = true
+	cfg.RateLimit.UnauthMaxReqs = 1
+	cfg.RateLimit.UnauthWindow = time.Minute
+	cfg.RateLimit.UnauthMaxFails = 1
+	cfg.RateLimit.UnauthBanDur = time.Minute
+	rl := NewRateLimiter(cfg)
+
+	if got := serveRouteLimit(rl.Handler, 100, nil); got != 100 {
+		t.Fatalf("disabled global limiter let %d/100 requests through", got)
 	}
 }

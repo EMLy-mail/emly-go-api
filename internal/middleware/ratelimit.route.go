@@ -25,9 +25,16 @@ import (
 // is a server-side secret the dashboard never ships to a browser - so no
 // budget is lost by trusting it. When DASHBOARD_KEY is unset the exemption is
 // off and this is plain httprate.
+//
+// With RATE_LIMIT_DISABLED=true it is a pass-through.
 func RouteLimitByIP(requestLimit int, windowLength time.Duration) func(http.Handler) http.Handler {
+	if config.Load().RateLimit.Disabled {
+		return noRouteLimit
+	}
 	return routeLimitByIP(config.Load().DashboardKey, requestLimit, windowLength)
 }
+
+func noRouteLimit(next http.Handler) http.Handler { return next }
 
 // routeLimitByIP is RouteLimitByIP with the key handed in rather than read
 // from the process config, so the exemption can be exercised without standing
