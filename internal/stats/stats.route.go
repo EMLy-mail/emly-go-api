@@ -321,16 +321,18 @@ func GetStatsClientDetail(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFu
 	}
 }
 
-// DeleteStatsClient removes one row from updater_clients, along with its
-// whole event history: updater_events.client_id is declared ON DELETE
-// CASCADE, so the rows go with it and the response reports how many did.
+// DeleteStatsClient handles DELETE /v2/stats/clients/{id}: it removes one
+// updater_clients row together with its whole event history. The events go
+// first, by an explicit DELETE, and the client after, both inside one
+// transaction - so a failure half-way leaves the client exactly as it was
+// rather than a client with part of its history missing. The ON DELETE
+// CASCADE on updater_events.client_id would take the rows anyway; deleting
+// them by hand is what gives the response an exact events_deleted (the
+// statement's own RowsAffected, not a COUNT(*) that a concurrent insert can
+// outdate) and keeps the operation correct even on a database where the
+// foreign key was never created.
 //
-// Not mounted on any route yet - registerStats does not reference it. Wiring
-// it up means adding a DELETE under the admin-key group in
-// internal/routes/v2/stats.go, next to GetStatsClientDetail, and documenting
-// it in ROUTES.md.
-//
-// The cascade does not touch updater_event_hourly: the fleet-wide charts keep
+// Neither delete touches updater_event_hourly: the fleet-wide charts keep
 // counting the traffic this machine produced while it existed. That is
 // deliberate - a dashboard's history should not rewrite itself because an
 // operator tidied up a decommissioned box - and it is the same reason the
@@ -350,11 +352,19 @@ func DeleteStatsClient(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		// Read the row first: it turns "no such client" into a clean 404,
-		// and the identity is what makes the audit line worth reading once
-		// the row itself is gone.
+		tx, err := db.BeginTxx(r.Context(), nil)
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, "failed to delete client")
+			return
+		}
+		defer tx.Rollback()
+
+		// Read (and lock) the row first: it turns "no such client" into a
+		// clean 404, keeps a concurrent Upsert from writing new events for it
+		// between the two deletes, and the identity is what makes the audit
+		// line worth reading once the row itself is gone.
 		var client models.UpdaterClient
-		err = db.GetContext(r.Context(), &client, `SELECT * FROM updater_clients WHERE id = ?`, id)
+		err = tx.GetContext(r.Context(), &client, `SELECT * FROM updater_clients WHERE id = ? FOR UPDATE`, id)
 		if errors.Is(err, sql.ErrNoRows) {
 			response.Error(w, http.StatusNotFound, "client not found")
 			return
@@ -364,18 +374,26 @@ func DeleteStatsClient(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		var eventCount int
-		if err := db.GetContext(r.Context(), &eventCount,
-			`SELECT COUNT(*) FROM updater_events WHERE client_id = ?`, id,
-		); err != nil {
-			// The count is for the report, not for the delete - a failure
-			// here must not block the operation.
-			slog.WarnContext(r.Context(), "failed to count client events before delete",
-				"client_id", id, "error", err)
-			eventCount = -1
+		res, err := tx.ExecContext(r.Context(), `DELETE FROM updater_events WHERE client_id = ?`, id)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "failed to delete client events", "client_id", id, "error", err)
+			response.Error(w, http.StatusInternalServerError, "failed to delete client events")
+			return
+		}
+		eventsDeleted, err := res.RowsAffected()
+		if err != nil {
+			// The count is for the report, not for the delete.
+			eventsDeleted = -1
 		}
 
-		if _, err := db.ExecContext(r.Context(), `DELETE FROM updater_clients WHERE id = ?`, id); err != nil {
+		if _, err := tx.ExecContext(r.Context(), `DELETE FROM updater_clients WHERE id = ?`, id); err != nil {
+			slog.ErrorContext(r.Context(), "failed to delete client", "client_id", id, "error", err)
+			response.Error(w, http.StatusInternalServerError, "failed to delete client")
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			slog.ErrorContext(r.Context(), "failed to commit client delete", "client_id", id, "error", err)
 			response.Error(w, http.StatusInternalServerError, "failed to delete client")
 			return
 		}
@@ -384,12 +402,12 @@ func DeleteStatsClient(db *sqlx.DB) http.HandlerFunc {
 			"client_id", client.ID,
 			"hwid", dbvalue.Deref(client.HWID),
 			"hostname", client.Hostname,
-			"events_deleted", eventCount)
+			"events_deleted", eventsDeleted)
 
 		response.OK(w, map[string]interface{}{
 			"status":         "deleted",
 			"client_id":      client.ID,
-			"events_deleted": eventCount,
+			"events_deleted": eventsDeleted,
 		})
 	}
 }

@@ -30,6 +30,7 @@ func RegisterV2(r chi.Router, db *sqlx.DB, cfg *config.Config, hub *statshub.Hub
 			r.Get("/summary", GetStatsSummary(db, cfg))
 			r.Get("/clients", ListStatsClients(db, presence))
 			r.Get("/clients/{id}", GetStatsClientDetail(db, presence))
+			r.Delete("/clients/{id}", DeleteStatsClient(db))
 			r.Get("/events", GetStatsEvents(db, cfg))
 		})
 

@@ -527,6 +527,7 @@ l'applicazione dei ban non deve né aprirsi né chiudersi per un singhiozzo del 
 | `GET`  | `/summary`       | `ADMIN` | Aggregati della flotta, memoizzati. |
 | `GET`  | `/clients`       | `ADMIN` | Elenco paginato dei client noti. |
 | `GET`  | `/clients/{id}`  | `ADMIN` | Un client con i suoi eventi recenti. `404` se l'ID non esiste. |
+| `DELETE` | `/clients/{id}` | `ADMIN` | Cancella un client e tutti i suoi eventi. `404` se l'ID non esiste. |
 | `GET`  | `/events`        | `ADMIN` | Serie temporale degli eventi, a bucket. |
 
 **`GET /summary` — query string**
@@ -562,6 +563,27 @@ sommario va in `fetchStatsSummary`, dietro la cache, non nell'handler.
 | `page_size`      |         | |
 | `online`         | `false` | `true` filtra i soli client visti nella finestra |
 | `window_minutes` |         | definisce "online" |
+
+**`DELETE /clients/{id}`**
+
+Cancella prima tutte le righe di `updater_events` del client e poi la riga di
+`updater_clients`, nella stessa transazione: se una delle due fallisce non
+cambia niente, e non resta mai un client con metà storico. La riga del client
+è letta con `SELECT ... FOR UPDATE`, così un evento che arriva in quel momento
+per la stessa macchina aspetta la fine della cancellazione invece di infilarsi
+tra le due `DELETE`.
+
+Risposta `200`: `{"status": "deleted", "client_id": 42, "events_deleted": 118}`.
+Errori: `400` ID non numerico, `404` client inesistente, `500` errore del database.
+
+Il rollup `updater_event_hourly` **non** viene toccato: i grafici della flotta
+continuano a contare il traffico che quella macchina ha prodotto finché
+esisteva, esattamente come fa il pruning periodico (`internal/eventprune`).
+
+Cancellare un client non lo tiene fuori: alla prossima richiesta con i suoi
+header `X-EMLy-*` la riga viene ricreata da zero. Serve a togliere dalla
+dashboard una macchina dismessa o di test; per bloccarla davvero va bannato
+il suo HWID (`/v2/bans`).
 
 **`GET /events` — query string**
 
