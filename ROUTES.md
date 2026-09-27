@@ -594,7 +594,8 @@ differiscono per meno del TTL condividono quindi un payload.
 `clientIdentityFromRequest`, insieme alla versione e al contatto estratti dallo
 User-Agent e all'IP del peer. Il messaggio `identity` di `GET /v2/client/ws`
 (§5.9) è la seconda via: stessi campi, letti da JSON invece che da header, da
-`clientIdentityFromWSPayload`. Aggiungere un campo significa aggiungerlo a
+`clientIdentityFromWSPayload` — che serve anche il body di
+`POST /v2/clients/data`, così quella rotta non diventa un terzo costruttore. Aggiungere un campo significa aggiungerlo a
 **entrambi** i costruttori, non solo a uno dei due call site. Una richiesta
 senza né HWID né hostname viene servita ma
 non tracciata. Un header che il client non invia non azzera mai il valore già
@@ -690,6 +691,7 @@ sempre lo stato corrente, non un flusso di eventi.
 | `GET`  | `/v2/client/commands/{command_id}`   | `ADMIN` | Legge lo stato/esito di un comando già inviato. |
 | `GET`  | `/v2/client/{client_id}/events`      | `ADMIN` | Ultimi eventi (`event`, §8) ricevuti da quella macchina — un anello in memoria, non uno storico permanente. |
 | `POST` | `/v2/client/notify`                  | `ADMIN` | Manda un `notify` (§9) a una o più macchine connesse, o a tutte quelle che dichiarano quel `topic`. |
+| `POST` | `/v2/clients/data`                   | `API`   | L'Updater invia in un body JSON gli stessi dati che manda negli header `X-EMLy-*`; aggiorna la sua riga in `updater_clients`. Vedi sotto. |
 
 L'autenticazione (`X-Api-Key`) avviene tramite lo stesso middleware
 `apimw.APIKeyAuth` del manifest self-update dell'Updater, come middleware di
@@ -824,13 +826,64 @@ sua sessione, non lo storico), ed è per-istanza come `presencehub`/
 minuti: i comandi conclusi (`done`/`failed`/`rejected`/`timeout`) e gli
 eventi più vecchi di 24h vengono scartati.
 
+**`POST /v2/clients/data` — dati del client senza header**
+
+Gli stessi dati che l'Updater manda come header `X-EMLy-*` su manifest e
+download, ma in un body JSON, senza dover controllare un aggiornamento né
+tenere aperta la WebSocket. Il body ha **esattamente la forma del messaggio
+`identity`** di `/v2/client/ws` e passa dallo stesso costruttore
+(`updaterclient.IdentityFromWSPayload`) e dallo stesso upsert: stessa riga,
+stesse regole ("assente" non azzera il valore salvato, un Updater ≥ 1.6.2 senza
+`logged_user` vuol dire nessuno loggato).
+
+```json
+{
+  "hwid": "36CC511A-F0DE-EA11-8106-842AFDCE34D0",
+  "hostname": "PC-01",
+  "ad_domain": "contoso.local",
+  "logged_user": "CONTOSO\\mario.rossi",
+  "logged_user_state": "disconnected",
+  "logged_user_disconnected_at": "2026-09-12T18:04:31Z",
+  "serial": "CND0342SLW",
+  "product": "1F3N0EA#ABZ",
+  "os_version": "Windows 11 24H2 Professional (Build 26100.4652)",
+  "emly_version": "3.4.1"
+}
+```
+
+| Header ↔ campo JSON | |
+|---|---|
+| `X-EMLy-HWID` → `hwid` | `X-EMLy-Serial` → `serial` |
+| `X-EMLy-Hostname` → `hostname` | `X-EMLy-Product` → `product` |
+| `X-EMLy-ADDomain` → `ad_domain` | `X-EMLy-OSVersion` → `os_version` |
+| `X-EMLy-LoggedUser` → `logged_user` | `X-EMLy-AppVersion` → `emly_version` |
+| `X-EMLy-LoggedUserState` → `logged_user_state` | `X-EMLy-LoggedUserDisconnectedAt` → `logged_user_disconnected_at` |
+
+Versione e contatto dell'Updater arrivano sempre dallo `User-Agent`, l'IP dalla
+connessione: il body non li porta. Tutti i campi sono opzionali tranne che
+almeno uno fra `hwid` e `hostname`.
+
+| Status | Quando |
+|--------|--------|
+| `204`  | Dati registrati (aggiornati `updater_clients` e `last_seen_at`), oppure richiesta con `X-EMLy-Testing` (servita, mai registrata). |
+| `400`  | Body non JSON, o senza né `hwid` né `hostname`. A differenza del manifest qui non si risponde `2xx` in silenzio: identificare la macchina è lo scopo della rotta. |
+| `401`  | `X-API-Key` mancante o errata. |
+| `413`  | Body oltre 64 KiB. |
+| `500`  | Upsert fallito. |
+
+È un avvistamento, non un'operazione: **non** scrive una riga in
+`updater_events` (che conosce solo `manifest_check` e `download`), quindi non
+compare nei grafici. Stesso limite di `/v2/client/ws` sui ban: il ban per IP
+vale, quello per `hwid`/`hostname` no, perché `middleware.BanList` confronta
+gli header e qui l'identità è nel body. Rate limit `RouteLimitByIP(30/min)`.
+
 ---
 
 ## 6. Riepilogo autenticazione
 
 | Header            | Dove viene usato | Fallimento |
 |-------------------|------------------|------------|
-| `X-API-Key`       | Creazione bug report, manifest dell'Updater, `GET /v2/config`, `GET /v2/client/ws` | `401` |
+| `X-API-Key`       | Creazione bug report, manifest dell'Updater, `GET /v2/config`, `GET /v2/client/ws`, `POST /v2/clients/data` | `401` |
 | `X-Admin-Key`     | Tutte le route admin, releases, config writes, bans, stats, comandi/eventi/notify di `/v2/client` | `401` |
 | `X-Dashboard-Key` | Bypass di entrambi i rate limiter, globale e per gruppo di route | nessuno, la richiesta prosegue limitata |
 | `X-Session-Token` | `auth/validate`, `auth/logout` | `401` o `403` |

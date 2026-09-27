@@ -37,4 +37,13 @@ func RegisterV2(r chi.Router, db *sqlx.DB, presence *presencehub.Hub, hub *clien
 			mountAdmin(r, hub)
 		})
 	})
+
+	// POST /v2/clients/data: the same identity as the WS "identity"
+	// message, as a plain request (see PostClientData).
+	r.Route("/clients", func(r chi.Router) {
+		r.Use(apimw.APIKeyAuth(db))
+		r.Use(apimw.RouteLimitByIP(30, time.Minute))
+
+		r.Post("/data", PostClientData(db))
+	})
 }

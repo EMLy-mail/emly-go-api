@@ -158,6 +158,10 @@ func IdentityFromRequest(r *http.Request) Identity {
 // headers on every manifest/download request, carried in JSON here instead.
 // Every field is optional exactly like its header counterpart - absent means
 // "not reported", not "empty" (see IdentityFromWSPayload).
+//
+// It is also the JSON body of POST /v2/clients/data (clientws.PostClientData),
+// which carries the same facts as a plain request: same shape, same
+// constructor, so that route never becomes a third place identity is built.
 type WSIdentityPayload struct {
 	HWID                     string `json:"hwid"`
 	Hostname                 string `json:"hostname"`

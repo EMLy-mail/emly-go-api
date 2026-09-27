@@ -91,7 +91,7 @@ emly-api-go/
     ├── updates/                     # release EMLy + self-update dell'Updater
     ├── configapi/                   # /v2/config: documento e revisioni (HTTP)
     ├── stats/                       # /v2/stats/* REST + /v2/stats/stream (WS)
-    ├── clientws/                    # /v2/client/ws: connessione sempre aperta + route admin comandi/eventi/notify
+    ├── clientws/                    # /v2/client/ws: connessione sempre aperta + route admin comandi/eventi/notify; POST /v2/clients/data
     ├── bans/                        # block list permanente (admin)
     ├── health/                       # /health
     │
@@ -907,7 +907,12 @@ messaggio `identity`, dopo che la connessione e' gia' stata accettata. Una
 macchina bandita per HWID puo' quindi aprire questa connessione finche' il
 suo IP non e' bannato a sua volta. Chiuderlo richiederebbe un controllo
 esplicito di `identity.HWID`/`identity.Hostname` contro la block list prima
-di registrare la presenza — non implementato.
+di registrare la presenza — non implementato. Vale lo stesso per
+`POST /v2/clients/data`, che porta l'identita' nel body JSON (la stessa forma
+del messaggio `identity`, letta dallo stesso `IdentityFromWSPayload`): e' la
+versione "richiesta singola" di quel messaggio, per un Updater che vuole
+aggiornare i propri dati senza la WebSocket — un po' come un `POST` Express
+che fa un upsert invece di un `socket.emit`.
 
 Il campo `"online"` che questo canale produce compare anche su
 `GET /v2/stats/clients` e sul canale `stats:clients` di
