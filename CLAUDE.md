@@ -41,8 +41,10 @@ go run . --migrate-files
 # and the rate limiter, and a full identity->presence-online round trip over a
 # real listener, in internal/clientws), the client ws admin routes (issue/get
 # command, list events, notify, in internal/clientws), the daily log files
-# (naming, day rotation, retention in internal/logfile) and the raw-event
-# retention loop's disabled path (internal/eventprune)
+# (naming, day rotation, retention in internal/logfile), the raw-event
+# retention loop's disabled path (internal/eventprune) and native TLS
+# (certificate validation, hot reload, a wss:// round trip pinned to HTTP/1.1,
+# in internal/tlsserver)
 go test ./...
 go test ./internal/... -run TestName -v
 ```
@@ -66,6 +68,7 @@ Go REST API for the "EMLy" bug-reporting system. Stack:
 4. For each of `USE_S3_API_FILE_STORAGE` / `USE_S3_UPDATES_STORAGE` that is enabled, build + ping that bucket's S3 connector independently (an unreachable bucket logs an error and leaves that connector `nil` rather than crashing startup).
 5. Handle `--migrate-files` CLI flag.
 6. Build chi router, apply global middleware, call `routes.RegisterAll`.
+7. Serve on `PORT`: plain HTTP, or HTTPS when `TLS_CERT_FILE`/`TLS_KEY_FILE` are set (`internal/tlsserver`) — which makes both WS routes WSS too, since they share the one `http.Server`. An unusable certificate is `log.Fatalf`, never a fallback to HTTP.
 
 ### Global middleware order (`main.go`)
 
@@ -122,6 +125,7 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - `internal/middleware/` — Auth (`apikey.go`, `adminKey.go`) and rate limiting. Auth middleware load allowed keys into a map at construction for O(1) lookup; they take a `*sqlx.DB` arg that is currently unused (keys come from config).
 - `internal/storage/` — `S3Connector` wrapping an S3-compatible bucket (upload/download/list/delete/rename, folder helpers) and `migrateFiles.go`. `NewS3Connector` is provider-agnostic; `main.go` constructs one instance per bucket (API files, updates) from their respective `config.S3BucketConfig`.
 - `internal/logfile/` — HTTP- and DB-free `io.Writer` over one log file per day, `emly-api-log-YYYY-MM-DD-HH-mm-ss.log` named after the moment it was opened (`-`, not `:`, because `:` is illegal in Windows file names). Rotates on the first write of a new local-time day, and a restart opens a new file too; prunes files older than `LOG_RETENTION_DAYS` whenever it opens one, touching only names it generates. `main.go` is its only caller and puts it behind `io.MultiWriter(console, file)` — console first, so a full disk cannot silence the console. The Docker entrypoint `exec`s the binary instead of `tee`-ing into `/logs/app.log`.
+- `internal/tlsserver/` — native HTTPS/WSS for site mirrors that have no public DNS name (certificate from an internal CA, the CA trusted via the machines' Windows `Root` store). `Validate` refuses at startup what no client would accept: expired, no SAN, or an EKU list without `serverAuth` — the 3gIT code-signing certificate the updater installs is exactly that. `Reloader.GetCertificate` re-stats the files at most once a minute and swaps in a renewed pair; a renewal that fails to load/validate keeps the previous certificate serving. `HTTP1Only` pins ALPN to http/1.1 because an HTTP/2 `ResponseWriter` has no `http.Hijacker` for the WS routes. `main.go` is its only caller.
 - `internal/telemetry/` — OTel provider setup (trace/metric/log exporters, W3C propagators).
 - `internal/timing/` — Per-request timing checkpoints carried on the context.
 - `internal/models/` — Structs with `db:` and `json:` tags. Sensitive fields use `json:"-"`.
@@ -176,6 +180,7 @@ Other notable vars (see `.env.example` for full list + defaults):
 - Rate limiting: `RL_UNAUTH_*` and `RL_AUTH_*` (`MAX_REQS`, `WINDOW`, `MAX_FAILS`, `BAN_DUR`). `RATE_LIMIT_DISABLED=true` turns both layers (global `RateLimiter` and every `RouteLimitByIP`) into pass-throughs, with a warn line at startup — for a test instance under the k6 load test (`loadtest/k6/`) only; permanent bans (`BanList`) still apply
 - Storage — API file bucket: `USE_S3_API_FILE_STORAGE`, `S3_API_FILE_ACCESS_KEY_ID`, `S3_API_FILE_SECRET_ACCESS_KEY`, `S3_API_FILE_BUCKET`, `S3_API_FILE_REGION`, `S3_API_FILE_ENDPOINT`, `S3_API_FILE_ACCOUNT_ID` (optional, R2 endpoint shortcut)
 - Storage — updates bucket: `USE_S3_UPDATES_STORAGE`, `S3_UPDATES_ACCESS_KEY_ID`, `S3_UPDATES_SECRET_ACCESS_KEY`, `S3_UPDATES_BUCKET`, `S3_UPDATES_REGION`, `S3_UPDATES_ENDPOINT`, `S3_UPDATES_ACCOUNT_ID` (optional, R2 endpoint shortcut). The two buckets are fully independent and may sit on different S3-compatible providers.
+- TLS: `TLS_CERT_FILE`, `TLS_KEY_FILE` (PEM; both or neither — one alone panics at load). Empty keeps plain HTTP, for an instance behind a TLS-terminating proxy
 - Telemetry: `OTEL_ENABLED`, `OTEL_ENDPOINT`
 - Updates: `UPDATES_ENABLED`, `S3_UPDATES_PREFIX` (path prefix inside the updates bucket; manifest download links are built from the request's `Host`/`X-Forwarded-*` headers, not an env var), `S3_UPDATER_PREFIX` (default `updater`; separate prefix in the same updates bucket for the EMLy Updater's own installers)
 - Remote config: `CONFIG_UPSTREAM_URL` (empty on the cloud/primary instance; set on a site mirror to replicate `/v2/config` from upstream instead of accepting writes), `CONFIG_UPSTREAM_INTERVAL` (default `5m`), `CONFIG_UPSTREAM_API_KEY` (defaults to this instance's own `API_KEY`)

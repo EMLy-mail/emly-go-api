@@ -33,6 +33,7 @@ import (
 	"emly-api-go/internal/statshub"
 	"emly-api-go/internal/storage"
 	"emly-api-go/internal/telemetry"
+	"emly-api-go/internal/tlsserver"
 )
 
 // logBridge redirects the standard log package output to slog so that legacy
@@ -144,6 +145,19 @@ func main() {
 		slog.Info("writing daily log files", "file", logFile.Path(), "retention_days", cfg.LogFile.RetentionDays)
 	case logFileErr != nil:
 		slog.Warn("log file disabled, logging to console only", "dir", cfg.LogFile.Dir, "err", logFileErr)
+	}
+
+	// The certificate is loaded before the database is touched, so a bad
+	// one stops startup before migrations run. Fatal rather than a fallback
+	// to plain HTTP: clients configured for https:// would fail either way,
+	// and this way the reason is in this log instead of on every machine.
+	var certs *tlsserver.Reloader
+	if cfg.TLS.Enabled() {
+		var err error
+		if certs, err = tlsserver.New(cfg.TLS.CertFile, cfg.TLS.KeyFile); err != nil {
+			log.Fatalf("tls: refusing to start: %v", err)
+		}
+		tlsserver.LogCertificate("tls certificate loaded", certs.Leaf(), time.Now())
 	}
 
 	db, err := database.Connect(cfg)
@@ -353,10 +367,26 @@ func main() {
 		ErrorLog: httpErrorLog(),
 	}
 
+	// With TLS_CERT_FILE/TLS_KEY_FILE set, the one listener speaks HTTPS,
+	// which makes both WebSocket routes above WSS as well - they are served
+	// by the same srv.
+	if certs != nil {
+		srv.TLSConfig = certs.ServerConfig()
+		srv.Protocols = tlsserver.HTTP1Only()
+	}
+
 	// Start server in a goroutine so we can listen for shutdown signals
 	go func() {
-		slog.Info("server listening", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		var err error
+		if srv.TLSConfig != nil {
+			slog.Info("server listening", "addr", addr, "scheme", "https")
+			// Empty paths: the certificate comes from TLSConfig.GetCertificate.
+			err = srv.ListenAndServeTLS("", "")
+		} else {
+			slog.Info("server listening", "addr", addr, "scheme", "http")
+			err = srv.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
 	}()

@@ -117,6 +117,7 @@ emly-api-go/
     ├── clienthub/                   # stato in memoria del protocollo v2: sessioni, comandi, eventi
     ├── eventprune/                  # retention delle righe grezze di updater_events
     ├── logfile/                     # file di log giornalieri con retention
+    ├── tlsserver/                   # HTTPS/WSS nativo: carica, valida e ricarica il certificato
     ├── storage/                     # client S3 (due bucket indipendenti)
     ├── telemetry/                   # setup OpenTelemetry
     ├── timing/                      # checkpoint di timing per richiesta
@@ -217,7 +218,8 @@ go test ./internal/... -run NomeTest -v
 4. Apre il pool di connessioni MySQL
 5. Esegue le migrazioni (vedi sezione 9)
 6. Crea il router chi e registra tutti i middleware e le rotte
-7. Avvia il server HTTP su `PORT`
+7. Avvia il server su `PORT`: HTTP, oppure HTTPS se `TLS_CERT_FILE` e
+   `TLS_KEY_FILE` sono impostate (vedi sotto)
 
 ### Log su file giornalieri
 
@@ -257,6 +259,80 @@ gli errori fatali di avvio finiscono nel file invece di andare persi.
 Si disattiva con `LOG_FILE_ENABLED=false`. In Docker l'entrypoint prima faceva
 `tee -a /logs/app.log`, un unico file che cresceva all'infinito: ora avvia
 direttamente il binario e i file giornalieri li scrive l'app.
+
+### HTTPS e WSS nativi (`internal/tlsserver`)
+
+In Node faresti `https.createServer({ cert, key }, app)` al posto di
+`http.createServer(app)`; in PHP di solito non te ne occupi, perche' TLS lo
+gestisce nginx/Apache. Qui c'e' la versione Node: impostando
+
+```
+TLS_CERT_FILE=/certs/server.crt
+TLS_KEY_FILE=/certs/server.key
+```
+
+lo stesso server su `PORT` parla HTTPS invece di HTTP. Le due route WebSocket
+(`/v2/client/ws`, `/v2/stats/stream`) girano sullo stesso server, quindi
+diventano automaticamente **WSS**: non c'e' niente da configurare a parte. Lato
+Updater basta che l'URL del server nel remote-config sia `https://...`: il
+client ricava da solo `wss://...`, e solo cosi' si sbloccano i comandi
+distruttivi (`service.restart`, `machine.reboot`), che su `ws://` rifiuta.
+Lasciando le due variabili vuote l'API resta in HTTP, che e' quello che serve
+dietro un reverse proxy (Caddy, nginx, Traefik) che termina TLS al posto suo.
+
+A cosa serve: i **mirror di sede** non hanno un nome DNS pubblico, quindi
+Let's Encrypt non puo' emettere loro un certificato. Si usa una CA interna
+(AD CS, o una CA creata apposta) che emette il certificato del mirror, e si
+installa **la CA** (non il certificato del server) nello store `Root` delle
+macchine, via GPO o tramite l'Updater. L'Updater verifica TLS con lo store di
+sistema di Windows, quindi a quel punto si fida del mirror senza modifiche.
+
+Cosa fa il package, oltre a caricare la coppia cert/chiave:
+
+- **Rifiuta all'avvio un certificato inutilizzabile.** Ci vogliono l'uso
+  *Server Authentication* (EKU `serverAuth`) e almeno un SAN con il nome DNS o
+  l'IP del server: i client Go non guardano piu' il Common Name. Il
+  certificato di firma del codice che l'Updater installa (`CN=3G IT
+  Innovation`) **non va bene**, perche' ha solo EKU *Code Signing* e nessun SAN.
+  Stesso per un certificato scaduto. L'API in quel caso si ferma con un errore
+  chiaro invece di ripiegare su HTTP: i client configurati per `https://`
+  fallirebbero comunque, e cosi' il motivo sta in un solo log invece che su
+  ogni macchina.
+- **Ricarica il certificato rinnovato senza riavvio.** Al massimo una volta al
+  minuto, durante un handshake, controlla la data di modifica dei due file e,
+  se sono cambiati, li ricarica. Se il nuovo certificato non e' valido (o c'e'
+  solo il cert nuovo e la chiave e' ancora la vecchia) continua a servire
+  quello precedente con un warning, e riprova al controllo successivo: un
+  rinnovo andato male non deve spegnere il servizio. In Docker monta la
+  **cartella** (`./certs:/certs:ro`), non i singoli file, altrimenti un
+  rinnovo che sostituisce il file non si vede nel container.
+- **Avvisa quando la scadenza e' vicina.** Nessuno rinnova automaticamente un
+  certificato interno, quindi negli ultimi 30 giorni la riga di log di avvio
+  e di ricarica diventa un warning con i giorni rimasti.
+- **Solo HTTP/1.1.** Con TLS Go negozierebbe HTTP/2, ma su una connessione
+  HTTP/2 il WebSocket non puo' prendersi la connessione (niente
+  `http.Hijacker`, l'equivalente di prendersi il socket grezzo dall'evento
+  `upgrade` di Node). Per questa API HTTP/2 non porta vantaggi che valgano il
+  rischio.
+- Versione minima TLS 1.2.
+
+Un certificato per un mirror si puo' generare cosi' (con una CA gia' esistente
+`ca.crt`/`ca.key`):
+
+```bash
+# server.ext - le due righe che il certificato di firma codice non ha
+subjectAltName = DNS:emly-mirror.sede.local, IP:10.0.0.20
+extendedKeyUsage = serverAuth
+```
+
+```bash
+openssl req -new -newkey rsa:2048 -nodes -keyout server.key -subj "/CN=emly-mirror.sede.local" -out server.csr
+openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 825 -sha256 -extfile server.ext -out server.crt
+```
+
+Una CA in `Root` su tutta la flotta puo' firmare certificati per qualunque
+dominio: se la crei tu, limitala con *Name Constraints* ai soli host EMLy e
+tieni la sua chiave fuori dal server.
 
 ---
 

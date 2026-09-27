@@ -74,6 +74,17 @@ type OIDCConfig struct {
 
 func (o OIDCConfig) Enabled() bool { return o.Issuer != "" && o.ClientID != "" }
 
+// TLSConfig points at the PEM certificate and key the API serves HTTPS (and
+// so WSS) with, via internal/tlsserver. Both empty keeps plain HTTP, for an
+// instance behind a TLS-terminating proxy; setting only one is refused at
+// load, since it can only be a typo.
+type TLSConfig struct {
+	CertFile string
+	KeyFile  string
+}
+
+func (t TLSConfig) Enabled() bool { return t.CertFile != "" }
+
 type Config struct {
 	Port                    string
 	DSN                     string
@@ -102,6 +113,7 @@ type Config struct {
 	S3Updates               S3BucketConfig
 	Otel                    OtelConfig
 	OIDC                    OIDCConfig
+	TLS                     TLSConfig
 }
 
 var (
@@ -171,8 +183,17 @@ func load() *Config {
 		panic("DB_DSN environment variable is required")
 	}
 
+	tlsCfg := TLSConfig{
+		CertFile: strings.TrimSpace(os.Getenv("TLS_CERT_FILE")),
+		KeyFile:  strings.TrimSpace(os.Getenv("TLS_KEY_FILE")),
+	}
+	if (tlsCfg.CertFile == "") != (tlsCfg.KeyFile == "") {
+		panic("TLS_CERT_FILE and TLS_KEY_FILE must be set together (or both left empty for plain HTTP)")
+	}
+
 	return &Config{
 		Port:            port,
+		TLS:             tlsCfg,
 		DSN:             os.Getenv("DB_DSN"),
 		Database:        dbName,
 		APIKey:          apiKey,

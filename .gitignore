@@ -42,3 +42,7 @@ tmp/
 logs/
 
 build/
+
+# TLS certificate + private key for native HTTPS (TLS_CERT_FILE/TLS_KEY_FILE)
+certs/
+*.key
