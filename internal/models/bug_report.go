@@ -1,7 +1,6 @@
 package models
 
 import (
-	"encoding/json"
 	"strings"
 	"time"
 )
@@ -46,7 +45,7 @@ type BugReport struct {
 	Hostname    string          `db:"hostname"     json:"hostname"`
 	OsUser      string          `db:"os_user"      json:"os_user"`
 	SubmitterIP string          `db:"submitter_ip" json:"submitter_ip"`
-	SystemInfo  json.RawMessage `db:"system_info"  json:"system_info,omitempty"`
+	SystemInfo  NullJSON        `db:"system_info"  json:"system_info,omitempty"`
 	Status      BugReportStatus `db:"status"       json:"status"`
 	CreatedAt   time.Time       `db:"created_at"   json:"created_at"`
 	UpdatedAt   time.Time       `db:"updated_at"   json:"updated_at"`
