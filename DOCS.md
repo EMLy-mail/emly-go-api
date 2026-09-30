@@ -1518,6 +1518,44 @@ effettivo (globale + override applicati), gli id degli override che hanno contri
 sito di `dcLookupMap` risolto e la sua catena di server. Utile per rispondere "se
 pubblico questo, cosa vede davvero la sede X" prima di premere publish.
 
+#### Sezione `products`
+
+I prodotti diversi da EMLy che l'agente aggiorna, indicizzati per slug. Le regole sono
+gemelle di `emly-updater/internal/policy/products.go` (stessi percorsi dei problemi, i
+messaggi possono differire), tenute uguali dalle fixture `testdata/remoteconfig/*/products*`:
+
+```json
+"products": {
+  "3g-rocketchat": {
+    "enabled": true, "name": "3g-RocketChat", "channel": "stable",
+    "installDir": "C:\\3gIT\\3g-RocketChat", "exeName": "3g-RocketChat.exe",
+    "installWhenAbsent": false,
+    "detect": [{ "type": "ini", "path": "config.ini", "section": "app", "key": "version" }],
+    "installer": { "type": "nsis", "cleanReinstall": false }
+  }
+}
+```
+
+- slug: `^[a-z0-9][a-z0-9-]{0,19}$` (la regola del registro prodotti), non riservato
+  (`updater`, `all`, `manifest`, `releases`, `download`, `products`) e **mai `emly`**, che
+  è integrato nell'agente e si configura altrove. Uno slug non valido segnala solo
+  `/products/<slug>`, senza validarne i campi.
+- `name` obbligatorio (≤ 64 caratteri, dopo il trim); `channel` vuoto, `stable` o `beta`.
+- `installDir` assoluto Windows (`X:\...`) senza segmenti `..`; `exeName` un nome di file
+  (niente `\ / :`) che termina in `.exe`.
+- `detect`: da 1 a 5 fonti; `type` `ini`/`file`/`exe`; `path` relativo a `installDir`
+  (non vuoto, non `X:\`, non inizia con `\` o `/`, niente `..`); `ini` richiede `section`
+  e `key`.
+- `installer.type`: `nsis` o `inno`.
+
+`products` è patchabile dagli override (es. `{"products": {"3g-rocketchat": {"enabled":
+false}}}` per spegnerlo su una sede) e il dry-run valida il risultato: un override che
+aggiunge un prodotto assente dal globale deve portarlo completo. Il campo è `omitempty`
+come `clientWs`, quindi un documento senza `products` ha lo stesso `ETag` di prima; vale
+però la stessa trappola di rollout dei mirror di sede descritta per `clientWs.commands`
+(aggiornare i mirror **prima** di pubblicare un documento con `products`). Gli agenti
+≤ 1.7.x rifiutano un documento i cui override patchano `products`.
+
 ---
 
 ### Modello `BugReport`

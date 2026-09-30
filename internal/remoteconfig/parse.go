@@ -54,6 +54,7 @@ func Parse(data []byte) (*Document, []Problem) {
 	problems = append(problems, validateUpdater(doc.Updater)...)
 	problems = append(problems, validateLogging(doc.Logging)...)
 	problems = append(problems, validateClientWS(doc.ClientWS)...)
+	problems = append(problems, validateProducts(doc.Products)...)
 	problems = append(problems, validateOverridesShape(&doc)...)
 
 	// Dry-run every override against an all-matching synthetic host, so a
@@ -357,7 +358,7 @@ func validateOverridesShape(doc *Document) []Problem {
 
 		for key := range ov.Patch {
 			if !AllowedPatchKeys[key] {
-				problems = append(problems, problemf(path+"/patch/"+key, "patch may only touch control, updater, logging, defaultServer"))
+				problems = append(problems, problemf(path+"/patch/"+key, "patch may only touch control, updater, logging, defaultServer, clientWs, products"))
 			}
 		}
 	}
@@ -387,6 +388,7 @@ func dryRunOverrides(doc *Document) []Problem {
 		problems = append(problems, reprefix(path+"/updater", validateUpdater(patched.Updater))...)
 		problems = append(problems, reprefix(path+"/logging", validateLogging(patched.Logging))...)
 		problems = append(problems, reprefix(path+"/clientWs", validateClientWS(patched.ClientWS))...)
+		problems = append(problems, reprefix(path+"/products", validateProducts(patched.Products))...)
 	}
 	return problems
 }

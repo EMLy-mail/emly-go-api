@@ -453,6 +453,15 @@ func TestFixtures_Effective(t *testing.T) {
 			Host          Host                   `json:"host"`
 			ExpectedIDs   []string               `json:"expectedOverrideIds"`
 			ExpectedPatch map[string]interface{} `json:"expectedEffectiveUpdaterPatch"`
+			// Expect is the emly-updater harness's shape (its
+			// internal/policy effectiveFixture). Fixtures copied verbatim from
+			// that repo carry it instead of expectedOverrideIds; only the keys
+			// this package can evaluate are checked here: the applied ids and
+			// the effective products[slug].enabled.
+			Expect *struct {
+				Applied         []string        `json:"applied"`
+				ProductsEnabled map[string]bool `json:"productsEnabled"`
+			} `json:"expect"`
 		}
 		if err := json.Unmarshal(data, &fx); err != nil {
 			t.Fatalf("%s: %s", name, err)
@@ -461,9 +470,18 @@ func TestFixtures_Effective(t *testing.T) {
 		if len(problems) != 0 {
 			t.Fatalf("%s: base document invalid: %+v", name, problems)
 		}
-		_, ids := Effective(doc, fx.Host)
-		if !equalStrings(ids, fx.ExpectedIDs) {
-			t.Errorf("%s: applied override ids = %v, want %v", name, ids, fx.ExpectedIDs)
+		eff, ids := Effective(doc, fx.Host)
+		wantIDs := fx.ExpectedIDs
+		if fx.Expect != nil {
+			wantIDs = fx.Expect.Applied
+			for slug, want := range fx.Expect.ProductsEnabled {
+				if got := eff.Products[slug].Enabled; got != want {
+					t.Errorf("%s: products[%s].enabled = %v, want %v", name, slug, got, want)
+				}
+			}
+		}
+		if !equalStrings(ids, wantIDs) {
+			t.Errorf("%s: applied override ids = %v, want %v", name, ids, wantIDs)
 		}
 	})
 }

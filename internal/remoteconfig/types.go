@@ -71,6 +71,16 @@ type Document struct {
 	// itself is also omitempty.
 	ClientWS *ClientWS `json:"clientWs,omitempty"`
 
+	// Products lists the products other than EMLy the agent updates, keyed
+	// by product slug (emly-updater spec 2026-09-30-multi-product-agent-design
+	// §4). The rules and problem paths are a twin of the agent's
+	// internal/policy/products.go; testdata/remoteconfig keeps them equal.
+	//
+	// `omitempty` for the same ETag reason as ClientWS: a document that never
+	// sets products canonicalizes byte-identically to one written before
+	// this field existed.
+	Products map[string]ProductSettings `json:"products,omitempty"`
+
 	Overrides []Override `json:"overrides"`
 }
 
@@ -197,6 +207,32 @@ var KnownClientWSCommands = []string{
 	"apps.list_upgradable", "service.restart", "machine.reboot",
 }
 
+// ProductSettings is one entry of the products section.
+type ProductSettings struct {
+	Enabled           bool             `json:"enabled"`
+	Name              string           `json:"name"`
+	Channel           string           `json:"channel"`
+	InstallDir        string           `json:"installDir"`
+	ExeName           string           `json:"exeName"`
+	InstallWhenAbsent bool             `json:"installWhenAbsent"`
+	Detect            []ProductDetect  `json:"detect"`
+	Installer         ProductInstaller `json:"installer"`
+}
+
+// ProductDetect is one link of a product's version detection chain.
+type ProductDetect struct {
+	Type    string `json:"type"`
+	Path    string `json:"path"`
+	Section string `json:"section"`
+	Key     string `json:"key"`
+}
+
+// ProductInstaller selects the setup driver.
+type ProductInstaller struct {
+	Type           string `json:"type"`
+	CleanReinstall bool   `json:"cleanReinstall"`
+}
+
 type Logging struct {
 	Level     string `json:"level"`
 	MaxSizeMB int    `json:"maxSizeMB"`
@@ -241,4 +277,5 @@ var AllowedPatchKeys = map[string]bool{
 	"logging":       true,
 	"defaultServer": true,
 	"clientWs":      true,
+	"products":      true,
 }
