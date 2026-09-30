@@ -34,6 +34,7 @@ import (
 	"emly-api-go/internal/statshub"
 	"emly-api-go/internal/storage"
 	"emly-api-go/internal/telemetry"
+	"emly-api-go/internal/updates"
 )
 
 // logBridge redirects the standard log package output to slog so that legacy
@@ -267,7 +268,10 @@ func main() {
 	r.Use(chiMiddleware.RealIP)
 	r.Use(emlyMiddleware.AccessLog)
 	r.Use(chiMiddleware.Recoverer)
-	r.Use(chiMiddleware.Timeout(30 * time.Second))
+	// The installer downloads are exempt: their deadline is the download
+	// queue's DOWNLOAD_QUEUE_TIMEOUT (changeable from the dashboard), since 30s
+	// truncated every installer on a link slower than ~330 KB/s.
+	r.Use(emlyMiddleware.TimeoutExcept(30*time.Second, updates.IsInstallerDownload))
 	r.Use(emlyMiddleware.Timing)
 	if cfg.Otel.Enabled {
 		r.Use(otelhttp.NewMiddleware("emly-api",
@@ -293,9 +297,10 @@ func main() {
 	// internal/downloadqueue). Nothing is persisted: runtime changes made
 	// from the dashboard last until restart, then DOWNLOAD_QUEUE_* applies.
 	downloadQueue := downloadqueue.New(downloadqueue.Settings{
-		Enabled:    cfg.DownloadQueue.Enabled,
-		Capacity:   cfg.DownloadQueue.Slots,
-		RetryAfter: cfg.DownloadQueue.RetryAfter,
+		Enabled:         cfg.DownloadQueue.Enabled,
+		Capacity:        cfg.DownloadQueue.Slots,
+		RetryAfter:      cfg.DownloadQueue.RetryAfter,
+		DownloadTimeout: cfg.DownloadQueue.Timeout,
 	})
 
 	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub, presenceHub, clientHub, bans, downloadQueue)

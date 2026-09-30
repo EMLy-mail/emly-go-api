@@ -28,8 +28,8 @@ func GetQueue(q *Queue) http.HandlerFunc {
 }
 
 // PatchQueue handles PATCH /v2/download-queue: switch the limit on/off, grow
-// or shrink the capacity, change the Retry-After. In memory only - a restart
-// goes back to the .env values.
+// or shrink the capacity, change the Retry-After and the download timeout.
+// In memory only - a restart goes back to the .env values.
 func PatchQueue(db *sqlx.DB, q *Queue) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if q == nil {
@@ -41,8 +41,8 @@ func PatchQueue(db *sqlx.DB, q *Queue) http.HandlerFunc {
 			response.Error(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 			return
 		}
-		if p.Enabled == nil && p.Capacity == nil && p.RetryAfterSeconds == nil {
-			response.Error(w, http.StatusBadRequest, "nothing to update: send enabled, capacity or retry_after_seconds")
+		if p.Empty() {
+			response.Error(w, http.StatusBadRequest, "nothing to update: send enabled, capacity, retry_after_seconds or download_timeout_seconds")
 			return
 		}
 		st, err := q.Update(p)
@@ -57,7 +57,8 @@ func PatchQueue(db *sqlx.DB, q *Queue) http.HandlerFunc {
 		slog.InfoContext(r.Context(), "download queue settings changed",
 			"by", actor(r, db),
 			"enabled", st.Enabled, "capacity", st.Capacity,
-			"retry_after_seconds", st.RetryAfterSeconds, "active", st.Active)
+			"retry_after_seconds", st.RetryAfterSeconds,
+			"download_timeout_seconds", st.DownloadTimeoutSeconds, "active", st.Active)
 		response.OK(w, st)
 	}
 }
@@ -73,7 +74,8 @@ func ResetQueue(db *sqlx.DB, q *Queue) http.HandlerFunc {
 		slog.InfoContext(r.Context(), "download queue settings reset to defaults",
 			"by", actor(r, db),
 			"enabled", st.Enabled, "capacity", st.Capacity,
-			"retry_after_seconds", st.RetryAfterSeconds)
+			"retry_after_seconds", st.RetryAfterSeconds,
+			"download_timeout_seconds", st.DownloadTimeoutSeconds)
 		response.OK(w, st)
 	}
 }

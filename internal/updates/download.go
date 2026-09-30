@@ -2,14 +2,12 @@ package updates
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"time"
 
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
-
 
 	"emly-api-go/internal/downloadqueue"
 	"emly-api-go/internal/updaterclient"
@@ -21,13 +19,14 @@ import (
 // By the time io.Copy runs, the 200 and the Content-Length header are already
 // on the wire, so nothing that goes wrong from here on can be turned into an
 // HTTP error - this log line is the only record that the client was left with
-// a truncated file. The case worth watching is "server timeout": the global
-// chiMiddleware.Timeout(30s) in main.go cancels r.Context() mid-transfer, the
-// S3 read fails, and chi's deferred w.WriteHeader(504) is discarded by
-// net/http with "superfluous response.WriteHeader call" because the status
-// line went out long ago. The access log then records a 504 for a request the
-// client saw as a 200 with a short body. A slow link is enough to trigger it:
-// an 8 MB partial transfer over 30s is ~270 KB/s.
+// a truncated file. The case worth watching is "server timeout": the download
+// queue's deadline (DOWNLOAD_QUEUE_TIMEOUT, changeable from the dashboard)
+// cancels r.Context() mid-transfer and the S3 read fails. These routes used to
+// sit under main.go's global chiMiddleware.Timeout(30s) instead, which cut any
+// installer on a link below ~330 KB/s (an 8 MB partial transfer over 30s is
+// ~270 KB/s) - they are exempt from it now (IsInstallerDownload). A string of
+// server timeouts here means the download timeout is too short for the
+// fleet's slowest links.
 func streamInstaller(w http.ResponseWriter, r *http.Request, src io.Reader, product, version, filename string, size int64) {
 	started := time.Now()
 	written, err := io.Copy(w, src)
@@ -38,15 +37,9 @@ func streamInstaller(w http.ResponseWriter, r *http.Request, src io.Reader, prod
 		return
 	}
 
-	reason := "copy failed"
-	switch {
-	case errors.Is(context.Cause(r.Context()), downloadqueue.ErrEvicted):
-		reason = "evicted from queue slot"
-	case errors.Is(r.Context().Err(), context.DeadlineExceeded):
-		reason = "server timeout"
-	case errors.Is(r.Context().Err(), context.Canceled):
-		reason = "client disconnected"
-	}
+	// Same classifier the download queue counts failures with, so a line
+	// logged here and the dashboard's failed_by_reason always agree.
+	reason := downloadqueue.FailureReason(r.Context())
 
 	args := []any{
 		"request_id", chiMiddleware.GetReqID(r.Context()),

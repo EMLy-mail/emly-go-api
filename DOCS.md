@@ -379,7 +379,7 @@ Questi sono tutti usati in `main.go`:
 | `middleware.RealIP`      | `express-ip` / `TrustProxies`         | Legge l'IP reale da `X-Forwarded-For` o `X-Real-IP`       |
 | `middleware.Logger`      | `morgan`                              | Loga metodo, path, status, durata su stdout               |
 | `middleware.Recoverer`   | Express error handler / `rescue_from`  | Cattura i panic e ritorna 500 invece di crashare          |
-| `middleware.Timeout(30s)`| `connect-timeout`                     | Cancella la richiesta se supera i 30 secondi              |
+| `middleware.Timeout(30s)`| `connect-timeout`                     | Cancella la richiesta se supera i 30 secondi (tranne i download di installer, vedi "Coda dei download") |
 
 ### Rate limiting (`go-chi/httprate`)
 
@@ -843,7 +843,7 @@ Go di un lock attorno a una `Map` condivisa): nessuna tabella, nulla scritto su
 DB. Conseguenze:
 
 - i valori di `.env` (`DOWNLOAD_QUEUE_ENABLED`, `DOWNLOAD_QUEUE_SLOTS`,
-  `DOWNLOAD_QUEUE_RETRY_AFTER`) sono lo stato di partenza; le modifiche fatte
+  `DOWNLOAD_QUEUE_RETRY_AFTER`, `DOWNLOAD_QUEUE_TIMEOUT`) sono lo stato di partenza; le modifiche fatte
   dalla dashboard durano fino al prossimo riavvio;
 - come `presencehub`/`statshub`, e' per-istanza: con due repliche dell'API
   ognuna ha i suoi 50 slot.
@@ -854,11 +854,39 @@ quanti sono in corso prima di decidere se accenderla), ma nessuno e' rifiutato.
 La dashboard la manovra da `/v2/download-queue` (admin key **e** dashboard key):
 leggere lo stato, attivarla/spegnerla, allargare/ridurre la capacita', cambiare
 il `Retry-After`, tornare ai valori di `.env`, e interrompere un download (o
-tutti). Interrompere usa `context.WithCancelCause`: il middleware crea un
+tutti). Per ogni download in corso la dashboard vede anche byte inviati,
+percentuale e **velocita' media** del client: il middleware avvolge il
+`ResponseWriter` in un `countingWriter` (come un `res.write` intercettato in
+Express) che somma i byte scritti in un contatore atomico dello slot, e la
+velocita' e' semplicemente byte / secondi da inizio download, calcolata quando
+si legge lo stato. Interrompere usa `context.WithCancelCause`: il middleware crea un
 contesto figlio per la richiesta e ne conserva la funzione di cancel nello
 slot; la route admin la chiama con la causa `downloadqueue.ErrEvicted`, la
 lettura da S3 si ferma, e `streamInstaller` logga il download troncato con
-`reason: evicted from queue slot` invece di "client disconnected". Dettaglio
+`reason: evicted from queue slot` invece di "client disconnected".
+
+Quando un download finisce, il middleware decide come contarlo: **completato**
+solo se i byte scritti sono pari al `Content-Length`; altrimenti **fallito**,
+con la stessa causa (`server timeout`, `client disconnected`, `copy failed`)
+che `streamInstaller` scrive nel log, perche' entrambi chiamano
+`downloadqueue.FailureReason`. Serve perche' un download tagliato dal timeout
+di 30 s non produce un errore visibile all'handler: `io.Copy` si ferma e
+basta, e senza questo confronto sui byte verrebbe contato come riuscito.
+
+**Il timeout dei download e' separato da quello globale.** In `main.go` il
+`Timeout(30s)` e' montato con `middleware.TimeoutExcept(30s,
+updates.IsInstallerDownload)`: le due route di download ne sono escluse (in
+Express sarebbe un `app.use` con un `if (isDownload(req)) return next()`).
+Serve perche' in Go la deadline di un context si puo' solo accorciare, mai
+allungare: un download sotto il timeout globale non potrebbe mai durare piu'
+di 30 s, e a 30 s ogni installer su una linea sotto i ~330 KB/s veniva
+troncato. La durata massima la fissa invece il middleware della coda, con
+`context.WithTimeout` a partire da `DOWNLOAD_QUEUE_TIMEOUT` (default 10
+minuti), modificabile dalla dashboard (`download_timeout_seconds`) come la
+capacita'. `IsInstallerDownload` guarda solo metodo e path, perche' gira
+prima del routing; un test in `internal/routes/v2` percorre il router vero e
+fallisce se una delle due route cambia path senza aggiornarlo.
+Una risposta `4xx`/`5xx` prima dello streaming conta come `error response`. Dettaglio
 delle route in [ROUTES.md](ROUTES.md#510-coda-download--v2download-queue).
 
 ---

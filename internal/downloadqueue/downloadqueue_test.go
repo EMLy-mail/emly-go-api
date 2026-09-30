@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,7 +19,7 @@ func ptr[T any](v T) *T { return &v }
 func TestNewNormalizesOutOfRangeSettings(t *testing.T) {
 	q := New(Settings{Enabled: true, Capacity: 0, RetryAfter: 0})
 	st := q.Status()
-	if st.Capacity != DefaultCapacity || st.RetryAfterSeconds != 60 {
+	if st.Capacity != DefaultCapacity || st.RetryAfterSeconds != 60 || st.DownloadTimeoutSeconds != 600 {
 		t.Fatalf("got capacity %d retry %d, want %d / 60", st.Capacity, st.RetryAfterSeconds, DefaultCapacity)
 	}
 	if st.Defaults != st.SettingsView {
@@ -47,7 +48,7 @@ func TestTryAcquireRefusesWhenFullAndReleaseFrees(t *testing.T) {
 	}
 
 	st := q.Status()
-	if st.Active != 2 || st.Available != 0 || st.AcquiredTotal != 3 || st.RejectedTotal != 1 {
+	if st.Active != 2 || st.Available != 0 || st.CompletedTotal != 1 || st.FailedTotal != 0 || st.RejectedTotal != 1 {
 		t.Fatalf("unexpected status %+v", st)
 	}
 }
@@ -89,7 +90,7 @@ func TestEvictCancelsWithErrEvicted(t *testing.T) {
 	if q.Evict(id) {
 		t.Fatal("second evict reported true")
 	}
-	if st := q.Status(); st.Active != 0 || st.EvictedTotal != 1 {
+	if st := q.Status(); st.Active != 0 || st.EvictedTotal != 1 || st.FailedTotal != 0 || st.CompletedTotal != 0 {
 		t.Fatalf("unexpected status %+v", st)
 	}
 }
@@ -123,22 +124,24 @@ func TestUpdateValidatesAndResetRestoresDefaults(t *testing.T) {
 		{Capacity: ptr(MaxCapacity + 1)},
 		{RetryAfterSeconds: ptr(0)},
 		{RetryAfterSeconds: ptr(86401)},
+		{DownloadTimeoutSeconds: ptr(0)},
+		{DownloadTimeoutSeconds: ptr(86401)},
 	} {
 		if _, err := q.Update(p); !errors.Is(err, ErrInvalidPatch) {
 			t.Fatalf("patch %+v: err = %v, want ErrInvalidPatch", p, err)
 		}
 	}
 
-	st, err := q.Update(Patch{Enabled: ptr(false), Capacity: ptr(120), RetryAfterSeconds: ptr(30)})
+	st, err := q.Update(Patch{Enabled: ptr(false), Capacity: ptr(120), RetryAfterSeconds: ptr(30), DownloadTimeoutSeconds: ptr(900)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Enabled || st.Capacity != 120 || st.RetryAfterSeconds != 30 || q.RetryAfterSeconds() != 30 {
+	if st.Enabled || st.Capacity != 120 || st.RetryAfterSeconds != 30 || q.RetryAfterSeconds() != 30 || st.DownloadTimeoutSeconds != 900 {
 		t.Fatalf("update not applied: %+v", st)
 	}
 
 	st = q.Reset()
-	if !st.Enabled || st.Capacity != 50 || st.RetryAfterSeconds != 60 {
+	if !st.Enabled || st.Capacity != 50 || st.RetryAfterSeconds != 60 || st.DownloadTimeoutSeconds != 600 {
 		t.Fatalf("reset did not restore defaults: %+v", st)
 	}
 }
@@ -244,5 +247,183 @@ func TestMiddlewareEvictionCancelsTheDownload(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("download was not cancelled")
+	}
+}
+
+func TestSlotReportsProgressAndAverageSpeed(t *testing.T) {
+	q := New(Settings{Enabled: true, Capacity: 1, RetryAfter: time.Minute})
+	start := time.Date(2026, 9, 30, 8, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	now := start
+	q.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+
+	wrote := make(chan struct{})
+	finish := make(chan struct{})
+	r := router(q, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(make([]byte, 250))
+		close(wrote)
+		<-finish
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/releases/1.0.0/download", nil))
+	}()
+	<-wrote
+
+	mu.Lock()
+	now = start.Add(5 * time.Second)
+	mu.Unlock()
+
+	st := q.Status()
+	got := st.Slots[0]
+	if got.BytesSent != 250 || got.BytesTotal != 1000 || got.Percent != 25 {
+		t.Fatalf("progress = %d/%d (%v%%), want 250/1000 (25%%)", got.BytesSent, got.BytesTotal, got.Percent)
+	}
+	if got.AvgBytesPerSec != 50 || got.ElapsedSeconds != 5 || st.TotalBytesPerSec != 50 {
+		t.Fatalf("speed = %d B/s over %vs (total %d), want 50 B/s over 5s", got.AvgBytesPerSec, got.ElapsedSeconds, st.TotalBytesPerSec)
+	}
+
+	close(finish)
+	<-done
+}
+
+// TestMiddlewareClassifiesOutcomes pins which counter each way a download
+// can end lands in. The server-timeout case is the production one: the
+// global 30s deadline cancels the S3 read, io.Copy stops short without the
+// handler seeing an error, and before this it was counted as a success.
+func TestMiddlewareClassifiesOutcomes(t *testing.T) {
+	expired := func() context.Context {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		t.Cleanup(cancel)
+		return ctx
+	}
+	canceled := func() context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+	stream := func(sent int) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", "1000")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(make([]byte, sent))
+		}
+	}
+
+	cases := []struct {
+		name    string
+		ctx     func() context.Context
+		handler http.HandlerFunc
+		reason  string // "" = completed
+	}{
+		{"whole installer sent", context.Background, stream(1000), ""},
+		{"server timeout mid-transfer", expired, stream(400), ReasonServerTimeout},
+		{"client disconnected mid-transfer", canceled, stream(400), ReasonClientDisconnected},
+		{"short copy with a live context", context.Background, stream(400), ReasonCopyFailed},
+		{"release not found", context.Background, func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "release not found", http.StatusNotFound)
+		}, ReasonErrorResponse},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := New(Settings{Enabled: true, Capacity: 1, RetryAfter: time.Minute})
+			req := httptest.NewRequest(http.MethodGet, "/releases/1.0.0/download", nil).WithContext(tc.ctx())
+			router(q, tc.handler).ServeHTTP(httptest.NewRecorder(), req)
+
+			st := q.Status()
+			if st.Active != 0 {
+				t.Fatalf("slot still held after the handler returned")
+			}
+			if tc.reason == "" {
+				if st.CompletedTotal != 1 || st.FailedTotal != 0 {
+					t.Fatalf("completed %d failed %d, want 1 / 0", st.CompletedTotal, st.FailedTotal)
+				}
+				return
+			}
+			if st.CompletedTotal != 0 || st.FailedTotal != 1 || st.FailedByReason[tc.reason] != 1 {
+				t.Fatalf("completed %d failed %d by reason %v, want 0 / 1 under %q",
+					st.CompletedTotal, st.FailedTotal, st.FailedByReason, tc.reason)
+			}
+		})
+	}
+}
+
+func TestMiddlewareCountsAPanicAsFailed(t *testing.T) {
+	q := New(Settings{Enabled: true, Capacity: 1, RetryAfter: time.Minute})
+	h := router(q, func(http.ResponseWriter, *http.Request) { panic("boom") })
+	func() {
+		defer func() { _ = recover() }()
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/releases/1.0.0/download", nil))
+	}()
+	if st := q.Status(); st.Active != 0 || st.FailedByReason[ReasonInternalError] != 1 {
+		t.Fatalf("unexpected status %+v", st)
+	}
+}
+
+// TestDownloadTimeoutCutsTheTransfer is the replacement for the global 30s
+// timeout: the queue's own deadline cancels a download that runs past it,
+// and it lands in failed_by_reason as a server timeout.
+func TestDownloadTimeoutCutsTheTransfer(t *testing.T) {
+	q := New(Settings{Enabled: true, Capacity: 1, RetryAfter: time.Minute, DownloadTimeout: time.Second})
+	// Shorter than the 1s minimum the settings accept, so the test stays fast.
+	q.current.DownloadTimeout = 50 * time.Millisecond
+
+	h := router(q, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(make([]byte, 100))
+		<-r.Context().Done()
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/releases/1.0.0/download", nil))
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("download timeout did not cut the transfer")
+	}
+	if st := q.Status(); st.FailedByReason[ReasonServerTimeout] != 1 {
+		t.Fatalf("failed_by_reason = %v, want one server timeout", st.FailedByReason)
+	}
+}
+
+func TestTimeoutChangeOnlyAffectsNewDownloads(t *testing.T) {
+	q := New(Settings{Enabled: true, Capacity: 2, RetryAfter: time.Minute, DownloadTimeout: 10 * time.Minute})
+	start := time.Date(2026, 9, 30, 8, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return start }
+
+	first, _ := q.TryAcquire(SlotInfo{}, nil)
+	if _, err := q.Update(Patch{DownloadTimeoutSeconds: ptr(60)}); err != nil {
+		t.Fatal(err)
+	}
+	second, _ := q.TryAcquire(SlotInfo{}, nil)
+
+	deadlines := map[uint64]time.Time{}
+	for _, s := range q.Status().Slots {
+		deadlines[s.ID] = s.DeadlineAt
+	}
+	if want := start.Add(10 * time.Minute); !deadlines[first].Equal(want) {
+		t.Fatalf("in-flight deadline = %v, want %v (unchanged)", deadlines[first], want)
+	}
+	if want := start.Add(time.Minute); !deadlines[second].Equal(want) {
+		t.Fatalf("new deadline = %v, want %v", deadlines[second], want)
+	}
+}
+
+func TestNilQueueStillBoundsTheDownload(t *testing.T) {
+	var q *Queue
+	var deadline time.Time
+	var ok bool
+	h := q.Middleware("emly")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deadline, ok = r.Context().Deadline()
+	}))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	if !ok || time.Until(deadline) > DefaultDownloadTimeout || time.Until(deadline) < DefaultDownloadTimeout-time.Minute {
+		t.Fatalf("deadline = %v (set %v), want ~%v from now", deadline, ok, DefaultDownloadTimeout)
 	}
 }

@@ -1,6 +1,8 @@
 package updates
 
 import (
+	"net/http"
+	"path"
 	"time"
 
 	apimw "emly-api-go/internal/middleware"
@@ -71,4 +73,30 @@ func RegisterV2(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix
 			r.Delete("/updater/releases/{version}", DeleteUpdaterRelease(db, s3conn, updaterPrefix))
 		})
 	})
+}
+
+// installerDownloadPatterns are the full paths of the two installer download
+// routes mounted above, as path.Match patterns ('*' never crosses a '/').
+// TestInstallerDownloadPredicateMatchesRoutes in internal/routes/v2 walks the
+// real router to keep them in step with RegisterV2.
+var installerDownloadPatterns = []string{
+	"/v2/updates/releases/*/download",
+	"/v2/updates/download/updater/*",
+}
+
+// IsInstallerDownload reports whether r targets one of the two installer
+// downloads. main.go keeps those out of the global 30s request timeout: that
+// cut every installer on a link slower than ~330 KB/s, and their deadline
+// now comes from the download queue instead (DOWNLOAD_QUEUE_TIMEOUT,
+// changeable from the dashboard).
+func IsInstallerDownload(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	for _, p := range installerDownloadPatterns {
+		if ok, _ := path.Match(p, r.URL.Path); ok {
+			return true
+		}
+	}
+	return false
 }

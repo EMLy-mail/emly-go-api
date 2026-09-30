@@ -55,6 +55,9 @@ type DownloadQueueConfig struct {
 	Enabled    bool
 	Slots      int
 	RetryAfter time.Duration
+	// Timeout bounds one installer download end to end, in place of the
+	// global 30s request timeout those two routes are exempt from.
+	Timeout time.Duration
 }
 
 type Config struct {
@@ -227,6 +230,7 @@ func load() *Config {
 			Enabled:    strings.ToLower(strings.TrimSpace(envString("DOWNLOAD_QUEUE_ENABLED", "true"))) == "true",
 			Slots:      envInt("DOWNLOAD_QUEUE_SLOTS", 50),
 			RetryAfter: envDuration("DOWNLOAD_QUEUE_RETRY_AFTER", 60*time.Second),
+			Timeout:    envDuration("DOWNLOAD_QUEUE_TIMEOUT", 10*time.Minute),
 		},
 		RateLimit: RateLimitConfig{
 			UnauthMaxReqs:  envInt("RL_UNAUTH_MAX_REQS", 10),

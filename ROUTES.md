@@ -65,9 +65,15 @@ Il corpo di errore è sempre nella forma:
 Catena applicata in `main.go` a ogni richiesta, nell'ordine:
 
 ```
-RequestID → RealIP → AccessLog → Recoverer → Timeout(30s) → Timing
+RequestID → RealIP → AccessLog → Recoverer → Timeout(30s)* → Timing
           → [otelhttp, se OTEL_ENABLED] → BanList → RateLimiter
 ```
+
+\* Tranne i due download di installer (`updates.IsInstallerDownload`), la cui
+durata massima è `download_timeout_seconds` della
+[coda download](#510-coda-download--v2download-queue) (default 10 minuti,
+modificabile dalla dashboard): 30 s tagliavano ogni installer su una linea
+sotto i ~330 KB/s.
 
 - **BanList** (`internal/middleware/ban.go`) rifiuta con `403` gli identificatori
   presenti nella tabella `bans` (IP, HWID, hostname). Un `X-Admin-Key` valido è
@@ -864,7 +870,8 @@ Tutto lo stato è **in memoria** (`internal/downloadqueue`): nessuna tabella,
 nulla salvato su DB. Le modifiche fatte da queste route valgono fino al
 prossimo riavvio, poi si torna ai valori di `.env` (`DOWNLOAD_QUEUE_ENABLED`,
 default `true`; `DOWNLOAD_QUEUE_SLOTS`, default `50`;
-`DOWNLOAD_QUEUE_RETRY_AFTER`, default `60s`). È per-istanza come
+`DOWNLOAD_QUEUE_RETRY_AFTER`, default `60s`; `DOWNLOAD_QUEUE_TIMEOUT`,
+default `10m`). È per-istanza come
 `presencehub`: ogni replica conta i propri download.
 
 **Risposta quando la coda è piena** (su `GET /v2/updates/releases/{version}/download`
@@ -889,14 +896,23 @@ Content-Type: application/json
 Il limite scatta solo dopo il rate limiter del gruppo: una richiesta già
 rifiutata da `RouteLimitByIP` non occupa mai uno slot. Lo slot resta occupato
 per tutta la durata dello streaming e si libera quando l'handler ritorna
-(completato, interrotto dal client, timeout 30s o rimosso da un admin).
+(completato, interrotto dal client, scaduto il timeout del download o
+rimosso da un admin).
+
+**Timeout del download.** Le due route di download sono escluse dal
+`Timeout(30s)` globale: la loro durata massima è `download_timeout_seconds`
+(`DOWNLOAD_QUEUE_TIMEOUT`, default 10 minuti), modificabile dalla dashboard
+come la capacità. Vale anche a coda disattivata. Ogni download fissa la sua
+scadenza quando parte (`deadline_at` nello slot): cambiare il valore vale per
+i download nuovi, non per quelli in corso. Allo scadere il trasferimento viene
+tagliato e contato in `failed_by_reason` come `server timeout`.
 A coda **disattivata** i download sono comunque tracciati (compaiono in
 `slots`) ma nessuno viene rifiutato.
 
 | Metodo   | Path            | Auth         | Cosa fa |
 |----------|-----------------|--------------|---------|
-| `GET`    | `/`             | `ADMIN+DASH` | Stato: impostazioni correnti e di default, slot occupati/liberi, contatori, elenco dei download in corso. |
-| `PATCH`  | `/`             | `ADMIN+DASH` | Attiva/disattiva, espande/riduce la capacità, cambia il `Retry-After`. Solo i campi presenti. |
+| `GET`    | `/`             | `ADMIN+DASH` | Stato: impostazioni correnti e di default, slot occupati/liberi, contatori, elenco dei download in corso con avanzamento e velocità media per client. |
+| `PATCH`  | `/`             | `ADMIN+DASH` | Attiva/disattiva, espande/riduce la capacità, cambia il `Retry-After` e il timeout del download. Solo i campi presenti. |
 | `POST`   | `/reset`        | `ADMIN+DASH` | Torna ai valori di `.env`. I download in corso restano. |
 | `DELETE` | `/slots`        | `ADMIN+DASH` | Svuota la coda: interrompe **tutti** i download in corso. `{"evicted": N}`. |
 | `DELETE` | `/slots/{id}`   | `ADMIN+DASH` | Interrompe un singolo download e libera il suo slot. `404` se lo slot non esiste (già finito). |
@@ -912,12 +928,20 @@ rispondono `503`.
   "enabled": true,
   "capacity": 50,
   "retry_after_seconds": 60,
+  "download_timeout_seconds": 600,
   "active": 2,
   "available": 48,
-  "acquired_total": 1234,
+  "completed_total": 1180,
+  "failed_total": 54,
+  "failed_by_reason": {
+    "server timeout": 41,
+    "client disconnected": 12,
+    "error response": 1
+  },
   "rejected_total": 17,
   "evicted_total": 0,
-  "defaults": { "enabled": true, "capacity": 50, "retry_after_seconds": 60 },
+  "total_bytes_per_sec": 2536877,
+  "defaults": { "enabled": true, "capacity": 50, "retry_after_seconds": 60, "download_timeout_seconds": 600 },
   "slots": [
     {
       "id": 1233,
@@ -926,7 +950,13 @@ rispondono `503`.
       "ip": "203.0.113.7",
       "hostname": "pc-reception",
       "hwid": "ABC123",
-      "started_at": "2026-09-30T08:12:44Z"
+      "started_at": "2026-09-30T08:12:44Z",
+      "deadline_at": "2026-09-30T08:22:44Z",
+      "elapsed_seconds": 12.4,
+      "bytes_sent": 31457280,
+      "bytes_total": 94371840,
+      "percent": 33.3,
+      "avg_bytes_per_sec": 2536877
     }
   ]
 }
@@ -935,17 +965,58 @@ rispondono `503`.
 `available` è `capacity - active`, mai sotto zero. I contatori `*_total`
 ripartono da zero a ogni riavvio. `slots` è ordinato dal più vecchio.
 
+Ogni download che ha preso uno slot finisce in **uno solo** di questi
+contatori (finché è in corso è contato in `active`):
+
+| Contatore | Quando |
+|-----------|--------|
+| `completed_total` | L'installer è stato inviato **per intero** (byte inviati = `Content-Length`). |
+| `failed_total` | Il download non è andato a buon fine. `failed_by_reason` dice perché. |
+| `evicted_total` | Interrotto da un admin da `DELETE /slots...`. Non conta anche come fallito. |
+| `rejected_total` | Rifiutato con `429` perché la coda era piena: non ha mai avuto uno slot. |
+
+Chiavi di `failed_by_reason` (sempre un oggetto, vuoto se nessun errore; una
+chiave compare solo dal primo caso):
+
+| Chiave | Significato |
+|--------|-------------|
+| `server timeout` | Il timeout del download (`download_timeout_seconds`) ha tagliato il trasferimento a metà: il client ha ricevuto `200` con un file troncato. Tanti casi = timeout troppo corto per le linee più lente della flotta. |
+| `client disconnected` | Il client ha chiuso la connessione prima della fine. |
+| `copy failed` | Errore di scrittura/lettura con la richiesta ancora viva. |
+| `error response` | Risposta `4xx`/`5xx` prima di iniziare lo streaming (release inesistente, file assente su S3, S3 non raggiungibile). |
+| `internal error` | Panic dell'handler durante il download. |
+
+Le chiavi `server timeout` / `client disconnected` / `copy failed` sono le
+stesse del campo `reason` nel log **warn** `installer download did not
+complete`, calcolate dalla stessa funzione (`downloadqueue.FailureReason`):
+una riga di log e il contatore corrispondente non possono divergere.
+
+Per ogni slot, calcolati al momento della richiesta:
+
+| Campo               | Contenuto |
+|---------------------|-----------|
+| `deadline_at`       | Quando il timeout del download taglierà il trasferimento. |
+| `elapsed_seconds`   | Secondi da `started_at` (un decimale). |
+| `bytes_sent`        | Byte già scritti verso il client. |
+| `bytes_total`       | `Content-Length` dell'installer; assente finché l'handler non l'ha impostato (lookup della release/apertura S3 in corso). |
+| `percent`           | `bytes_sent / bytes_total`, un decimale; assente senza `bytes_total`. |
+| `avg_bytes_per_sec` | **Velocità media** dall'inizio del download: `bytes_sent / elapsed_seconds`. Non è istantanea, e include il tempo di lookup prima del primo byte. |
+
+`total_bytes_per_sec` è la somma delle velocità medie di tutti gli slot: più o
+meno la banda che i download di installer stanno usando in questo momento.
+
 **`PATCH /` — corpo JSON**
 
 ```json
-{ "enabled": true, "capacity": 80, "retry_after_seconds": 120 }
+{ "enabled": true, "capacity": 80, "retry_after_seconds": 120, "download_timeout_seconds": 900 }
 ```
 
-| Campo                 | Vincoli |
-|-----------------------|---------|
-| `enabled`             | booleano |
-| `capacity`            | intero `1..10000` |
-| `retry_after_seconds` | intero `1..86400` |
+| Campo                      | Vincoli |
+|----------------------------|---------|
+| `enabled`                  | booleano |
+| `capacity`                 | intero `1..10000` |
+| `retry_after_seconds`      | intero `1..86400` |
+| `download_timeout_seconds` | intero `1..86400`; vale per i download che partono dopo |
 
 Almeno un campo è richiesto, altrimenti `400`; un valore fuori range è `400`.
 Ridurre la capacità sotto il numero di download in corso non interrompe

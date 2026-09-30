@@ -30,10 +30,19 @@ type FullResponse struct {
 //
 // It must sit after the route's rate limiter: a request that limiter refuses
 // never reaches here and never takes a slot.
+//
+// It also bounds the download's duration with the queue's DownloadTimeout.
+// The two download routes are exempt from main.go's global 30s timeout
+// (updates.IsInstallerDownload), which cut any installer on a link slower
+// than ~330 KB/s, so this deadline is the only one they have.
 func (q *Queue) Middleware(product string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		if q == nil {
-			return next
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx, cancel := context.WithTimeout(r.Context(), DefaultDownloadTimeout)
+				defer cancel()
+				next.ServeHTTP(w, r.WithContext(ctx))
+			})
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id := updaterclient.IdentityFromRequest(r)
@@ -42,7 +51,7 @@ func (q *Queue) Middleware(product string) func(http.Handler) http.Handler {
 			ctx, cancel := context.WithCancelCause(r.Context())
 			defer cancel(nil)
 
-			slotID, ok := q.TryAcquire(SlotInfo{
+			s, ok := q.acquire(SlotInfo{
 				Product:  product,
 				Version:  version,
 				IP:       id.IP,
@@ -68,9 +77,86 @@ func (q *Queue) Middleware(product string) func(http.Handler) http.Handler {
 				})
 				return
 			}
-			defer q.Release(slotID)
+			// Evict cancels ctx with ErrEvicted; the deadline sits under it, so
+			// context.Cause(dctx) still reports an eviction as one, and a
+			// deadline as DeadlineExceeded.
+			dctx, dcancel := context.WithTimeout(ctx, s.timeout)
+			defer dcancel()
 
-			next.ServeHTTP(w, r.WithContext(ctx))
+			cw := &countingWriter{ResponseWriter: w, slot: s}
+			returned := false
+			defer func() {
+				reason := ReasonInternalError
+				if returned {
+					reason = cw.outcome(dctx)
+				}
+				q.Finish(s.info.ID, reason)
+			}()
+
+			next.ServeHTTP(cw, r.WithContext(dctx))
+			returned = true
 		})
 	}
 }
+
+// countingWriter feeds the bytes a download has sent, and its Content-Length
+// once the handler has set it, into the slot - what the admin routes turn
+// into progress and average speed. Only the download's own goroutine
+// touches it; the slot's counters are the shared, atomic part.
+type countingWriter struct {
+	http.ResponseWriter
+	slot      *slot
+	sawHeader bool
+	status    int
+	writeErr  error
+}
+
+// outcome is the Finish reason for the download once its handler returned:
+// "" only when the installer went out whole. The truncation test mirrors
+// streamInstaller's, so a transfer it logs as incomplete is never counted as
+// completed here - even when the handler itself saw no error, as when the
+// server timeout cancels the S3 read and io.Copy just stops short.
+func (w *countingWriter) outcome(ctx context.Context) string {
+	if w.status >= http.StatusBadRequest {
+		return ReasonErrorResponse
+	}
+	sent, total := w.slot.sent.Load(), w.slot.total.Load()
+	if w.writeErr != nil || (total > 0 && sent < total) {
+		return FailureReason(ctx)
+	}
+	return ""
+}
+
+func (w *countingWriter) captureTotal() {
+	if w.sawHeader {
+		return
+	}
+	w.sawHeader = true
+	if n, err := strconv.ParseInt(w.Header().Get("Content-Length"), 10, 64); err == nil {
+		w.slot.setTotal(n)
+	}
+}
+
+func (w *countingWriter) WriteHeader(code int) {
+	w.captureTotal()
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.captureTotal()
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(p)
+	w.slot.addSent(n)
+	if err != nil && w.writeErr == nil {
+		w.writeErr = err
+	}
+	return n, err
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (w *countingWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
