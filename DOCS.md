@@ -88,7 +88,8 @@ emly-api-go/
     │   ├── routes.go                #   RegisterV2: monta le sue route su /v2
     │   └── templates/               #   template del testo nello ZIP
     ├── admin/                       # admin/auth (login/sessioni) + admin/users
-    ├── updates/                     # release EMLy + self-update dell'Updater
+    ├── updates/                     # release per prodotto (EMLy e gli altri) + self-update dell'Updater
+    ├── products/                    # /v2/products: il registro dei prodotti (admin)
     ├── configapi/                   # /v2/config: documento e revisioni (HTTP)
     ├── stats/                       # /v2/stats/* REST + /v2/stats/stream (WS)
     ├── clientws/                    # /v2/client/ws: connessione sempre aperta + route admin comandi/eventi/notify
@@ -100,7 +101,8 @@ emly-api-go/
     ├── response/                    # OK / Created / Error: la forma delle risposte JSON
     ├── dbvalue/                     # conversioni valore <-> colonna (NULL, troncamento)
     ├── ttlcache/                    # memoizer generico dietro le stats in polling
-    ├── session/                     # chi e' l'utente dietro un token di sessione
+    ├── session/                     # chi e' l'utente dietro un token di sessione + quali prodotti puo' vedere
+    ├── productreg/                  # registro prodotti in RAM + middleware "prodotto della richiesta"
     ├── updaterclient/               # identita' dell'EMLy Updater + telemetria
     │
     │   ── Infrastruttura ──
@@ -669,6 +671,33 @@ Headers: X-Session-Token: <session_id>
 - UUID utenti generati con `crypto/rand` (UUID v4)
 - Session ID: 32 byte random, encoded come hex (64 caratteri)
 
+**Scope prodotti: cosa puo' vedere un utente.** Ogni utente ha un elenco di
+prodotti assegnati (tabella `user_products`, gestita da
+`PUT /v2/api/admin/users/{id}/products`). Le route della dashboard che parlano
+di prodotti — gestione release, `/v2/products`, `/v2/stats/*` — lo applicano
+a ogni richiesta che porta `X-Session-Token`, **admin compresi**. L'unico ruolo
+che non ha limiti e' `owner`, il piu' alto della gerarchia
+(owner > admin > user): vede tutti i prodotti senza bisogno di assegnazioni. E' come una policy di Laravel (`Gate::allows('view', $product)`)
+o un middleware Express che legge `req.user.products`, con una differenza: qui
+lo applica l'API, non la dashboard, cosi' la regola vive in un posto solo.
+
+Il meccanismo e' in `internal/session/scope.go`: il middleware
+`session.LoadScope` risolve il token **una volta** e mette uno `Scope` nel
+context della richiesta (l'equivalente di `req.scope = ...` in Express), e gli
+handler lo leggono con `session.ScopeFrom(ctx)`. Tre casi:
+
+- **nessun token**: nessuna restrizione. E' la admin key usata da uno script o
+  da un'integrazione, che puo' comunque fare tutto;
+- **token valido di un `owner`**: nessuna restrizione;
+- **token valido di chiunque altro**: solo i prodotti assegnati;
+- **token sconosciuto, scaduto o di un utente disabilitato**: **nessun**
+  prodotto. Il contrario di `session.Username`, che e' "best effort": li' si
+  tratta solo di attribuire una scrittura, qui di decidere cosa si vede, e
+  ricadere su "tutto" con un token scaduto sarebbe una falla.
+
+Le macchine seguono i prodotti: un utente vede solo i client che hanno
+installato almeno uno dei suoi prodotti (`updater_client_products`).
+
 ### Fuori scala: `X-Dashboard-Key`
 
 Per quasi tutte le route non autentica niente. Una richiesta che lo porta
@@ -737,6 +766,7 @@ All'avvio, `schema.Migrate(db, cfg.Database)` esegue questi passi:
 | `index_exists`      | l'indice esiste nella tabella                      |
 | `table_not_exists`  | la tabella non esiste nel database                 |
 | `table_exists`      | la tabella esiste nel database                     |
+| `column_type_not`   | la colonna esiste con un tipo diverso da `column_type` (confronto su `COLUMN_TYPE`, senza distinzione maiuscole/minuscole, es. `"varchar(20)"`) |
 
 ### Come aggiungere una migration
 
@@ -911,6 +941,7 @@ vuoto. Popolano la tabella `updater_clients`.
 | `X-EMLy-Product`     | `product`       | Product number / SKU del produttore — su HP il `8XXXXXXX#ABZ` stampato sull'etichetta            |
 | `X-EMLy-OSVersion`   | `os_version`    | Versione di Windows in chiaro, es. `Windows 11 24H2 Professional (Build 26100.4652)`. Salvata cosi' com'e': nessuno la interpreta |
 | `X-EMLy-AppVersion`  | `emly_version`  | Versione di EMLy installata, letta dal `config.ini` di EMLy (`GUI_SEMVER`). Assente se EMLy non e' installato. La versione dell'Updater viaggia invece nello User-Agent |
+| `X-EMLy-InstalledProducts` | tabella `updater_client_products` | Inventario **completo** dei prodotti installati, `slug=versione` separati da virgola (`emly=3.5.0,foo=1.2.0`). I prodotti non elencati vengono cancellati; header vuoto = niente installato; header assente = non riportato, non cambia nulla |
 
 Quattro regole da tenere a mente:
 
@@ -933,6 +964,59 @@ Quattro regole da tenere a mente:
   Ogni richiesta che porta `X-EMLy-LoggedUserState` riscrive anche l'orario,
   azzerandolo se la sessione non e' `disconnected`: altrimenti un utente che si
   ricollega lascerebbe in tabella "active-rdp, disconnesso da ieri".
+
+Occhio a non confondere `X-EMLy-Product` (lo SKU del firmware, una
+proprieta' dell'hardware) con i **prodotti software** di
+`X-EMLy-InstalledProducts`: sono due cose diverse con un nome sfortunato.
+
+---
+
+### Piu' prodotti: `internal/productreg`, `internal/products` e `/v2/updates/{product}`
+
+All'inizio l'API distribuiva un prodotto solo, EMLy: ogni query su
+`update_releases` lo dava per scontato. Ora EMLy e' "un prodotto tra tanti".
+Ogni prodotto ha le sue release, i suoi slot stable/beta/critical e il suo
+manifest sotto `/v2/updates/{product}/...`; le vecchie route senza prodotto
+(`/v2/updates/manifest`, `/v2/updates/releases/...`) restano identiche e
+valgono sempre per `emly`, perche' ogni EMLy gia' installato le usa.
+
+**Il registro** e' la tabella `products`, gestita da `/v2/products`
+(`internal/products`). Il manifest e' pero' la route piu' martellata
+dell'API — tutta la flotta la interroga in continuazione — quindi non si fa una
+query sui prodotti a ogni richiesta: `internal/productreg` tiene la tabella in
+RAM, come faresti in Laravel con `Cache::remember('products', ...)` o in Node
+con una `Map` popolata all'avvio. Si ricarica subito dopo ogni scrittura admin
+e ogni minuto (cosi' una seconda istanza vede un prodotto nuovo entro un
+minuto); se il ricaricamento fallisce tiene la copia precedente, come la ban
+list. `emly` esiste sempre, anche senza database: le route storiche non
+possono rompersi.
+
+**Come un handler sa di quale prodotto si parla.** In Express scriveresti
+`router.param('product', loadProduct)`, in Laravel un route model binding.
+Qui e' un middleware, `productreg.Resolve`, che legge `{product}` dal path,
+risponde `404` se non esiste e mette il prodotto nel context; le route storiche
+usano `productreg.Fixed("emly")`. L'handler legge
+`productreg.FromContext(r.Context())` e aggiunge `WHERE product = ?` a ogni
+query: sono **gli stessi handler** per tutte e due le forme di URL.
+
+**Qualche regola da sapere:**
+- gli slug `manifest`, `releases`, `download`, `updater`, `all`, `products`
+  sono riservati. In chi i segmenti statici vincono sui parametri, quindi un
+  prodotto chiamato `releases` sarebbe irraggiungibile;
+- i flag stable/beta/critical sono **per prodotto**: promuovere una release di
+  `foo` a stable non tocca `emly`. La versione e' unica per prodotto, non piu'
+  globale;
+- file su S3: `emly` resta dov'era (`S3_UPDATES_PREFIX`), gli altri vanno in
+  `S3_UPDATES_PREFIX/<slug>/`, o in un `s3_prefix` esplicito;
+- un prodotto **disabilitato** sparisce dalle route pubbliche (`404`) ma resta
+  gestibile, cosi' si preparano le release prima di aprirlo;
+- telemetria: `updater_events.product` e il rollup orario contengono ora lo
+  slug, e `?product=` sulle stats accetta qualunque prodotto del registro
+  (oltre a `updater` e `all`). La colonna e' un `VARCHAR`, quindi un prodotto
+  nuovo non richiede migration.
+
+Il self-update dell'Agent (`updater_releases`, `/manifest/updater`) **non** e'
+un prodotto e resta com'era.
 
 ---
 

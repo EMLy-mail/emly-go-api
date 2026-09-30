@@ -30,6 +30,8 @@ func RegisterV2(r chi.Router, db *sqlx.DB) {
 			r.Patch("/{id}", UpdateUser(db))
 			r.Post("/{id}/reset-password", ResetPassword(db))
 			r.Delete("/{id}", DeleteUser(db))
+			r.Get("/{id}/products", GetUserProducts(db))
+			r.Put("/{id}/products", PutUserProducts(db))
 		})
 	})
 }

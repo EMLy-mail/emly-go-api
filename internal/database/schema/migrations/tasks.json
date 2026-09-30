@@ -170,5 +170,85 @@
         { "type": "table_not_exists", "table": "updater_event_hourly" }
       ]
     }
+    ,{
+      "id": "22_products",
+      "sql_file": "22_products.sql",
+      "description": "Create the products registry (seeded with emly) so the updates surface can distribute more than one product.",
+      "conditions": [
+        { "type": "table_not_exists", "table": "products" }
+      ]
+    }
+    ,{
+      "id": "23_update_releases_product",
+      "sql_file": "23_update_releases_product.sql",
+      "description": "Add product to update_releases (existing rows become emly), make version unique per product and index the per-product stable/beta lookups.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "update_releases", "column": "product" }
+      ]
+    }
+    ,{
+      "id": "24_updater_client_products",
+      "sql_file": "24_updater_client_products.sql",
+      "description": "Create updater_client_products (installed version per client and product), seeded from updater_clients.emly_version.",
+      "conditions": [
+        { "type": "table_not_exists", "table": "updater_client_products" }
+      ]
+    }
+    ,{
+      "id": "25_user_products",
+      "sql_file": "25_user_products.sql",
+      "description": "Create user_products (which products each dashboard user may see), assigning emly to every existing user.",
+      "conditions": [
+        { "type": "table_not_exists", "table": "user_products" }
+      ]
+    }
+    ,{
+      "id": "26_update_releases_product_type",
+      "sql_file": "26_update_releases_product_type.sql",
+      "description": "Repair a database that ran the v3 branch's product ENUM('app','updater') and so skipped migration 23: make product VARCHAR(20) and turn 'app' into emly.",
+      "conditions": [
+        { "type": "column_type_not", "table": "update_releases", "column": "product", "column_type": "varchar(20)" }
+      ]
+    }
+    ,{
+      "id": "26_update_releases_drop_idx_product_channel",
+      "sql_file": "26_update_releases_drop_idx_product_channel.sql",
+      "description": "Drop the v3 branch's idx_product_channel, left on product alone after channel was dropped.",
+      "conditions": [
+        { "type": "index_exists", "table": "update_releases", "index": "idx_product_channel" }
+      ]
+    }
+    ,{
+      "id": "26_update_releases_drop_idx_is_stable",
+      "sql_file": "26_update_releases_drop_idx_is_stable.sql",
+      "description": "Drop idx_is_stable on a database that skipped migration 23 (replaced by idx_product_stable).",
+      "conditions": [
+        { "type": "index_exists", "table": "update_releases", "index": "idx_is_stable" }
+      ]
+    }
+    ,{
+      "id": "26_update_releases_drop_idx_is_beta",
+      "sql_file": "26_update_releases_drop_idx_is_beta.sql",
+      "description": "Drop idx_is_beta on a database that skipped migration 23 (replaced by idx_product_beta).",
+      "conditions": [
+        { "type": "index_exists", "table": "update_releases", "index": "idx_is_beta" }
+      ]
+    }
+    ,{
+      "id": "26_update_releases_idx_product_stable",
+      "sql_file": "26_update_releases_idx_product_stable.sql",
+      "description": "Add idx_product_stable on a database that skipped migration 23.",
+      "conditions": [
+        { "type": "index_not_exists", "table": "update_releases", "index": "idx_product_stable" }
+      ]
+    }
+    ,{
+      "id": "26_update_releases_idx_product_beta",
+      "sql_file": "26_update_releases_idx_product_beta.sql",
+      "description": "Add idx_product_beta on a database that skipped migration 23.",
+      "conditions": [
+        { "type": "index_not_exists", "table": "update_releases", "index": "idx_product_beta" }
+      ]
+    }
   ]
 }

@@ -12,6 +12,8 @@ import (
 	"emly-api-go/internal/health"
 	emlyMiddleware "emly-api-go/internal/middleware"
 	"emly-api-go/internal/presencehub"
+	"emly-api-go/internal/productreg"
+	productsapi "emly-api-go/internal/products"
 	"emly-api-go/internal/stats"
 	"emly-api-go/internal/statshub"
 	"emly-api-go/internal/storage"
@@ -38,8 +40,10 @@ import (
 // routes refresh after a write; nil is fine in tests, where the write lands
 // in the table and nothing needs to enforce it. queue caps concurrent
 // installer downloads and backs /v2/download-queue; nil means no cap and
-// those admin routes answer 503 (see internal/downloadqueue).
-func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror health.ConfigMirrorReporter, hub *statshub.Hub, presence *presencehub.Hub, clients *clienthub.Hub, reloader bans.BanReloader, queue *downloadqueue.Queue) http.Handler {
+// those admin routes answer 503 (see internal/downloadqueue). products is the
+// registry of products /v2/updates/{product} serves and /v2/products edits;
+// nil means EMLy only (see internal/productreg).
+func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror health.ConfigMirrorReporter, hub *statshub.Hub, presence *presencehub.Hub, clients *clienthub.Hub, reloader bans.BanReloader, queue *downloadqueue.Queue, products *productreg.Registry) http.Handler {
 	r := chi.NewRouter()
 
 	rl := emlyMiddleware.NewRateLimiter(config.Load())
@@ -56,8 +60,9 @@ func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, c
 
 	r.Get("/health", health.HealthWithConfigMirror(db, configMirror))
 
-	updates.RegisterV2(r, db, updatesS3conn, config.Load().UpdatesS3Prefix, config.Load().UpdaterS3Prefix, hub, queue)
-	stats.RegisterV2(r, db, config.Load(), hub, presence)
+	updates.RegisterV2(r, db, updatesS3conn, config.Load().UpdatesS3Prefix, config.Load().UpdaterS3Prefix, hub, queue, products)
+	productsapi.RegisterV2(r, db, products)
+	stats.RegisterV2(r, db, config.Load(), hub, presence, products)
 	configapi.RegisterV2(r, db, config.Load(), clients)
 	bans.RegisterV2(r, db, reloader)
 	downloadqueue.RegisterV2(r, db, queue)

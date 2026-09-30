@@ -98,6 +98,9 @@ type authUser struct {
 	Displayname string          `json:"displayname"`
 	Role        models.UserRole `json:"role"`
 	Enabled     bool            `json:"enabled"`
+	// Products is the user's assigned products; only ValidateSession fills
+	// it (omitted from the login response).
+	Products *[]string `json:"products,omitempty"`
 }
 
 
@@ -214,6 +217,16 @@ func ValidateSession(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
+		// The products this session is scoped to (session.Scope) - all of
+		// them for an owner - so the dashboard can build its product
+		// switcher from the same answer the API enforces.
+		products, err := session.VisibleProducts(r.Context(), db, row.ID, row.Role)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "session validation: failed to load user products", "err", err)
+			response.Error(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+
 		response.OK(w, map[string]any{
 			"success": true,
 			"user": authUser{
@@ -222,6 +235,7 @@ func ValidateSession(db *sqlx.DB) http.HandlerFunc {
 				Displayname: row.Displayname,
 				Role:        row.Role,
 				Enabled:     row.Enabled,
+				Products:    &products,
 			},
 		})
 	}

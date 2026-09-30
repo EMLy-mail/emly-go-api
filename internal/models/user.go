@@ -5,6 +5,7 @@ import "time"
 type UserRole string
 
 const (
+	UserRoleOwner UserRole = "owner"
 	UserRoleAdmin UserRole = "admin"
 	UserRoleUser  UserRole = "user"
 )

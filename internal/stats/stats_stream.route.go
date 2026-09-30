@@ -16,7 +16,9 @@ import (
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/models"
 	"emly-api-go/internal/presencehub"
+	"emly-api-go/internal/productreg"
 	"emly-api-go/internal/response"
+	"emly-api-go/internal/session"
 	"emly-api-go/internal/statshub"
 )
 
@@ -122,6 +124,15 @@ type wsConn struct {
 	// snapshots/updates carry (design doc for GET /v2/client/ws §5). May be
 	// nil (tests); presencehub.Hub.Online tolerates that.
 	presence *presencehub.Hub
+
+	// reg validates the product a subscribe asks for. May be nil (tests),
+	// in which case only emly/updater/all are accepted.
+	reg *productreg.Registry
+
+	// scope is the dashboard user's product scope, resolved once at connect
+	// from X-Session-Token (or ?session_token=). It limits every channel
+	// exactly as it limits the REST routes. Unrestricted when no token.
+	scope session.Scope
 }
 
 // wsPending is what one connection owes its client at the next flush, built up
@@ -141,11 +152,12 @@ type wsPending struct {
 	clients map[int]models.UpdaterClient
 }
 
-func newWSConn(ws *websocket.Conn, presence *presencehub.Hub) *wsConn {
+func newWSConn(ws *websocket.Conn, presence *presencehub.Hub, reg *productreg.Registry) *wsConn {
 	now := time.Now().UTC()
 	return &wsConn{
 		ws:       ws,
 		presence: presence,
+		reg:      reg,
 		sub: wsSubData{
 			channels:      make(map[string]bool),
 			windowMinutes: defaultConnectedWindowMinutes,
@@ -201,7 +213,7 @@ func (cn *wsConn) sendSnapshot(ctx context.Context, db *sqlx.DB, channel string)
 	switch channel {
 	case channelSummary:
 		s := cn.subSnapshot()
-		summary, err := fetchStatsSummary(ctx, db, s.windowMinutes, s.product)
+		summary, err := fetchStatsSummary(ctx, db, s.windowMinutes, s.product, cn.scope)
 		if err != nil {
 			cn.sendError(ctx, "internal", "failed to fetch stats summary")
 			return
@@ -209,7 +221,7 @@ func (cn *wsConn) sendSnapshot(ctx context.Context, db *sqlx.DB, channel string)
 		_ = cn.send(ctx, "snapshot", channelSummary, summary)
 
 	case channelClients:
-		clients, err := fetchAllStatsClients(ctx, db)
+		clients, err := fetchAllStatsClients(ctx, db, cn.scope)
 		if err != nil {
 			cn.sendError(ctx, "internal", "failed to fetch clients")
 			return
@@ -219,7 +231,7 @@ func (cn *wsConn) sendSnapshot(ctx context.Context, db *sqlx.DB, channel string)
 
 	case channelEvents:
 		s := cn.subSnapshot()
-		resp, err := fetchStatsEvents(ctx, db, s.eventsBucket, s.eventsEventType, s.product, s.eventsFrom, s.eventsTo)
+		resp, err := fetchStatsEvents(ctx, db, s.eventsBucket, s.eventsEventType, s.product, cn.scope, s.eventsFrom, s.eventsTo)
 		if err != nil {
 			cn.sendError(ctx, "internal", "failed to fetch events")
 			return
@@ -264,14 +276,12 @@ func (cn *wsConn) handleSubscribe(ctx context.Context, db *sqlx.DB, msg wsClient
 			}
 		}
 		if p.Product != nil {
-			if _, _, _, ok := productFilter(*p.Product); ok {
-				product := *p.Product
-				if product == "" {
-					product = "emly"
-				}
+			if product, ok := validProduct(cn.reg, *p.Product); ok && productAllowed(cn.scope, product) {
 				cn.sub.product = product
+			} else if ok {
+				paramErrs = append(paramErrs, "product not assigned to this user")
 			} else {
-				paramErrs = append(paramErrs, "product must be one of: emly, updater, all")
+				paramErrs = append(paramErrs, productError(cn.reg))
 			}
 		}
 		if ev := p.Events; ev != nil {
@@ -438,7 +448,7 @@ func (cn *wsConn) flush(ctx context.Context, db *sqlx.DB) {
 	s := cn.subSnapshot()
 
 	if p.summary {
-		if summary, err := fetchStatsSummary(ctx, db, s.windowMinutes, s.product); err == nil {
+		if summary, err := fetchStatsSummary(ctx, db, s.windowMinutes, s.product, cn.scope); err == nil {
 			_ = cn.send(ctx, "update", channelSummary, summary)
 		}
 	}
@@ -449,8 +459,15 @@ func (cn *wsConn) flush(ctx context.Context, db *sqlx.DB) {
 		// per-client deltas accumulated alongside it are already included.
 		cn.sendSnapshot(ctx, db, channelClients)
 	case len(p.clients) > 0:
-		upserted := make([]models.UpdaterClient, 0, len(p.clients))
-		for _, client := range p.clients {
+		clients := p.clients
+		if cn.scope.IsRestricted() {
+			var err error
+			if clients, err = cn.clientsInScope(ctx, db, clients); err != nil || len(clients) == 0 {
+				break
+			}
+		}
+		upserted := make([]models.UpdaterClient, 0, len(clients))
+		for _, client := range clients {
 			client.Online = cn.presence.Online(int64(client.ID))
 			upserted = append(upserted, client)
 		}
@@ -464,10 +481,32 @@ func (cn *wsConn) flush(ctx context.Context, db *sqlx.DB) {
 	}
 
 	if p.events {
-		if resp, err := fetchStatsEvents(ctx, db, s.eventsBucket, s.eventsEventType, s.product, s.eventsFrom, s.eventsTo); err == nil {
+		if resp, err := fetchStatsEvents(ctx, db, s.eventsBucket, s.eventsEventType, s.product, cn.scope, s.eventsFrom, s.eventsTo); err == nil {
 			_ = cn.send(ctx, "update", channelEvents, resp)
 		}
 	}
+}
+
+// clientsInScope keeps the pending client deltas this connection's scope may
+// see. It runs in flush, never in noteHubEvent, so marking stays DB-free; and
+// only for a restricted scope, so an unscoped dashboard pays nothing.
+func (cn *wsConn) clientsInScope(ctx context.Context, db *sqlx.DB, pending map[int]models.UpdaterClient) (map[int]models.UpdaterClient, error) {
+	clause, args := clientScopeClause(cn.scope)
+	ids := make([]interface{}, 0, len(pending))
+	for id := range pending {
+		ids = append(ids, id)
+	}
+	var visible []int
+	if err := db.SelectContext(ctx, &visible,
+		`SELECT id FROM updater_clients WHERE id IN (`+placeholders(len(ids))+`) AND `+clause,
+		append(ids, args...)...); err != nil {
+		return nil, err
+	}
+	out := make(map[int]models.UpdaterClient, len(visible))
+	for _, id := range visible {
+		out[id] = pending[id]
+	}
+	return out, nil
 }
 
 // readLoop is the connection's single reader (coder/websocket requires reads
@@ -551,7 +590,7 @@ func (cn *wsConn) eventLoop(ctx context.Context, hub *statshub.Hub, db *sqlx.DB)
 // answered 401 with no upgrade attempted at all - so a client can tell "bad
 // key" apart from "network/server problem" immediately, and nothing about
 // the connection is exposed to an unauthenticated caller.
-func StatsStream(db *sqlx.DB, hub *statshub.Hub, presence *presencehub.Hub) http.HandlerFunc {
+func StatsStream(db *sqlx.DB, hub *statshub.Hub, presence *presencehub.Hub, reg *productreg.Registry) http.HandlerFunc {
 	cfg := config.Load()
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -565,13 +604,31 @@ func StatsStream(db *sqlx.DB, hub *statshub.Hub, presence *presencehub.Hub) http
 			return
 		}
 
+		// Same product scope as the REST routes (session.LoadScope), with a
+		// query-string fallback for the same reason admin_key has one.
+		token := r.Header.Get(session.Header)
+		if token == "" {
+			token = r.URL.Query().Get("session_token")
+		}
+		scope, err := session.ScopeFromToken(r.Context(), db, token)
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, "failed to resolve session scope")
+			return
+		}
+
 		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{})
 		if err != nil {
 			slog.WarnContext(r.Context(), "stats stream: upgrade failed", "error", err)
 			return
 		}
 
-		cn := newWSConn(c, presence)
+		cn := newWSConn(c, presence, reg)
+		cn.scope = scope
+		// The default subscription is emly; a user not assigned emly starts
+		// on "all", which their scope narrows to their own products.
+		if !productAllowed(scope, cn.sub.product) {
+			cn.sub.product = "all"
+		}
 
 		ctx, cancel := context.WithCancel(r.Context())
 

@@ -7,6 +7,8 @@ import (
 
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/presencehub"
+	"emly-api-go/internal/productreg"
+	"emly-api-go/internal/session"
 	"emly-api-go/internal/statshub"
 
 	"github.com/go-chi/chi/v5"
@@ -20,18 +22,22 @@ import (
 // presence backs the "online" field on GET /stats/clients and the
 // stats:clients WS channel; nil is fine (see internal/presencehub). cfg
 // carries StatsCacheTTL, which bounds how stale the polled /summary and
-// /events may be - see GetStatsSummary and GetStatsEvents.
-func RegisterV2(r chi.Router, db *sqlx.DB, cfg *config.Config, hub *statshub.Hub, presence *presencehub.Hub) {
+// /events may be - see GetStatsSummary and GetStatsEvents. reg validates
+// ?product= (nil accepts emly, updater and all only).
+func RegisterV2(r chi.Router, db *sqlx.DB, cfg *config.Config, hub *statshub.Hub, presence *presencehub.Hub, reg *productreg.Registry) {
 	r.Route("/stats", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.AdminKeyAuth(db))
 			r.Use(apimw.RouteLimitByIP(30, time.Minute))
+			// A dashboard user only sees their assigned products and the
+			// machines that have one installed (session.Scope).
+			r.Use(session.LoadScope(db))
 
-			r.Get("/summary", GetStatsSummary(db, cfg))
+			r.Get("/summary", GetStatsSummary(db, cfg, reg))
 			r.Get("/clients", ListStatsClients(db, presence))
 			r.Get("/clients/{id}", GetStatsClientDetail(db, presence))
 			r.Delete("/clients/{id}", DeleteStatsClient(db))
-			r.Get("/events", GetStatsEvents(db, cfg))
+			r.Get("/events", GetStatsEvents(db, cfg, reg))
 		})
 
 		// /stream does its own X-Admin-Key check (with a query-string
@@ -42,7 +48,7 @@ func RegisterV2(r chi.Router, db *sqlx.DB, cfg *config.Config, hub *statshub.Hub
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
-			r.Get("/stream", StatsStream(db, hub, presence))
+			r.Get("/stream", StatsStream(db, hub, presence, reg))
 		})
 	})
 }

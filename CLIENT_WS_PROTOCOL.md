@@ -179,6 +179,7 @@ Esempio di `identity` v2:
     "product": "Latitude 5540",
     "os_version": "Windows 11 24H2 Professional (Build 26100.4652)",
     "emly_version": "3.4.1",
+    "installed_products": { "emly": "3.4.1", "foo": "1.2.0" },
     "protocol": 2,
     "capabilities": [
       "service.restart", "machine.reboot", "apps.list_upgradable",
@@ -190,6 +191,15 @@ Esempio di `identity` v2:
   }
 }
 ```
+
+`installed_products` (opzionale, anche in v1) è l'inventario **completo** dei
+prodotti installati sulla macchina, `slug → versione`, stesso contratto
+dell'header HTTP `X-EMLy-InstalledProducts`: assente = non riportato (il server
+non cambia nulla), `{}` = nessun prodotto installato, altrimenti i prodotti
+non elencati vengono considerati disinstallati. Gli slug seguono
+`^[a-z0-9][a-z0-9-]{0,19}$`, le versioni sono al massimo 20 caratteri; voci non
+valide vengono scartate. `emly_version` resta e continua a valere per `emly`.
+Vedi `docs/superpowers/specs/2026-09-30-agent-multi-product-design.md`.
 
 ## 5. Famiglie di messaggi
 

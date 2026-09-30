@@ -2,6 +2,7 @@ package updaterclient
 
 import (
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +46,7 @@ func TestClientIdentityFromRequest(t *testing.T) {
 		Contact:                  "f.fois@3git.eu",
 		IP:                       "10.0.0.5",
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("IdentityFromRequest =\n  %+v\nwant\n  %+v", got, want)
 	}
 }

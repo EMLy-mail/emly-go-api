@@ -104,9 +104,15 @@ type Identity struct {
 	// They move independently: the updater self-updates on its own schedule,
 	// the app only when a release is rolled out to this machine.
 	EMLyVersion string
-	UAVersion   string
-	Contact     string
-	IP          string
+	// InstalledProducts is the machine's product inventory, slug -> version
+	// (X-EMLy-InstalledProducts / identity.installed_products). nil means
+	// "not reported" and changes nothing; a non-nil map is the full
+	// inventory, so a product missing from it is uninstalled. See
+	// syncInstalledProducts.
+	InstalledProducts map[string]string
+	UAVersion         string
+	Contact           string
+	IP                string
 }
 
 // identified reports whether the request carries enough to key a client row
@@ -130,6 +136,7 @@ func IdentityFromRequest(r *http.Request) Identity {
 		Product:                  dbvalue.Truncate(r.Header.Get("X-EMLy-Product"), 128),
 		OSVersion:                dbvalue.Truncate(r.Header.Get("X-EMLy-OSVersion"), 128),
 		EMLyVersion:              dbvalue.Truncate(r.Header.Get("X-EMLy-AppVersion"), 20),
+		InstalledProducts:        installedProductsFromHeader(r.Header),
 		UAVersion:                uaVersion,
 		Contact:                  contact,
 		IP:                       ClientIP(r),
@@ -152,6 +159,9 @@ type WSIdentityPayload struct {
 	Product                  string `json:"product"`
 	OSVersion                string `json:"os_version"`
 	EMLyVersion              string `json:"emly_version"`
+	// InstalledProducts is X-EMLy-InstalledProducts as a JSON object. Absent
+	// (nil) and {} differ exactly like the header's absent and empty.
+	InstalledProducts map[string]string `json:"installed_products"`
 }
 
 // IdentityFromWSPayload builds a Identity from an "identity"
@@ -177,6 +187,7 @@ func IdentityFromWSPayload(r *http.Request, p WSIdentityPayload) Identity {
 		Product:                  dbvalue.Truncate(p.Product, 128),
 		OSVersion:                dbvalue.Truncate(p.OSVersion, 128),
 		EMLyVersion:              dbvalue.Truncate(p.EMLyVersion, 20),
+		InstalledProducts:        sanitizeInstalledProducts(p.InstalledProducts),
 		UAVersion:                uaVersion,
 		Contact:                  contact,
 		IP:                       ClientIP(r),
@@ -556,6 +567,7 @@ func Upsert(ctx context.Context, db *sqlx.DB, id Identity) (int64, error) {
 		); err != nil {
 			return 0, err
 		}
+		syncInstalledProducts(ctx, db, targetID, id)
 		return targetID, nil
 	}
 
@@ -571,5 +583,10 @@ func Upsert(ctx context.Context, db *sqlx.DB, id Identity) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	newID, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	syncInstalledProducts(ctx, db, newID, id)
+	return newID, nil
 }

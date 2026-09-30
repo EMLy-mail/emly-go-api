@@ -4,6 +4,7 @@ import "time"
 
 type Release struct {
 	ID                 int       `db:"id"                   json:"-"`
+	Product            string    `db:"product"              json:"product"`
 	Version            string    `db:"version"              json:"version"`
 	IsStable           bool      `db:"is_stable"            json:"is_stable"`
 	IsBeta             bool      `db:"is_beta"              json:"is_beta"`

@@ -36,6 +36,14 @@ type FullResponse struct {
 // (updates.IsInstallerDownload), which cut any installer on a link slower
 // than ~330 KB/s, so this deadline is the only one they have.
 func (q *Queue) Middleware(product string) func(http.Handler) http.Handler {
+	return q.MiddlewareFunc(func(*http.Request) string { return product })
+}
+
+// MiddlewareFunc is Middleware for a route that serves more than one product
+// (GET /v2/updates/{product}/releases/{version}/download): productOf names
+// the slot's product per request, so mount it after whatever puts the product
+// on the request.
+func (q *Queue) MiddlewareFunc(productOf func(*http.Request) string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		if q == nil {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +55,7 @@ func (q *Queue) Middleware(product string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id := updaterclient.IdentityFromRequest(r)
 			version := chi.URLParam(r, "version")
+			product := productOf(r)
 
 			ctx, cancel := context.WithCancelCause(r.Context())
 			defer cancel(nil)

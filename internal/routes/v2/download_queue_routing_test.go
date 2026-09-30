@@ -13,7 +13,7 @@ import (
 // the admin key alone is not enough, nor is the dashboard key alone.
 func TestDownloadQueueAdminNeedsBothKeys(t *testing.T) {
 	q := downloadqueue.New(downloadqueue.Settings{Enabled: true, Capacity: 5, RetryAfter: time.Minute})
-	router := NewRouter(nil, nil, nil, nil, nil, nil, nil, nil, q)
+	router := NewRouter(nil, nil, nil, nil, nil, nil, nil, nil, q, nil)
 
 	cases := []struct {
 		name    string
@@ -47,7 +47,7 @@ func TestDownloadQueueAdminNeedsBothKeys(t *testing.T) {
 
 // TestDownloadQueueNilAnswers503 covers a router built without a queue.
 func TestDownloadQueueNilAnswers503(t *testing.T) {
-	router := NewRouter(nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router := NewRouter(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/download-queue", nil)
 	req.Header.Set("X-Admin-Key", "test-admin-key")
 	req.Header.Set("X-Dashboard-Key", "test-dashboard-key")
@@ -64,7 +64,7 @@ func TestDownloadQueueNilAnswers503(t *testing.T) {
 func TestFullQueueRefusesBothInstallerDownloads(t *testing.T) {
 	q := downloadqueue.New(downloadqueue.Settings{Enabled: true, Capacity: 1, RetryAfter: 60 * time.Second})
 	id, _ := q.TryAcquire(downloadqueue.SlotInfo{Product: "emly"}, nil)
-	router := NewRouter(nil, nil, nil, nil, nil, nil, nil, nil, q)
+	router := NewRouter(nil, nil, nil, nil, nil, nil, nil, nil, q, nil)
 
 	for _, path := range []string{"/updates/releases/1.7.0/download", "/updates/download/updater/1.5.0"} {
 		rec := httptest.NewRecorder()

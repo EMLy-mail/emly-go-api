@@ -18,7 +18,7 @@ import (
 // an events window wide enough that any event timestamped "now" falls inside
 // it.
 func subscribedConn(channels ...string) *wsConn {
-	cn := newWSConn(nil, nil)
+	cn := newWSConn(nil, nil, nil)
 	for _, c := range channels {
 		cn.sub.channels[c] = true
 	}

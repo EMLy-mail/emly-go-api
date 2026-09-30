@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 // key gets a plain 401 the caller can tell apart from a network problem -
 // never an accepted-then-closed connection.
 func TestStatsStreamRejectsMissingOrWrongAdminKey(t *testing.T) {
-	h := StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration))
+	h := StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration), nil)
 
 	cases := []struct {
 		name    string
@@ -72,7 +72,7 @@ func TestStatsStreamRejectsMissingOrWrongAdminKey(t *testing.T) {
 // Hijacker) - see TestStatsStreamPingPong for a full handshake over a real
 // listener.
 func TestStatsStreamAcceptsQueryStringKeyFallback(t *testing.T) {
-	h := StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration))
+	h := StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration), nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/stream?admin_key=test-admin-key", nil)
 	rec := httptest.NewRecorder()
@@ -91,7 +91,7 @@ func TestStatsStreamAcceptsQueryStringKeyFallback(t *testing.T) {
 // §7). It uses a nil hub and never subscribes to a channel, so it never
 // touches the (nil) database.
 func TestStatsStreamPingPong(t *testing.T) {
-	srv := httptest.NewServer(StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration)))
+	srv := httptest.NewServer(StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration), nil))
 	defer srv.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -129,7 +129,7 @@ func TestStatsStreamPingPong(t *testing.T) {
 // of the same auth gate: Dial itself fails (no upgrade completes) when the
 // admin key is missing.
 func TestStatsStreamDialRejectedWithoutAdminKey(t *testing.T) {
-	srv := httptest.NewServer(StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration)))
+	srv := httptest.NewServer(StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration), nil))
 	defer srv.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -157,7 +157,7 @@ func TestStatsStreamDialRejectedWithoutAdminKey(t *testing.T) {
 // Named for what it actually checks, rather than what its predecessor's name
 // (TestStatsStreamClientsSnapshotIncludesOnline) implied but never verified.
 func TestStatsStreamAcceptsAPresenceHub(t *testing.T) {
-	h := StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration))
+	h := StatsStream(nil, statshub.New(), presencehub.New(presencehub.DefaultGraceDuration), nil)
 	if h == nil {
 		t.Fatal("StatsStream returned a nil handler")
 	}

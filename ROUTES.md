@@ -3,7 +3,7 @@
 Elenco di ogni endpoint esposto da **emly-api-go**, con autenticazione richiesta,
 parametri e comportamento. Generato dal codice in `internal/routes/` e nei
 package per feature sotto `internal/` (`bugreports`, `admin`, `updates`,
-`configapi`, `stats`, `clientws`, `bans`, `downloadqueue`, `health`), ognuno dei quali registra
+`products`, `configapi`, `stats`, `clientws`, `bans`, `downloadqueue`, `health`), ognuno dei quali registra
 le proprie route v2 nel suo `routes.go`.
 
 Per l'architettura generale vedi [CLAUDE.md](CLAUDE.md); per la guida estesa
@@ -20,7 +20,7 @@ vedi [DOCS.md](DOCS.md).
 5. [API v2 — `/v2`](#5-api-v2--v2)
    - [Bug report](#51-bug-report--v2apibug-report)
    - [Admin](#52-admin--v2apiadmin)
-   - [Updates (client EMLy)](#53-updates-client-emly--v2updates)
+   - [Updates per prodotto](#53-updates-per-prodotto--v2updates)
    - [Self-update dell'Updater](#54-self-update-dellupdater--v2updates)
    - [Remote config](#55-remote-config--v2config)
    - [Ban permanenti](#56-ban-permanenti--v2bans)
@@ -28,6 +28,7 @@ vedi [DOCS.md](DOCS.md).
    - [Stream WebSocket](#58-stream-websocket--v2statsstream)
    - [Presenza client](#59-presenza-client--v2clientws)
    - [Coda download](#510-coda-download--v2download-queue)
+   - [Prodotti](#511-prodotti--v2products)
 6. [Riepilogo autenticazione](#6-riepilogo-autenticazione)
 
 ---
@@ -51,6 +52,19 @@ al rate limiter custom descritto sotto. Entrambi esentano chi presenta un
 `X-Dashboard-Key` valido. Tutte le risposte sono JSON tramite
 `response.OK` / `response.Created` / `response.Error` (`internal/response`),
 tranne i download binari.
+
+**Scope prodotti.** Le route marcate *scoped* nelle sezioni sotto
+(gestione release, `/v2/products`, `/v2/stats/*`) guardano anche
+`X-Session-Token`. Senza token (chiamata con la sola admin key: script,
+integrazioni) non c'è restrizione. Con un token, la richiesta vede **solo i
+prodotti assegnati a quell'utente** (tabella `user_products`, gestita da
+`/v2/api/admin/users/{id}/products`), **admin compresi**. L'unica eccezione è il
+ruolo **`owner`**, il più alto: vede sempre tutti i prodotti, senza
+assegnazioni. Un token sconosciuto, scaduto o di un utente disabilitato vede
+**nessun** prodotto (mai "tutto"). Un prodotto fuori scope risponde `403`
+sulla gestione release e sulle stats, `404` su `/v2/products/{slug}` e sulle
+macchine (così non si scopre cosa esiste). Le route pubbliche usate dai client
+in campo (manifest, download) non sono toccate.
 
 Il corpo di errore è sempre nella forma:
 
@@ -287,23 +301,73 @@ esiste in v2.
 | `PATCH`  | `/users/{id}`                 | `ADMIN`   |
 | `POST`   | `/users/{id}/reset-password`  | `ADMIN`   |
 | `DELETE` | `/users/{id}`                 | `ADMIN`   |
+| `GET`    | `/users/{id}/products`        | `ADMIN`   |
+| `PUT`    | `/users/{id}/products`        | `ADMIN`   |
 
-### 5.3 Updates (client EMLy) — `/v2/updates`
+**`GET /auth/validate`** — in più rispetto alla v1, `user.products` elenca i
+prodotti assegnati all'utente (per un `owner`, tutti i prodotti del registro): è lo stesso elenco con cui l'API limita le
+sue richieste, quindi la dashboard ci costruisce il selettore prodotto.
+(Il campo compare anche su `/v1/.../validate`, che usa lo stesso handler: è
+additivo.)
 
-| Metodo   | Path                                 | Auth    | Cosa fa |
-|----------|--------------------------------------|---------|---------|
-| `GET`    | `/manifest`                          | `—`     | Manifest degli aggiornamenti EMLy. Registra un evento `manifest_check`. |
-| `GET`    | `/releases/{version}/download`        | `—`     | Scarica l'installer della release dal bucket updates. Soggetto alla [coda download](#510-coda-download--v2download-queue): `429` se piena. |
-| `GET`    | `/releases`                          | `ADMIN` | Elenca le release. |
-| `POST`   | `/releases`                          | `ADMIN` | Crea una release caricando l'installer. |
-| `PUT`    | `/releases/{version}`                | `ADMIN` | Sostituisce tutti i metadati della release. |
-| `PATCH`  | `/releases/{version}`                | `ADMIN` | Aggiorna solo i campi presenti nel corpo. |
-| `DELETE` | `/releases/{version}`                | `ADMIN` | Elimina la release e il file su S3. |
-| `PATCH`  | `/releases/{version}/channel`        | `ADMIN` | Cambia solo i flag `is_stable` / `is_beta`. |
+**`GET /users/{id}/products`** → `{"user_id": "...", "products": ["emly"]}`.
+`404` se l'utente non esiste.
+
+**`PUT /users/{id}/products` — corpo JSON**
+
+```json
+{ "products": ["emly", "foo"] }
+```
+
+Sostituisce l'intera assegnazione (`[]` toglie tutto). `400` se `products`
+manca o contiene uno slug che non esiste in `products`, `404` se l'utente non
+esiste. Con un `X-Session-Token`, solo un utente con ruolo `admin` o `owner`
+può chiamarla (`403` per `user`): uno scope che l'utente potesse allargarsi da solo
+non servirebbe a niente. Un utente appena creato non ha prodotti e non vede
+niente finché non gli se ne assegnano; chi crea un prodotto da
+`POST /v2/products` lo riceve automaticamente.
+
+### 5.3 Updates per prodotto — `/v2/updates`
+
+L'API distribuisce più prodotti (registro in [`/v2/products`](#511-prodotti--v2products)).
+Ogni prodotto ha le sue release, i suoi slot stable/beta/critical e il suo
+manifest, sotto `/v2/updates/{product}/...`. Le route **senza** prodotto sono
+quelle storiche e valgono sempre per `emly`: ogni client EMLy in campo le usa,
+quindi restano identiche. Sono gli stessi handler con il prodotto fissato.
+
+| Metodo   | Path                                            | Auth    | Cosa fa |
+|----------|-------------------------------------------------|---------|---------|
+| `GET`    | `/{product}/manifest`                           | `—`     | Manifest del prodotto. Registra un evento `manifest_check` con `product` = slug. `404` se il prodotto non esiste o è disabilitato. |
+| `GET`    | `/{product}/releases/{version}/download`        | `—`     | Scarica l'installer. Soggetto alla [coda download](#510-coda-download--v2download-queue): `429` se piena. `404` come sopra. |
+| `GET`    | `/{product}/releases`                           | `ADMIN`, scoped | Elenca le release del prodotto. |
+| `POST`   | `/{product}/releases`                           | `ADMIN`, scoped | Crea una release caricando l'installer. |
+| `PUT`    | `/{product}/releases/{version}`                 | `ADMIN`, scoped | Sostituisce tutti i metadati della release. |
+| `PATCH`  | `/{product}/releases/{version}`                 | `ADMIN`, scoped | Aggiorna solo i campi presenti nel corpo. |
+| `DELETE` | `/{product}/releases/{version}`                 | `ADMIN`, scoped | Elimina la release e il file su S3. |
+| `PATCH`  | `/{product}/releases/{version}/channel`         | `ADMIN`, scoped | Cambia solo i flag `is_stable` / `is_beta`. |
+| `GET`    | `/manifest`                                     | `—`     | Alias storico di `/emly/manifest`. |
+| `GET`    | `/releases/{version}/download`                  | `—`     | Alias storico di `/emly/releases/{version}/download`. |
+| `GET` `POST` `PUT` `PATCH` `DELETE` | `/releases`, `/releases/{version}`, `/releases/{version}/channel` | `ADMIN`, scoped | Alias storici della gestione release di `emly`. |
+
+Sulle route admin un prodotto sconosciuto è `404` (dopo il controllo della
+admin key, così chi non ce l'ha riceve `401` per qualunque slug); un prodotto
+**disabilitato** resta gestibile, così le release si preparano prima di
+renderlo pubblico. Un prodotto non assegnato all'utente della sessione è
+`403` (vedi *Scope prodotti* in §1). Gli alias storici servono `emly` anche
+se qualcuno lo disabilita: lo facevano incondizionatamente prima dei prodotti.
+
+Gli slug `manifest`, `releases`, `download`, `updater`, `all`, `products` sono
+riservati: i primi tre (e `updater`) sono segmenti statici sotto `/v2/updates`,
+che chi preferisce a `{product}`, quindi un prodotto con quel nome sarebbe
+irraggiungibile.
+
+**File su S3.** `emly` resta dove è sempre stato, sotto `S3_UPDATES_PREFIX`.
+Ogni altro prodotto usa `S3_UPDATES_PREFIX/<slug>/`, a meno che il prodotto non
+abbia un `s3_prefix` esplicito.
 
 **`GET /manifest` — forma della risposta**
 
-Aggrega tutte le righe di `update_releases` in un unico documento:
+Aggrega le righe di `update_releases` **del prodotto** in un unico documento:
 
 | Campo                    | Contenuto |
 |--------------------------|-----------|
@@ -315,6 +379,9 @@ Aggrega tutte le righe di `update_releases` in un unico documento:
 | `release_notes`          | mappa versione → nota breve |
 | `detailed_release_notes` | mappa versione → `{severity_type, description:{en,it}}`, solo per severità diversa da `none` |
 
+Il link di download di `emly` resta `/v2/updates/releases/{version}/download`
+(quello che i client in campo conoscono); per gli altri prodotti è
+`/v2/updates/{product}/releases/{version}/download`.
 Gli URL di download sono costruiti dallo `Host` della richiesta, rispettando
 `X-Forwarded-Proto` e `X-Forwarded-Host`, così un mirror interno serve link che
 puntano a sé stesso senza configurazione per sito.
@@ -346,8 +413,11 @@ Un valore diverso risponde `400`.
 
 `is_stable` e `is_beta` sono indipendenti: la stessa release può occupare
 entrambi gli slot del manifest. Impostare uno dei due a `true` lo azzera sulla
-release che lo deteneva prima, nella stessa transazione. Stessa cosa per
-`is_critical`. `503` se il bucket updates non è configurato.
+release **dello stesso prodotto** che lo deteneva prima, nella stessa
+transazione; gli altri prodotti non vengono toccati. Stessa cosa per
+`is_critical`. La versione è unica per prodotto (due prodotti possono avere
+entrambi una `1.0.0`). Ogni release restituita porta il campo `product`.
+`503` se il bucket updates non è configurato.
 
 **`PATCH /releases/{version}` — corpo JSON**
 
@@ -537,18 +607,29 @@ l'applicazione dei ban non deve né aprirsi né chiudersi per un singhiozzo del 
 
 | Metodo | Path             | Auth    | Cosa fa |
 |--------|------------------|---------|---------|
-| `GET`  | `/summary`       | `ADMIN` | Aggregati della flotta, memoizzati. |
-| `GET`  | `/clients`       | `ADMIN` | Elenco paginato dei client noti. |
-| `GET`  | `/clients/{id}`  | `ADMIN` | Un client con i suoi eventi recenti. `404` se l'ID non esiste. |
-| `DELETE` | `/clients/{id}` | `ADMIN` | Cancella un client e tutti i suoi eventi. `404` se l'ID non esiste. |
-| `GET`  | `/events`        | `ADMIN` | Serie temporale degli eventi, a bucket. |
+| `GET`  | `/summary`       | `ADMIN`, scoped | Aggregati della flotta, memoizzati. |
+| `GET`  | `/clients`       | `ADMIN`, scoped | Elenco paginato dei client noti. |
+| `GET`  | `/clients/{id}`  | `ADMIN`, scoped | Un client con i suoi eventi recenti e i prodotti installati. `404` se l'ID non esiste. |
+| `DELETE` | `/clients/{id}` | `ADMIN`, scoped | Cancella un client e tutti i suoi eventi. `404` se l'ID non esiste. |
+| `GET`  | `/events`        | `ADMIN`, scoped | Serie temporale degli eventi, a bucket. |
 
+**Scope.** Con un `X-Session-Token` (vedi §1): `product` deve essere un
+prodotto assegnato (`403` altrimenti); `updater` (il self-update dell'Agent,
+che non appartiene a nessun prodotto) e `all` sono sempre ammessi, e `all`
+significa "tutti i **miei** prodotti più `updater`". Le macchine visibili —
+in `/clients`, `/clients/{id}`, `DELETE`, e negli aggregati client di
+`/summary` (`total_clients`, `connected_clients`, `clients_by_version`,
+`clients_by_config_revision`) — sono solo quelle che hanno installato almeno
+un prodotto assegnato (`updater_client_products`); le altre sono `404`. Una
+macchina che non ha mai riportato un prodotto installato non è quindi visibile
+a nessun utente con sessione tranne gli `owner`, che non hanno restrizioni,
+come la admin key senza sessione.
 **`GET /summary` — query string**
 
 | Parametro        | Valori |
 |------------------|--------|
 | `window_minutes` | finestra per il conteggio dei client connessi |
-| `product`        | `emly`, `updater`, `all` |
+| `product`        | uno slug del registro prodotti (anche disabilitato), `updater`, `all`; default `emly` |
 
 Risposta: `total_clients`, `connected_clients`, `window_minutes`, `product`,
 `events_last_24h`, `clients_by_version`, `clients_by_config_revision`.
@@ -561,12 +642,16 @@ esatto rolling 24h. È un indicatore di volume per la dashboard, e arrotondare
 per eccesso è la direzione innocua.
 
 Il payload è memoizzato dietro un `ttlcache.Cache` (`internal/ttlcache`), con chiave
-`product|window_minutes` e durata `STATS_CACHE_TTL` (default 30s, `0` disabilita),
+`product|window_minutes|scope` e durata `STATS_CACHE_TTL` (default 30s, `0` disabilita),
 e la risposta porta un `Cache-Control: private, max-age=<TTL>`.
 Le dashboard fanno polling continuo su aggregati a 24 ore, quindi le query girano
 una volta per TTL invece che una volta per richiesta, e più chiamate concorrenti
 su una chiave fredda collassano in una sola build. Quello che si aggiunge al
 sommario va in `fetchStatsSummary`, dietro la cache, non nell'handler.
+
+**`GET /clients/{id}`** — risposta `{client, events, products}`, dove
+`products` è `[{product, version, updated_at}]` da `updater_client_products`
+(`updated_at` = da quando la macchina è a quella versione).
 
 **`GET /clients` — query string**
 
@@ -604,7 +689,7 @@ il suo HWID (`/v2/bans`).
 |--------------|--------|
 | `bucket`     | `day` (default) o `hour`; `400` altrimenti |
 | `event_type` | filtro sul tipo di evento |
-| `product`    | `emly`, `updater`, `all` |
+| `product`    | uno slug del registro prodotti (anche disabilitato), `updater`, `all`; default `emly` |
 | `from`       | RFC3339 |
 | `to`         | RFC3339 |
 
@@ -624,7 +709,7 @@ differiscono per meno del TTL condividono quindi un payload.
 
 **Telemetria dei client.** Gli header `X-EMLy-*` (`Hostname`, `HWID`, `ADDomain`,
 `LoggedUser`, `LoggedUserState`, `LoggedUserDisconnectedAt`, `Serial`, `Product`,
-`OSVersion`, `AppVersion`) sono letti in un punto solo per la via HTTP,
+`OSVersion`, `AppVersion`, `InstalledProducts`) sono letti in un punto solo per la via HTTP,
 `clientIdentityFromRequest`, insieme alla versione e al contatto estratti dallo
 User-Agent e all'IP del peer. Il messaggio `identity` di `GET /v2/client/ws`
 (§5.9) è la seconda via: stessi campi, letti da JSON invece che da header, da
@@ -641,6 +726,17 @@ Updater 1.6.2 o successivo che non manda `X-EMLy-LoggedUser` sta dicendo che non
 c'è nessuno loggato, quindi utente, stato e orario di disconnessione vengono
 azzerati.
 
+**Prodotti installati.** `X-EMLy-InstalledProducts: emly=3.5.0,foo=1.2.0`
+(e il campo `installed_products` dell'`identity` WS) è l'inventario
+**completo** della macchina: i prodotti elencati vengono scritti in
+`updater_client_products`, quelli non elencati cancellati (disinstallati).
+Header presente ma vuoto = nessun prodotto installato; header **assente** = non
+riportato, non cambia nulla. Voci con slug non valido o versione vuota sono
+scartate, al massimo 32. `X-EMLy-AppVersion` continua a riempire
+`emly_version` e, se l'inventario non cita `emly`, anche la riga `emly`: così
+gli Agent non ancora aggiornati restano visibili. `X-EMLy-Product` **non** è il
+prodotto software: è lo SKU del firmware.
+
 ### 5.8 Stream WebSocket — `/v2/stats/stream`
 
 | Metodo | Path                | Auth         | Cosa fa |
@@ -652,6 +748,13 @@ L'autenticazione avviene **prima** dell'upgrade: `X-Admin-Key`, oppure
 richiesta di Upgrade. Una chiave errata riceve `401` senza che l'upgrade venga
 nemmeno tentato, così il client distingue subito "chiave sbagliata" da "problema
 di rete".
+
+Lo [scope prodotti](#1-come-leggere-questa-tabella) vale anche qui: il token si
+passa in `X-Session-Token` o, con lo stesso ripiego, `?session_token=`, ed è
+risolto una volta all'apertura. Tutti i canali sono filtrati come le route REST
+corrispondenti; un `subscribe` con un `product` non assegnato riceve un
+`error` per quel parametro. Il prodotto di default è `emly`, oppure `all` (cioè
+"i miei") se l'utente non ha `emly`.
 
 **Messaggi dal client**
 
@@ -739,7 +842,8 @@ query string.
 server ──► { "type": "hello" }
 client ──► { "type": "identity", "data": { hwid, hostname, ad_domain,
              logged_user, logged_user_state, logged_user_disconnected_at,
-             serial, product, os_version, emly_version } }
+             serial, product, os_version, emly_version,
+             installed_products } }
 ```
 
 L'identità arriva nel payload invece che negli header `X-EMLy-*`, ma passa
@@ -1030,6 +1134,48 @@ lettura da S3 si interrompe e il client riceve un file troncato (lo stato
 
 ---
 
+### 5.11 Prodotti — `/v2/products`
+
+Il registro dei prodotti distribuiti da [`/v2/updates/{product}`](#53-updates-per-prodotto--v2updates)
+(tabella `products`, migration 22, `emly` già presente).
+
+| Metodo   | Path       | Auth            | Cosa fa |
+|----------|------------|-----------------|---------|
+| `GET`    | `/`        | `ADMIN`, scoped | Elenca i prodotti (con sessione: solo quelli assegnati). |
+| `POST`   | `/`        | `ADMIN`, scoped | Crea un prodotto; con sessione lo assegna anche a chi lo crea. |
+| `GET`    | `/{slug}`  | `ADMIN`, scoped | Un prodotto. `404` se non esiste o non è assegnato. |
+| `PATCH`  | `/{slug}`  | `ADMIN`, scoped | Aggiorna `name`, `s3_prefix`, `enabled`. |
+| `DELETE` | `/{slug}`  | `ADMIN`, scoped | Elimina il prodotto. |
+
+**`POST /` — corpo JSON**
+
+```json
+{ "slug": "foo", "name": "Foo", "s3_prefix": null, "enabled": true }
+```
+
+| Campo       | Note |
+|-------------|------|
+| `slug`      | obbligatorio, `^[a-z0-9][a-z0-9-]{0,19}$`, non riservato (§5.3); **non modificabile** dopo: è scritto in ogni release, evento e riga di inventario |
+| `name`      | obbligatorio, max 100 caratteri |
+| `s3_prefix` | opzionale; vuoto/`null` = derivato (`S3_UPDATES_PREFIX/<slug>`, per `emly` `S3_UPDATES_PREFIX`). Niente segmenti vuoti, `.` o `..` |
+| `enabled`   | default `true`; `false` = `404` su manifest e download pubblici, gestione release ancora possibile |
+
+Esiti: `201` col prodotto, `400` validazione, `409` slug già esistente.
+
+**`PATCH /{slug}`** — `name`, `s3_prefix` (stringa vuota = torna al default),
+`enabled`, tutti opzionali; `400` se non c'è nessun campo. Cambiare
+`s3_prefix` **non sposta** i file già caricati: vanno spostati a mano o i
+download delle release esistenti diventano `404`.
+
+**`DELETE /{slug}`** — `409` se il prodotto ha ancora release (va disabilitato
+o svuotato prima) e sempre `409` per `emly`. Telemetria e inventari restano:
+sono storia della flotta. Le assegnazioni in `user_products` spariscono con il
+prodotto (foreign key).
+
+Il registro è tenuto in memoria (`internal/productreg`), ricaricato subito
+dopo ogni scrittura e ogni minuto, così una seconda istanza dell'API vede un
+prodotto creato sulla prima entro un minuto.
+
 ## 6. Riepilogo autenticazione
 
 | Header            | Dove viene usato | Fallimento |
@@ -1037,7 +1183,7 @@ lettura da S3 si interrompe e il client riceve un file troncato (lo stato
 | `X-API-Key`       | Creazione bug report, manifest dell'Updater, `GET /v2/config`, `GET /v2/client/ws` | `401` |
 | `X-Admin-Key`     | Tutte le route admin, releases, config writes, bans, stats, download-queue, comandi/eventi/notify di `/v2/client` | `401` |
 | `X-Dashboard-Key` | Bypass di entrambi i rate limiter, globale e per gruppo di route; **richiesto** (insieme a `X-Admin-Key`) da `/v2/download-queue` | nessuno per i limiter (la richiesta prosegue limitata); `401` su `/v2/download-queue` |
-| `X-Session-Token` | `auth/validate`, `auth/logout` | `401` o `403` |
+| `X-Session-Token` | `auth/validate`, `auth/logout`; sulle route *scoped* (release, `/v2/products`, `/v2/stats/*`, anche `?session_token=` sullo stream) limita ai prodotti assegnati all'utente | `401` o `403`; sulle route scoped `403`/`404` per prodotti e macchine fuori scope |
 
 `API_KEY` e `ADMIN_KEY` accettano una lista separata da virgole, ma viene usato
 solo il primo valore non vuoto.

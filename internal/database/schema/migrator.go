@@ -25,10 +25,13 @@ type task struct {
 }
 
 type condition struct {
-	Type   string `json:"type"` // "column_not_exists" | "index_not_exists" | "column_exists" | "index_exists" | "table_not_exists" | "table_exists"
+	Type   string `json:"type"` // "column_not_exists" | "index_not_exists" | "column_exists" | "index_exists" | "table_not_exists" | "table_exists" | "column_type_not"
 	Table  string `json:"table"`
 	Column string `json:"column,omitempty"`
 	Index  string `json:"index,omitempty"`
+	// ColumnType is compared with information_schema.COLUMNS.COLUMN_TYPE,
+	// case-insensitively: "varchar(20)", "enum('a','b')", "tinyint(1)".
+	ColumnType string `json:"column_type,omitempty"`
 }
 
 // Migrate reads migrations/tasks.json and executes every task whose
@@ -158,6 +161,12 @@ func evaluate(db *sqlx.DB, dbName string, c condition) (bool, error) {
 	case "table_exists":
 		return tableExists(db, dbName, c.Table)
 
+	case "column_type_not":
+		// A column that exists with another type. A missing column is not a
+		// match: creating it is some other task's job.
+		typ, ok, err := columnType(db, dbName, c.Table, c.Column)
+		return ok && !strings.EqualFold(typ, c.ColumnType), err
+
 	default:
 		return false, fmt.Errorf("unknown condition type: %s", c.Type)
 	}
@@ -171,6 +180,20 @@ func columnExists(db *sqlx.DB, dbName, table, column string) (bool, error) {
 		   AND TABLE_NAME   = ?
 		   AND COLUMN_NAME  = ?`, dbName, table, column)
 	return count > 0, err
+}
+
+// columnType returns the column's COLUMN_TYPE, and false when it does not exist.
+func columnType(db *sqlx.DB, dbName, table, column string) (string, bool, error) {
+	var types []string
+	err := db.Select(&types,
+		`SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+		 WHERE TABLE_SCHEMA = ?
+		   AND TABLE_NAME   = ?
+		   AND COLUMN_NAME  = ?`, dbName, table, column)
+	if err != nil || len(types) == 0 {
+		return "", false, err
+	}
+	return types[0], true, nil
 }
 
 func indexExists(db *sqlx.DB, dbName, table, index string) (bool, error) {

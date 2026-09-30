@@ -11,7 +11,7 @@ import (
 // non-numeric id before touching the database - the only part of it that can
 // be exercised without one.
 func TestStatsDeleteClientRoute(t *testing.T) {
-	r := NewRouter(nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	r := NewRouter(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodDelete, "/stats/clients/42", nil)
 	rec := httptest.NewRecorder()

@@ -12,7 +12,7 @@ import (
 // apimw.APIKeyAuth like the updater's self-update manifest - unlike
 // /v2/stats/stream, there is no query-string key fallback here.
 func TestClientWSRouteRequiresAPIKey(t *testing.T) {
-	router := NewRouter(nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router := NewRouter(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/client/ws", nil)
 	rec := httptest.NewRecorder()
@@ -32,7 +32,7 @@ func TestClientWSRouteRequiresAPIKey(t *testing.T) {
 // X-Admin-Key like every other admin route, not the API key GET
 // /v2/client/ws uses.
 func TestClientAdminRoutesRequireAdminKey(t *testing.T) {
-	r := NewRouter(nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	r := NewRouter(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	for _, c := range []struct{ method, path string }{
 		{"POST", "/client/42/commands"},
 		{"GET", "/client/commands/01J8ZQ6T3M6X9K2V7B4N1C5D8E"},

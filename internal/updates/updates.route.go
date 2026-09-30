@@ -17,6 +17,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"emly-api-go/internal/models"
+	"emly-api-go/internal/productreg"
 	"emly-api-go/internal/response"
 	"emly-api-go/internal/statshub"
 	"emly-api-go/internal/storage"
@@ -27,23 +28,33 @@ import (
 var validSeverity = map[string]bool{"none": true, "security": true, "bugfix": true, "feature": true}
 
 const releaseSelectCols = `
-	id, version, is_stable, is_beta, download_filename, sha256_checksum, short_note,
+	id, product, version, is_stable, is_beta, download_filename, sha256_checksum, short_note,
 	severity_type, description_en, description_it, is_critical, critical_version, min_required_version,
 	released_at, created_at `
 
-// clearStableFlag/clearBetaFlag enforce that at most one release holds each
-// channel slot at a time - promoting a release to stable (or beta) demotes
-// whoever previously held that slot. The two flags are independent, so the
-// same release can hold both is_stable and is_beta simultaneously.
-func clearStableFlag(ctx context.Context, tx *sqlx.Tx, exceptVersion string) error {
+// clearStableFlag/clearBetaFlag enforce that at most one release of a product
+// holds each channel slot at a time - promoting a release to stable (or beta)
+// demotes whoever previously held that slot in the same product, and never
+// touches another product's. The two flags are independent, so the same
+// release can hold both is_stable and is_beta simultaneously.
+func clearStableFlag(ctx context.Context, tx *sqlx.Tx, product, exceptVersion string) error {
 	_, err := tx.ExecContext(ctx,
-		`UPDATE update_releases SET is_stable = 0 WHERE is_stable = 1 AND version != ?`, exceptVersion)
+		`UPDATE update_releases SET is_stable = 0 WHERE product = ? AND is_stable = 1 AND version != ?`, product, exceptVersion)
 	return err
 }
 
-func clearBetaFlag(ctx context.Context, tx *sqlx.Tx, exceptVersion string) error {
+func clearBetaFlag(ctx context.Context, tx *sqlx.Tx, product, exceptVersion string) error {
 	_, err := tx.ExecContext(ctx,
-		`UPDATE update_releases SET is_beta = 0 WHERE is_beta = 1 AND version != ?`, exceptVersion)
+		`UPDATE update_releases SET is_beta = 0 WHERE product = ? AND is_beta = 1 AND version != ?`, product, exceptVersion)
+	return err
+}
+
+// clearCriticalFlag is the same rule for is_critical: at most one release per
+// product carries it.
+func clearCriticalFlag(ctx context.Context, tx *sqlx.Tx, product, exceptVersion string) error {
+	_, err := tx.ExecContext(ctx,
+		`UPDATE update_releases SET is_critical = 0, critical_version = NULL WHERE product = ? AND is_critical = 1 AND version != ?`,
+		product, exceptVersion)
 	return err
 }
 
@@ -78,46 +89,47 @@ func GetUpdateManifest(db *sqlx.DB, hub *statshub.Hub) http.HandlerFunc {
 			"headers", r.Header,
 		)
 
+		product := productreg.FromContext(r.Context())
+
 		var releases []models.Release
 		err := db.SelectContext(r.Context(), &releases,
-			`SELECT`+releaseSelectCols+`FROM update_releases ORDER BY released_at DESC`)
+			`SELECT`+releaseSelectCols+`FROM update_releases WHERE product = ? ORDER BY released_at DESC`, product.Slug)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to fetch releases")
 			return
 		}
 		timing.Mark(r.Context(), "db_select")
-		manifest := buildManifest(releases, requestBaseURL(r))
+		manifest := buildManifest(releases, requestBaseURL(r), product.Slug)
 		timing.Mark(r.Context(), "build_manifest")
 		response.OK(w, manifest)
 
 		uaVersion, _ := updaterclient.ParseUserAgent(r.UserAgent())
-		updaterclient.RecordEvent(r.Context(), db, r, hub, "manifest_check", updaterclient.ProductEMLy, uaVersion)
+		updaterclient.RecordEvent(r.Context(), db, r, hub, "manifest_check", product.Slug, uaVersion)
 	}
 }
 
 func ListReleases(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		channel := r.URL.Query().Get("channel")
+		product := productreg.FromContext(r.Context()).Slug
 
-		var releases []models.Release
-		var err error
+		var filter string
 		switch channel {
 		case "":
-			err = db.SelectContext(r.Context(), &releases,
-				`SELECT`+releaseSelectCols+`FROM update_releases ORDER BY released_at DESC`)
 		case "stable":
-			err = db.SelectContext(r.Context(), &releases,
-				`SELECT`+releaseSelectCols+`FROM update_releases WHERE is_stable = 1 ORDER BY released_at DESC`)
+			filter = ` AND is_stable = 1`
 		case "beta":
-			err = db.SelectContext(r.Context(), &releases,
-				`SELECT`+releaseSelectCols+`FROM update_releases WHERE is_beta = 1 ORDER BY released_at DESC`)
+			filter = ` AND is_beta = 1`
 		case "archived":
-			err = db.SelectContext(r.Context(), &releases,
-				`SELECT`+releaseSelectCols+`FROM update_releases WHERE is_stable = 0 AND is_beta = 0 ORDER BY released_at DESC`)
+			filter = ` AND is_stable = 0 AND is_beta = 0`
 		default:
 			response.Error(w, http.StatusBadRequest, "channel must be one of: stable, beta, archived")
 			return
 		}
+
+		releases := []models.Release{}
+		err := db.SelectContext(r.Context(), &releases,
+			`SELECT`+releaseSelectCols+`FROM update_releases WHERE product = ?`+filter+` ORDER BY released_at DESC`, product)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to fetch releases")
 			return
@@ -133,10 +145,14 @@ func s3Key(prefix, filename string) string {
 	return prefix + "/" + filename
 }
 
-// CreateRelease handles POST /v2/updates/releases as multipart/form-data.
-// The .exe is uploaded to the updates S3 bucket; SHA-256 is computed server-side.
+// CreateRelease handles POST /v2/updates/releases (EMLy) and
+// POST /v2/updates/{product}/releases as multipart/form-data. The .exe is
+// uploaded to the product's folder of the updates S3 bucket (see
+// productreg.S3Prefix; s3Prefix is S3_UPDATES_PREFIX); SHA-256 is computed
+// server-side.
 func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		product := productreg.FromContext(r.Context())
 		if s3conn == nil {
 			response.Error(w, http.StatusServiceUnavailable, "S3 storage is not configured")
 			return
@@ -195,7 +211,7 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 		checksum := hex.EncodeToString(sum[:])
 		filename := header.Filename
 
-		if _, err := s3conn.UploadFile(r.Context(), s3Key(s3Prefix, filename), bytes.NewReader(data), "application/octet-stream", nil); err != nil {
+		if _, err := s3conn.UploadFile(r.Context(), s3Key(productreg.S3Prefix(product, s3Prefix), filename), bytes.NewReader(data), "application/octet-stream", nil); err != nil {
 			response.Error(w, http.StatusInternalServerError, "upload failed: "+err.Error())
 			return
 		}
@@ -222,22 +238,20 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 		defer tx.Rollback()
 
 		if isCritical {
-			if _, err = tx.ExecContext(r.Context(),
-				`UPDATE update_releases SET is_critical = 0, critical_version = NULL WHERE is_critical = 1`,
-			); err != nil {
+			if err = clearCriticalFlag(r.Context(), tx, product.Slug, version); err != nil {
 				response.Error(w, http.StatusInternalServerError, "failed to clear existing critical flag")
 				return
 			}
 		}
 
 		if isStable {
-			if err = clearStableFlag(r.Context(), tx, version); err != nil {
+			if err = clearStableFlag(r.Context(), tx, product.Slug, version); err != nil {
 				response.Error(w, http.StatusInternalServerError, "failed to clear existing stable release")
 				return
 			}
 		}
 		if isBeta {
-			if err = clearBetaFlag(r.Context(), tx, version); err != nil {
+			if err = clearBetaFlag(r.Context(), tx, product.Slug, version); err != nil {
 				response.Error(w, http.StatusInternalServerError, "failed to clear existing beta release")
 				return
 			}
@@ -245,10 +259,10 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 
 		_, err = tx.ExecContext(r.Context(),
 			`INSERT INTO update_releases
-			 (version, is_stable, is_beta, download_filename, sha256_checksum, short_note, severity_type,
+			 (product, version, is_stable, is_beta, download_filename, sha256_checksum, short_note, severity_type,
 			  description_en, description_it, is_critical, critical_version, min_required_version, released_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			version, isStable, isBeta, filename, checksum, shortNote,
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			product.Slug, version, isStable, isBeta, filename, checksum, shortNote,
 			severityType, pDescEN, pDescIT, isCritical, pCriticalVer, pMinVer, releasedAt,
 		)
 		if err != nil {
@@ -262,6 +276,7 @@ func CreateRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 		}
 
 		response.Created(w, map[string]interface{}{
+			"product":           product.Slug,
 			"version":           version,
 			"is_stable":         isStable,
 			"is_beta":           isBeta,
@@ -279,15 +294,16 @@ func DownloadRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string, 
 		}
 
 		version := chi.URLParam(r, "version")
+		product := productreg.FromContext(r.Context())
 
 		var filename string
 		if err := db.GetContext(r.Context(), &filename,
-			`SELECT download_filename FROM update_releases WHERE version = ?`, version); err != nil {
+			`SELECT download_filename FROM update_releases WHERE product = ? AND version = ?`, product.Slug, version); err != nil {
 			response.Error(w, http.StatusNotFound, "release not found")
 			return
 		}
 
-		rc, info, err := s3conn.GetFile(r.Context(), s3Key(s3Prefix, filename))
+		rc, info, err := s3conn.GetFile(r.Context(), s3Key(productreg.S3Prefix(product, s3Prefix), filename))
 		if err != nil {
 			if storage.IsNotFound(err) {
 				response.Error(w, http.StatusNotFound, "installer file not found in storage")
@@ -308,7 +324,7 @@ func DownloadRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string, 
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size))
 		}
 
-		streamInstaller(w, r, rc, updaterclient.ProductEMLy, version, filename, info.Size)
+		streamInstaller(w, r, rc, product.Slug, version, filename, info.Size)
 
 		// See the identical comment in DownloadUpdater: the client closing the
 		// connection right after the last byte races r.Context()'s
@@ -316,7 +332,7 @@ func DownloadRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string, 
 		// on that context living past the response.
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 		defer cancel()
-		updaterclient.RecordEvent(ctx, db, r, hub, "download", updaterclient.ProductEMLy, version)
+		updaterclient.RecordEvent(ctx, db, r, hub, "download", product.Slug, version)
 	}
 }
 
@@ -328,22 +344,23 @@ func DeleteRelease(db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix string) ht
 		}
 
 		version := chi.URLParam(r, "version")
+		product := productreg.FromContext(r.Context())
 
 		var filename string
 		err := db.GetContext(r.Context(), &filename,
-			`SELECT download_filename FROM update_releases WHERE version = ?`, version)
+			`SELECT download_filename FROM update_releases WHERE product = ? AND version = ?`, product.Slug, version)
 		if err != nil {
 			response.Error(w, http.StatusNotFound, "release not found")
 			return
 		}
 
-		if err := s3conn.DeleteFile(r.Context(), s3Key(s3Prefix, filename)); err != nil && !storage.IsNotFound(err) {
+		if err := s3conn.DeleteFile(r.Context(), s3Key(productreg.S3Prefix(product, s3Prefix), filename)); err != nil && !storage.IsNotFound(err) {
 			response.Error(w, http.StatusInternalServerError, "failed to delete file from storage: "+err.Error())
 			return
 		}
 
 		res, err := db.ExecContext(r.Context(),
-			`DELETE FROM update_releases WHERE version = ?`, version)
+			`DELETE FROM update_releases WHERE product = ? AND version = ?`, product.Slug, version)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to delete release: "+err.Error())
 			return
@@ -395,6 +412,7 @@ type patchReleaseRequest struct {
 func PatchReleaseChannels(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		version := chi.URLParam(r, "version")
+		product := productreg.FromContext(r.Context()).Slug
 
 		var req patchReleaseChannelsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -418,7 +436,7 @@ func PatchReleaseChannels(db *sqlx.DB) http.HandlerFunc {
 
 		if req.IsStable != nil {
 			if *req.IsStable {
-				if err = clearStableFlag(r.Context(), tx, version); err != nil {
+				if err = clearStableFlag(r.Context(), tx, product, version); err != nil {
 					response.Error(w, http.StatusInternalServerError, "failed to clear existing stable release")
 					return
 				}
@@ -428,7 +446,7 @@ func PatchReleaseChannels(db *sqlx.DB) http.HandlerFunc {
 		}
 		if req.IsBeta != nil {
 			if *req.IsBeta {
-				if err = clearBetaFlag(r.Context(), tx, version); err != nil {
+				if err = clearBetaFlag(r.Context(), tx, product, version); err != nil {
 					response.Error(w, http.StatusInternalServerError, "failed to clear existing beta release")
 					return
 				}
@@ -436,10 +454,10 @@ func PatchReleaseChannels(db *sqlx.DB) http.HandlerFunc {
 			setClauses = append(setClauses, "is_beta = ?")
 			args = append(args, *req.IsBeta)
 		}
-		args = append(args, version)
+		args = append(args, product, version)
 
 		res, err := tx.ExecContext(r.Context(),
-			"UPDATE update_releases SET "+strings.Join(setClauses, ", ")+" WHERE version = ?", args...)
+			"UPDATE update_releases SET "+strings.Join(setClauses, ", ")+" WHERE product = ? AND version = ?", args...)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to update channels")
 			return
@@ -456,7 +474,7 @@ func PatchReleaseChannels(db *sqlx.DB) http.HandlerFunc {
 
 		var updated models.Release
 		if err := db.GetContext(r.Context(), &updated,
-			`SELECT`+releaseSelectCols+`FROM update_releases WHERE version = ?`, version,
+			`SELECT`+releaseSelectCols+`FROM update_releases WHERE product = ? AND version = ?`, product, version,
 		); err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to fetch updated release")
 			return
@@ -472,6 +490,7 @@ func PatchReleaseChannels(db *sqlx.DB) http.HandlerFunc {
 func PutRelease(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		version := chi.URLParam(r, "version")
+		product := productreg.FromContext(r.Context()).Slug
 
 		var req putReleaseRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -502,23 +521,20 @@ func PutRelease(db *sqlx.DB) http.HandlerFunc {
 		defer tx.Rollback()
 
 		if req.IsStable {
-			if err = clearStableFlag(r.Context(), tx, version); err != nil {
+			if err = clearStableFlag(r.Context(), tx, product, version); err != nil {
 				response.Error(w, http.StatusInternalServerError, "failed to clear existing stable release")
 				return
 			}
 		}
 		if req.IsBeta {
-			if err = clearBetaFlag(r.Context(), tx, version); err != nil {
+			if err = clearBetaFlag(r.Context(), tx, product, version); err != nil {
 				response.Error(w, http.StatusInternalServerError, "failed to clear existing beta release")
 				return
 			}
 		}
 
 		if req.IsCritical {
-			if _, err = tx.ExecContext(r.Context(),
-				`UPDATE update_releases SET is_critical = 0, critical_version = NULL WHERE is_critical = 1 AND version != ?`,
-				version,
-			); err != nil {
+			if err = clearCriticalFlag(r.Context(), tx, product, version); err != nil {
 				response.Error(w, http.StatusInternalServerError, "failed to clear existing critical flag")
 				return
 			}
@@ -529,10 +545,10 @@ func PutRelease(db *sqlx.DB) http.HandlerFunc {
 			 SET is_stable = ?, is_beta = ?, short_note = ?, severity_type = ?,
 			     description_en = ?, description_it = ?, is_critical = ?, critical_version = ?,
 			     min_required_version = ?, released_at = ?
-			 WHERE version = ?`,
+			 WHERE product = ? AND version = ?`,
 			req.IsStable, req.IsBeta, req.ShortNote, req.SeverityType,
 			req.DescriptionEN, req.DescriptionIT, req.IsCritical, req.CriticalVersion,
-			req.MinRequiredVersion, releasedAt, version,
+			req.MinRequiredVersion, releasedAt, product, version,
 		)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to update release")
@@ -550,7 +566,7 @@ func PutRelease(db *sqlx.DB) http.HandlerFunc {
 
 		var updated models.Release
 		if err := db.GetContext(r.Context(), &updated,
-			`SELECT`+releaseSelectCols+`FROM update_releases WHERE version = ?`, version,
+			`SELECT`+releaseSelectCols+`FROM update_releases WHERE product = ? AND version = ?`, product, version,
 		); err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to fetch updated release")
 			return
@@ -562,6 +578,7 @@ func PutRelease(db *sqlx.DB) http.HandlerFunc {
 func PatchRelease(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		version := chi.URLParam(r, "version")
+		product := productreg.FromContext(r.Context()).Slug
 
 		var req patchReleaseRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -628,7 +645,7 @@ func PatchRelease(db *sqlx.DB) http.HandlerFunc {
 			return
 		}
 
-		args = append(args, version)
+		args = append(args, product, version)
 
 		tx, err := db.BeginTxx(r.Context(), nil)
 		if err != nil {
@@ -638,29 +655,26 @@ func PatchRelease(db *sqlx.DB) http.HandlerFunc {
 		defer tx.Rollback()
 
 		if req.IsStable != nil && *req.IsStable {
-			if err = clearStableFlag(r.Context(), tx, version); err != nil {
+			if err = clearStableFlag(r.Context(), tx, product, version); err != nil {
 				response.Error(w, http.StatusInternalServerError, "failed to clear existing stable release")
 				return
 			}
 		}
 		if req.IsBeta != nil && *req.IsBeta {
-			if err = clearBetaFlag(r.Context(), tx, version); err != nil {
+			if err = clearBetaFlag(r.Context(), tx, product, version); err != nil {
 				response.Error(w, http.StatusInternalServerError, "failed to clear existing beta release")
 				return
 			}
 		}
 
 		if req.IsCritical != nil && *req.IsCritical {
-			if _, err = tx.ExecContext(r.Context(),
-				`UPDATE update_releases SET is_critical = 0, critical_version = NULL WHERE is_critical = 1 AND version != ?`,
-				version,
-			); err != nil {
+			if err = clearCriticalFlag(r.Context(), tx, product, version); err != nil {
 				response.Error(w, http.StatusInternalServerError, "failed to clear existing critical flag")
 				return
 			}
 		}
 
-		query := "UPDATE update_releases SET " + strings.Join(setClauses, ", ") + " WHERE version = ?"
+		query := "UPDATE update_releases SET " + strings.Join(setClauses, ", ") + " WHERE product = ? AND version = ?"
 		res, err := tx.ExecContext(r.Context(), query, args...)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to update release")
@@ -678,7 +692,7 @@ func PatchRelease(db *sqlx.DB) http.HandlerFunc {
 
 		var updated models.Release
 		if err := db.GetContext(r.Context(), &updated,
-			`SELECT`+releaseSelectCols+`FROM update_releases WHERE version = ?`, version,
+			`SELECT`+releaseSelectCols+`FROM update_releases WHERE product = ? AND version = ?`, product, version,
 		); err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to fetch updated release")
 			return
@@ -687,7 +701,17 @@ func PatchRelease(db *sqlx.DB) http.HandlerFunc {
 	}
 }
 
-func buildManifest(releases []models.Release, apiBaseURL string) models.UpdateManifest {
+// releaseDownloadURL is the link a manifest advertises for one release. EMLy
+// keeps the product-less route every EMLy client already in the field was
+// given; every other product gets its own /v2/updates/{product}/... link.
+func releaseDownloadURL(apiBaseURL, product, version string) string {
+	if product == productreg.EMLy {
+		return fmt.Sprintf("%s/v2/updates/releases/%s/download", apiBaseURL, version)
+	}
+	return fmt.Sprintf("%s/v2/updates/%s/releases/%s/download", apiBaseURL, product, version)
+}
+
+func buildManifest(releases []models.Release, apiBaseURL, product string) models.UpdateManifest {
 	m := models.UpdateManifest{
 		SHA256Checksums:      make(map[string]string),
 		ReleaseNotes:         make(map[string]string),
@@ -728,14 +752,14 @@ func buildManifest(releases []models.Release, apiBaseURL string) models.UpdateMa
 		// populate both the stable and beta slots of the manifest at once.
 		if rel.IsStable {
 			m.StableVersion = rel.Version
-			m.StableDownload = fmt.Sprintf("%s/v2/updates/releases/%s/download", apiBaseURL, rel.Version)
+			m.StableDownload = releaseDownloadURL(apiBaseURL, product, rel.Version)
 			if rel.MinRequiredVersion != nil {
 				m.MinRequiredVersion = *rel.MinRequiredVersion
 			}
 		}
 		if rel.IsBeta {
 			m.BetaVersion = rel.Version
-			m.BetaDownload = fmt.Sprintf("%s/v2/updates/releases/%s/download", apiBaseURL, rel.Version)
+			m.BetaDownload = releaseDownloadURL(apiBaseURL, product, rel.Version)
 		}
 	}
 

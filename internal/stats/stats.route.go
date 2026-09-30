@@ -18,14 +18,14 @@ import (
 	"emly-api-go/internal/dbvalue"
 	"emly-api-go/internal/models"
 	"emly-api-go/internal/presencehub"
+	"emly-api-go/internal/productreg"
 	"emly-api-go/internal/response"
+	"emly-api-go/internal/session"
 	"emly-api-go/internal/ttlcache"
 	"emly-api-go/internal/updaterclient"
 )
 
 var validEventBuckets = map[string]bool{"day": true, "hour": true}
-
-var validEventProducts = map[string]bool{"emly": true, "updater": true, "all": true}
 
 const defaultConnectedWindowMinutes = 15
 
@@ -34,30 +34,112 @@ const defaultConnectedWindowMinutes = 15
 // cache's key space small - the param is part of its key.
 const maxConnectedWindowMinutes = 7 * 24 * 60
 
-// eventProductFilter reads the optional ?product= query param and returns the
-// SQL fragment + arg constraining updater_events/updater_event_hourly (they
-// share the product column, so one filter serves both). It defaults to "emly" so
-// existing dashboards keep counting EMLy client traffic only, unaffected by
-// the updater's own self-update checks; pass product=updater for those, or
-// product=all for both.
-func eventProductFilter(r *http.Request) (product, clause string, args []interface{}, ok bool) {
-	return productFilter(r.URL.Query().Get("product"))
+// eventProductFilter reads the optional ?product= query param and validates
+// it (see validProduct). It defaults to "emly" so existing dashboards keep
+// counting EMLy client traffic only, unaffected by the updater's own
+// self-update checks; pass product=updater for those, product=<slug> for any
+// other registered product, or product=all for everything.
+func eventProductFilter(r *http.Request, reg *productreg.Registry) (product string, ok bool) {
+	return validProduct(reg, r.URL.Query().Get("product"))
 }
 
-// productFilter is eventProductFilter's value-only counterpart, shared with
-// the WS subscribe path (stats_stream.route.go), which has
-// no *http.Request to read a query param from.
-func productFilter(product string) (resolved, clause string, args []interface{}, ok bool) {
+// validProduct is eventProductFilter's value-only counterpart, shared with the
+// WS subscribe path (stats_stream.route.go), which has no *http.Request to
+// read a query param from. Valid values are every product in the registry
+// (disabled ones too: their history is still data), "updater" (the Agent's
+// own self-update traffic) and "all".
+func validProduct(reg *productreg.Registry, product string) (resolved string, ok bool) {
 	if product == "" {
-		product = "emly"
+		product = productreg.EMLy
 	}
-	if !validEventProducts[product] {
-		return product, "", nil, false
+	if product == "all" || product == updaterclient.ProductUpdater || reg.Has(product) {
+		return product, true
 	}
-	if product == "all" {
-		return product, "", nil, true
+	return product, false
+}
+
+// productError is the 400 message for an invalid product, listing what the
+// registry accepts right now.
+func productError(reg *productreg.Registry) string {
+	valid := []string{}
+	for _, p := range reg.List() {
+		valid = append(valid, p.Slug)
 	}
-	return product, " AND product = ?", []interface{}{product}, true
+	valid = append(valid, updaterclient.ProductUpdater, "all")
+	return "product must be one of: " + strings.Join(valid, ", ")
+}
+
+// productFilter returns the SQL fragment + arg constraining
+// updater_events/updater_event_hourly (they share the product column, so one
+// filter serves both) to an already-validated product. For a restricted
+// session scope, "all" means "all of the products assigned to me", plus the
+// Agent's own self-update traffic, which belongs to no product.
+func productFilter(product string, scope session.Scope) (clause string, args []interface{}) {
+	if product != "all" {
+		return " AND product = ?", []interface{}{product}
+	}
+	if !scope.IsRestricted() {
+		return "", nil
+	}
+	allowed := append(scope.Products(), updaterclient.ProductUpdater)
+	return " AND product IN (" + placeholders(len(allowed)) + ")", stringArgs(allowed)
+}
+
+// productAllowed reports whether scope may read product's stats. "all" is
+// always allowed - productFilter narrows it - and so is "updater", the Agent's
+// self-update traffic, which no product owns.
+func productAllowed(scope session.Scope, product string) bool {
+	return product == "all" || product == updaterclient.ProductUpdater || scope.Allows(product)
+}
+
+// clientScopeClause constrains updater_clients to the machines scope may see:
+// those with at least one assigned product installed (updater_client_products).
+// Unrestricted scopes get no clause; a scope with no products sees no machine.
+// The clause is a bare condition, to be joined with WHERE or AND.
+func clientScopeClause(scope session.Scope) (clause string, args []interface{}) {
+	if !scope.IsRestricted() {
+		return "", nil
+	}
+	products := scope.Products()
+	if len(products) == 0 {
+		return "0 = 1", nil
+	}
+	return "EXISTS (SELECT 1 FROM updater_client_products cp WHERE cp.client_id = updater_clients.id AND cp.product IN (" +
+		placeholders(len(products)) + "))", stringArgs(products)
+}
+
+// whereClientScope renders clientScopeClause as a complete WHERE clause
+// (leading space included), or "" when there is nothing to constrain.
+func whereClientScope(scope session.Scope) (string, []interface{}) {
+	clause, args := clientScopeClause(scope)
+	if clause == "" {
+		return "", nil
+	}
+	return " WHERE " + clause, args
+}
+
+// clientInScope reports whether scope may see client id.
+func clientInScope(ctx context.Context, db *sqlx.DB, scope session.Scope, id int64) (bool, error) {
+	clause, args := clientScopeClause(scope)
+	if clause == "" {
+		return true, nil
+	}
+	var n int
+	err := db.GetContext(ctx, &n,
+		`SELECT COUNT(*) FROM updater_clients WHERE id = ? AND `+clause, append([]interface{}{id}, args...)...)
+	return n > 0, err
+}
+
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ")
+}
+
+func stringArgs(ss []string) []interface{} {
+	out := make([]interface{}, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
 }
 
 // EventCount is one row of StatsSummary.EventsLast24h.
@@ -92,20 +174,28 @@ type StatsSummary struct {
 
 // fetchStatsSummary backs both GET /v2/stats/summary and the stats:summary
 // WS channel. product must already be validated (see productFilter).
-func fetchStatsSummary(ctx context.Context, db *sqlx.DB, windowMinutes int, product string) (StatsSummary, error) {
-	_, productClause, productArgs, _ := productFilter(product)
+//
+// Every client aggregate is limited to the machines scope may see
+// (clientScopeClause), so a scoped dashboard's totals add up to its own list.
+func fetchStatsSummary(ctx context.Context, db *sqlx.DB, windowMinutes int, product string, scope session.Scope) (StatsSummary, error) {
+	productClause, productArgs := productFilter(product, scope)
+	whereScope, scopeArgs := whereClientScope(scope)
+	andScope, _ := clientScopeClause(scope)
+	if andScope != "" {
+		andScope = " AND " + andScope
+	}
 
 	var summary StatsSummary
 	summary.WindowMinutes = windowMinutes
 	summary.Product = product
 
-	if err := db.GetContext(ctx, &summary.TotalClients, `SELECT COUNT(*) FROM updater_clients`); err != nil {
+	if err := db.GetContext(ctx, &summary.TotalClients, `SELECT COUNT(*) FROM updater_clients`+whereScope, scopeArgs...); err != nil {
 		return summary, err
 	}
 
 	if err := db.GetContext(ctx, &summary.ConnectedClients,
-		`SELECT COUNT(*) FROM updater_clients WHERE last_seen_at >= NOW() - INTERVAL ? MINUTE`,
-		windowMinutes,
+		`SELECT COUNT(*) FROM updater_clients WHERE last_seen_at >= NOW() - INTERVAL ? MINUTE`+andScope,
+		append([]interface{}{windowMinutes}, scopeArgs...)...,
 	); err != nil {
 		return summary, err
 	}
@@ -130,7 +220,8 @@ func fetchStatsSummary(ctx context.Context, db *sqlx.DB, windowMinutes int, prod
 	}
 
 	if err := db.SelectContext(ctx, &summary.ClientsByVersion,
-		`SELECT updater_version, COUNT(*) AS count FROM updater_clients GROUP BY updater_version`,
+		`SELECT updater_version, COUNT(*) AS count FROM updater_clients`+whereScope+` GROUP BY updater_version`,
+		scopeArgs...,
 	); err != nil {
 		return summary, err
 	}
@@ -139,7 +230,8 @@ func fetchStatsSummary(ctx context.Context, db *sqlx.DB, windowMinutes int, prod
 	// revision N yet" from the same client rows GET /v2/config already
 	// updates on every fetch (API design doc §8) - no new telemetry.
 	if err := db.SelectContext(ctx, &summary.ClientsByConfigRevision,
-		`SELECT config_revision, COUNT(*) AS count FROM updater_clients GROUP BY config_revision`,
+		`SELECT config_revision, COUNT(*) AS count FROM updater_clients`+whereScope+` GROUP BY config_revision`,
+		scopeArgs...,
 	); err != nil {
 		return summary, err
 	}
@@ -155,7 +247,7 @@ func fetchStatsSummary(ctx context.Context, db *sqlx.DB, windowMinutes int, prod
 // of these figures - a 24h event total, a version histogram - move on a
 // per-request timescale, so serving a slightly stale copy costs the reader
 // nothing while sparing the database five queries per poll.
-func GetStatsSummary(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
+func GetStatsSummary(db *sqlx.DB, cfg *config.Config, reg *productreg.Registry) http.HandlerFunc {
 	cache := ttlcache.New[StatsSummary](cfg.StatsCacheTTL)
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -166,14 +258,19 @@ func GetStatsSummary(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
 			}
 		}
 
-		product, _, _, ok := eventProductFilter(r)
+		product, ok := eventProductFilter(r, reg)
 		if !ok {
-			response.Error(w, http.StatusBadRequest, "product must be one of: emly, updater, all")
+			response.Error(w, http.StatusBadRequest, productError(reg))
+			return
+		}
+		scope := session.ScopeFrom(r.Context())
+		if !productAllowed(scope, product) {
+			response.Error(w, http.StatusForbidden, "product not assigned to this user")
 			return
 		}
 
-		summary, err := cache.Get(product+"|"+strconv.Itoa(windowMinutes), func() (StatsSummary, error) {
-			return fetchStatsSummary(r.Context(), db, windowMinutes, product)
+		summary, err := cache.Get(product+"|"+strconv.Itoa(windowMinutes)+"|"+scope.Key(), func() (StatsSummary, error) {
+			return fetchStatsSummary(r.Context(), db, windowMinutes, product, scope)
 		})
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to fetch stats summary")
@@ -192,14 +289,22 @@ func GetStatsSummary(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
 }
 
 // fetchStatsClientsPage backs the paginated GET /v2/stats/clients.
-func fetchStatsClientsPage(ctx context.Context, db *sqlx.DB, page, pageSize int, onlyOnline bool, windowMinutes int) (clients []models.UpdaterClient, total int, err error) {
+func fetchStatsClientsPage(ctx context.Context, db *sqlx.DB, page, pageSize int, onlyOnline bool, windowMinutes int, scope session.Scope) (clients []models.UpdaterClient, total int, err error) {
 	offset := (page - 1) * pageSize
 
-	whereClause := ""
+	var conds []string
 	var whereArgs []interface{}
 	if onlyOnline {
-		whereClause = "WHERE last_seen_at >= NOW() - INTERVAL ? MINUTE"
+		conds = append(conds, "last_seen_at >= NOW() - INTERVAL ? MINUTE")
 		whereArgs = append(whereArgs, windowMinutes)
+	}
+	if clause, args := clientScopeClause(scope); clause != "" {
+		conds = append(conds, clause)
+		whereArgs = append(whereArgs, args...)
+	}
+	whereClause := ""
+	if len(conds) > 0 {
+		whereClause = "WHERE " + strings.Join(conds, " AND ")
 	}
 
 	if err = db.GetContext(ctx, &total, `SELECT COUNT(*) FROM updater_clients `+whereClause, whereArgs...); err != nil {
@@ -222,9 +327,10 @@ func fetchStatsClientsPage(ctx context.Context, db *sqlx.DB, page, pageSize int,
 // most (design doc §1/§5.2), and the channel intentionally carries no
 // server-side online/window filter - see the design doc's implementation
 // notes for why.
-func fetchAllStatsClients(ctx context.Context, db *sqlx.DB) ([]models.UpdaterClient, error) {
+func fetchAllStatsClients(ctx context.Context, db *sqlx.DB, scope session.Scope) ([]models.UpdaterClient, error) {
 	var clients []models.UpdaterClient
-	err := db.SelectContext(ctx, &clients, `SELECT * FROM updater_clients ORDER BY last_seen_at DESC`)
+	where, args := whereClientScope(scope)
+	err := db.SelectContext(ctx, &clients, `SELECT * FROM updater_clients`+where+` ORDER BY last_seen_at DESC`, args...)
 	return clients, err
 }
 
@@ -266,7 +372,7 @@ func ListStatsClients(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFunc {
 			}
 		}
 
-		clients, total, err := fetchStatsClientsPage(r.Context(), db, page, pageSize, onlyOnline, windowMinutes)
+		clients, total, err := fetchStatsClientsPage(r.Context(), db, page, pageSize, onlyOnline, windowMinutes, session.ScopeFrom(r.Context()))
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to fetch clients")
 			return
@@ -283,7 +389,8 @@ func ListStatsClients(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFunc {
 	}
 }
 
-// GetStatsClientDetail returns one client and its recent event history, the
+// GetStatsClientDetail returns one client, its recent event history and the
+// version of each product it has installed, the
 // client decorated with its current online state from presence
 // (internal/presencehub) exactly like ListStatsClients - see decorateOnline.
 func GetStatsClientDetail(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFunc {
@@ -291,6 +398,15 @@ func GetStatsClientDetail(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFu
 		id, err := strconv.Atoi(chi.URLParam(r, "id"))
 		if err != nil {
 			response.Error(w, http.StatusBadRequest, "invalid client id")
+			return
+		}
+		// A machine outside the session's scope is a 404, same as one that
+		// does not exist.
+		if ok, err := clientInScope(r.Context(), db, session.ScopeFrom(r.Context()), int64(id)); err != nil {
+			response.Error(w, http.StatusInternalServerError, "failed to fetch client")
+			return
+		} else if !ok {
+			response.Error(w, http.StatusNotFound, "client not found")
 			return
 		}
 
@@ -314,9 +430,20 @@ func GetStatsClientDetail(db *sqlx.DB, presence *presencehub.Hub) http.HandlerFu
 			return
 		}
 
+		// Installed version per product (updater_client_products): the
+		// per-product generalization of client.emly_version.
+		products := []models.ClientProduct{}
+		if err := db.SelectContext(r.Context(), &products,
+			`SELECT product, version, updated_at FROM updater_client_products WHERE client_id = ? ORDER BY product`, id,
+		); err != nil {
+			response.Error(w, http.StatusInternalServerError, "failed to fetch client products")
+			return
+		}
+
 		response.OK(w, map[string]interface{}{
-			"client": client,
-			"events": events,
+			"client":   client,
+			"events":   events,
+			"products": products,
 		})
 	}
 }
@@ -349,6 +476,13 @@ func DeleteStatsClient(db *sqlx.DB) http.HandlerFunc {
 		id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 		if err != nil {
 			response.Error(w, http.StatusBadRequest, "invalid client id")
+			return
+		}
+		if ok, err := clientInScope(r.Context(), db, session.ScopeFrom(r.Context()), id); err != nil {
+			response.Error(w, http.StatusInternalServerError, "failed to fetch client")
+			return
+		} else if !ok {
+			response.Error(w, http.StatusNotFound, "client not found")
 			return
 		}
 
@@ -384,6 +518,14 @@ func DeleteStatsClient(db *sqlx.DB) http.HandlerFunc {
 		if err != nil {
 			// The count is for the report, not for the delete.
 			eventsDeleted = -1
+		}
+
+		// Same reasoning as the events: the FK would cascade, the explicit
+		// delete keeps it correct where the FK was never created.
+		if _, err := tx.ExecContext(r.Context(), `DELETE FROM updater_client_products WHERE client_id = ?`, id); err != nil {
+			slog.ErrorContext(r.Context(), "failed to delete client products", "client_id", id, "error", err)
+			response.Error(w, http.StatusInternalServerError, "failed to delete client products")
+			return
 		}
 
 		if _, err := tx.ExecContext(r.Context(), `DELETE FROM updater_clients WHERE id = ?`, id); err != nil {
@@ -445,8 +587,8 @@ type StatsEventsResponse struct {
 // of its hour, meaning a range starting mid-hour includes that whole hour -
 // the right direction for a daily chart, which otherwise shows a clipped
 // first column.
-func fetchStatsEvents(ctx context.Context, db *sqlx.DB, bucket, eventType, product string, from, to time.Time) (StatsEventsResponse, error) {
-	_, productClause, productArgs, _ := productFilter(product)
+func fetchStatsEvents(ctx context.Context, db *sqlx.DB, bucket, eventType, product string, scope session.Scope, from, to time.Time) (StatsEventsResponse, error) {
+	productClause, productArgs := productFilter(product, scope)
 
 	bucketExpr := "DATE(bucket_hour)"
 	if bucket == "hour" {
@@ -482,7 +624,7 @@ func fetchStatsEvents(ctx context.Context, db *sqlx.DB, bucket, eventType, produ
 // default window ends at time.Now() and no two requests would ever share a
 // key. Two callers whose windows differ by less than the TTL therefore share
 // one payload, which is the staleness the TTL already licenses.
-func GetStatsEvents(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
+func GetStatsEvents(db *sqlx.DB, cfg *config.Config, reg *productreg.Registry) http.HandlerFunc {
 	cache := ttlcache.New[StatsEventsResponse](cfg.StatsCacheTTL)
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -497,9 +639,14 @@ func GetStatsEvents(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
 
 		eventType := r.URL.Query().Get("event_type")
 
-		product, _, _, ok := eventProductFilter(r)
+		product, ok := eventProductFilter(r, reg)
 		if !ok {
-			response.Error(w, http.StatusBadRequest, "product must be one of: emly, updater, all")
+			response.Error(w, http.StatusBadRequest, productError(reg))
+			return
+		}
+		scope := session.ScopeFrom(r.Context())
+		if !productAllowed(scope, product) {
+			response.Error(w, http.StatusForbidden, "product not assigned to this user")
 			return
 		}
 
@@ -524,13 +671,13 @@ func GetStatsEvents(db *sqlx.DB, cfg *config.Config) http.HandlerFunc {
 		}
 
 		key := strings.Join([]string{
-			bucket, product, eventType,
+			bucket, product, eventType, scope.Key(),
 			quantize(from, cfg.StatsCacheTTL).Format(time.RFC3339),
 			quantize(to, cfg.StatsCacheTTL).Format(time.RFC3339),
 		}, "|")
 
 		resp, err := cache.Get(key, func() (StatsEventsResponse, error) {
-			return fetchStatsEvents(r.Context(), db, bucket, eventType, product, from, to)
+			return fetchStatsEvents(r.Context(), db, bucket, eventType, product, scope, from, to)
 		})
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "failed to fetch events")

@@ -29,6 +29,7 @@ import (
 	"emly-api-go/internal/logfile"
 	emlyMiddleware "emly-api-go/internal/middleware"
 	"emly-api-go/internal/presencehub"
+	"emly-api-go/internal/productreg"
 	"emly-api-go/internal/routes"
 	"emly-api-go/internal/stats"
 	"emly-api-go/internal/statshub"
@@ -303,7 +304,14 @@ func main() {
 		DownloadTimeout: cfg.DownloadQueue.Timeout,
 	})
 
-	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub, presenceHub, clientHub, bans, downloadQueue)
+	// The products /v2/updates/{product} serves, cached like the ban list:
+	// the manifest it guards is polled by the whole fleet. Refreshed after
+	// every /v2/products write and every minute, so a second instance picks
+	// up a product created through the first.
+	productRegistry := productreg.New(db)
+	go productRegistry.Run(backgroundCtx)
+
+	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub, presenceHub, clientHub, bans, downloadQueue, productRegistry)
 
 	// GET /v2/stats/stream hijacks the connection to complete its WebSocket
 	// upgrade (coder/websocket.Accept requires the ResponseWriter to
@@ -334,7 +342,7 @@ func main() {
 	// gap; closing it would mean a post-identity check against
 	// identity.HWID/identity.Hostname before presence.Connect, out of scope
 	// for this fix).
-	wsHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(stats.StatsStream(db, statsHub, presenceHub))
+	wsHandler := emlyMiddleware.RouteLimitByIP(30, time.Minute)(stats.StatsStream(db, statsHub, presenceHub, productRegistry))
 	wsHandler = rl.Handler(wsHandler)
 	wsHandler = bans.Handler(wsHandler)
 	wsHandler = chiMiddleware.Recoverer(wsHandler)
