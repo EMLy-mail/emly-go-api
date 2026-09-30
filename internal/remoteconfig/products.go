@@ -72,9 +72,12 @@ func validateProducts(ps map[string]ProductSettings) []Problem {
 			default:
 				add(dp+"/type", "must be one of: ini, file, exe")
 			}
+			// ':' covers drive-relative paths ("C:foo", which resolve
+			// against that drive's current directory, not installDir) and
+			// NTFS alternate data streams ("version.txt:x").
 			if d.Path == "" || windowsAbsPath.MatchString(d.Path) || strings.HasPrefix(d.Path, `\`) ||
-				strings.HasPrefix(d.Path, "/") || hasDotDotSegment(d.Path) {
-				add(dp+"/path", `must be relative to installDir, without ".."`)
+				strings.HasPrefix(d.Path, "/") || hasDotDotSegment(d.Path) || strings.Contains(d.Path, ":") {
+				add(dp+"/path", `must be relative to installDir, without ".." or ':'`)
 			}
 			if d.Type == "ini" {
 				if d.Section == "" {
