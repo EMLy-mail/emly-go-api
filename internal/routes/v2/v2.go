@@ -8,6 +8,7 @@ import (
 	"emly-api-go/internal/clientws"
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/configapi"
+	"emly-api-go/internal/downloadqueue"
 	"emly-api-go/internal/health"
 	emlyMiddleware "emly-api-go/internal/middleware"
 	"emly-api-go/internal/presencehub"
@@ -35,8 +36,10 @@ import (
 // the config.published notify on a config publish (nil is fine; see
 // internal/clienthub). bans is the live block-list snapshot the admin
 // routes refresh after a write; nil is fine in tests, where the write lands
-// in the table and nothing needs to enforce it.
-func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror health.ConfigMirrorReporter, hub *statshub.Hub, presence *presencehub.Hub, clients *clienthub.Hub, reloader bans.BanReloader) http.Handler {
+// in the table and nothing needs to enforce it. queue caps concurrent
+// installer downloads and backs /v2/download-queue; nil means no cap and
+// those admin routes answer 503 (see internal/downloadqueue).
+func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror health.ConfigMirrorReporter, hub *statshub.Hub, presence *presencehub.Hub, clients *clienthub.Hub, reloader bans.BanReloader, queue *downloadqueue.Queue) http.Handler {
 	r := chi.NewRouter()
 
 	rl := emlyMiddleware.NewRateLimiter(config.Load())
@@ -53,10 +56,11 @@ func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, c
 
 	r.Get("/health", health.HealthWithConfigMirror(db, configMirror))
 
-	updates.RegisterV2(r, db, updatesS3conn, config.Load().UpdatesS3Prefix, config.Load().UpdaterS3Prefix, hub)
+	updates.RegisterV2(r, db, updatesS3conn, config.Load().UpdatesS3Prefix, config.Load().UpdaterS3Prefix, hub, queue)
 	stats.RegisterV2(r, db, config.Load(), hub, presence)
 	configapi.RegisterV2(r, db, config.Load(), clients)
 	bans.RegisterV2(r, db, reloader)
+	downloadqueue.RegisterV2(r, db, queue)
 	clientws.RegisterV2(r, db, presence, clients)
 
 	r.Route("/api", func(r chi.Router) {

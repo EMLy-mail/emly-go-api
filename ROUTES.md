@@ -3,7 +3,7 @@
 Elenco di ogni endpoint esposto da **emly-api-go**, con autenticazione richiesta,
 parametri e comportamento. Generato dal codice in `internal/routes/` e nei
 package per feature sotto `internal/` (`bugreports`, `admin`, `updates`,
-`configapi`, `stats`, `clientws`, `bans`, `health`), ognuno dei quali registra
+`configapi`, `stats`, `clientws`, `bans`, `downloadqueue`, `health`), ognuno dei quali registra
 le proprie route v2 nel suo `routes.go`.
 
 Per l'architettura generale vedi [CLAUDE.md](CLAUDE.md); per la guida estesa
@@ -27,6 +27,7 @@ vedi [DOCS.md](DOCS.md).
    - [Statistiche](#57-statistiche--v2stats)
    - [Stream WebSocket](#58-stream-websocket--v2statsstream)
    - [Presenza client](#59-presenza-client--v2clientws)
+   - [Coda download](#510-coda-download--v2download-queue)
 6. [Riepilogo autenticazione](#6-riepilogo-autenticazione)
 
 ---
@@ -42,6 +43,7 @@ La colonna **Auth** usa queste sigle:
 | `ADMIN`      | Header `X-Admin-Key` valido (middleware `AdminKeyAuth`, 401 altrimenti) |
 | `API+ADMIN`  | Entrambi gli header insieme                                       |
 | `SESSION`    | Header `X-Session-Token` valido, verificato dall'handler stesso    |
+| `ADMIN+DASH` | `X-Admin-Key` **e** `X-Dashboard-Key` validi insieme (`AdminKeyAuth` + `DashboardKeyAuth`, 401 se ne manca uno) |
 | `ADMIN (WS)` | `X-Admin-Key` controllato dall'handler prima dell'upgrade WebSocket, con fallback `?admin_key=` |
 
 Tutti i gruppi applicano anche `apimw.RouteLimitByIP(30, time.Minute)`, oltre
@@ -285,7 +287,7 @@ esiste in v2.
 | Metodo   | Path                                 | Auth    | Cosa fa |
 |----------|--------------------------------------|---------|---------|
 | `GET`    | `/manifest`                          | `—`     | Manifest degli aggiornamenti EMLy. Registra un evento `manifest_check`. |
-| `GET`    | `/releases/{version}/download`        | `—`     | Scarica l'installer della release dal bucket updates. |
+| `GET`    | `/releases/{version}/download`        | `—`     | Scarica l'installer della release dal bucket updates. Soggetto alla [coda download](#510-coda-download--v2download-queue): `429` se piena. |
 | `GET`    | `/releases`                          | `ADMIN` | Elenca le release. |
 | `POST`   | `/releases`                          | `ADMIN` | Crea una release caricando l'installer. |
 | `PUT`    | `/releases/{version}`                | `ADMIN` | Sostituisce tutti i metadati della release. |
@@ -361,7 +363,10 @@ lo stato `200` e il `Content-Length` nulla può più diventare un errore HTTP,
 quindi una copia incompleta viene registrata come **warn**
 (`installer download did not complete`) con la causa, i byte inviati rispetto
 agli attesi, il throughput medio e l'identità del client. `404` se la release o
-il file non esistono, `503` se S3 non è configurato.
+il file non esistono, `503` se S3 non è configurato, `429` con `Retry-After`
+se la [coda download](#510-coda-download--v2download-queue) è piena. Un
+download rimosso dal suo slot da un admin viene registrato con causa
+`evicted from queue slot`.
 
 ### 5.4 Self-update dell'Updater — `/v2/updates`
 
@@ -371,7 +376,7 @@ Superficie separata, con la sua tabella `updater_releases` e il suo prefisso S3
 | Metodo   | Path                                 | Auth    | Cosa fa |
 |----------|--------------------------------------|---------|---------|
 | `GET`    | `/manifest/updater`                  | `API`   | Manifest di self-update dell'Updater. |
-| `GET`    | `/download/updater/{version}`        | `—`     | Scarica l'installer dell'Updater. |
+| `GET`    | `/download/updater/{version}`        | `—`     | Scarica l'installer dell'Updater. Soggetto alla [coda download](#510-coda-download--v2download-queue): `429` se piena. |
 | `GET`    | `/updater/releases`                  | `ADMIN` | Elenca le release dell'Updater. |
 | `POST`   | `/updater/releases`                  | `ADMIN` | Crea una release caricando l'installer. |
 | `PATCH`  | `/updater/releases/{version}`        | `ADMIN` | Aggiorna i metadati della release. |
@@ -407,6 +412,8 @@ il kill-switch.
 
 Resta pubblico come il download delle release EMLy: il link del manifest può
 legittimamente passare da un mirror o da una CDN che non inoltra l'API key.
+Condivide con il download EMLy la stessa [coda download](#510-coda-download--v2download-queue):
+gli slot sono uno solo pool per entrambi i prodotti.
 
 ### 5.5 Remote config — `/v2/config`
 
@@ -845,6 +852,111 @@ sua sessione, non lo storico), ed è per-istanza come `presencehub`/
 minuti: i comandi conclusi (`done`/`failed`/`rejected`/`timeout`) e gli
 eventi più vecchi di 24h vengono scartati.
 
+### 5.10 Coda download — `/v2/download-queue`
+
+Limita quanti installer (EMLy **e** Updater, un unico pool) possono essere in
+streaming nello stesso momento. Non è una fila d'attesa: un download o prende
+subito uno slot libero o viene rifiutato con `429`, e il client riprova più
+tardi. Tenere la richiesta aperta ad aspettare occuperebbe proprio la
+connessione che il limite vuole proteggere.
+
+Tutto lo stato è **in memoria** (`internal/downloadqueue`): nessuna tabella,
+nulla salvato su DB. Le modifiche fatte da queste route valgono fino al
+prossimo riavvio, poi si torna ai valori di `.env` (`DOWNLOAD_QUEUE_ENABLED`,
+default `true`; `DOWNLOAD_QUEUE_SLOTS`, default `50`;
+`DOWNLOAD_QUEUE_RETRY_AFTER`, default `60s`). È per-istanza come
+`presencehub`: ogni replica conta i propri download.
+
+**Risposta quando la coda è piena** (su `GET /v2/updates/releases/{version}/download`
+e `GET /v2/updates/download/updater/{version}`):
+
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: 60
+Content-Type: application/json
+```
+
+```json
+{
+  "error": "download queue full",
+  "message": "No free download slots are available right now. Retry in 60 seconds.",
+  "retry_after": 60,
+  "capacity": 50,
+  "active": 50
+}
+```
+
+Il limite scatta solo dopo il rate limiter del gruppo: una richiesta già
+rifiutata da `RouteLimitByIP` non occupa mai uno slot. Lo slot resta occupato
+per tutta la durata dello streaming e si libera quando l'handler ritorna
+(completato, interrotto dal client, timeout 30s o rimosso da un admin).
+A coda **disattivata** i download sono comunque tracciati (compaiono in
+`slots`) ma nessuno viene rifiutato.
+
+| Metodo   | Path            | Auth         | Cosa fa |
+|----------|-----------------|--------------|---------|
+| `GET`    | `/`             | `ADMIN+DASH` | Stato: impostazioni correnti e di default, slot occupati/liberi, contatori, elenco dei download in corso. |
+| `PATCH`  | `/`             | `ADMIN+DASH` | Attiva/disattiva, espande/riduce la capacità, cambia il `Retry-After`. Solo i campi presenti. |
+| `POST`   | `/reset`        | `ADMIN+DASH` | Torna ai valori di `.env`. I download in corso restano. |
+| `DELETE` | `/slots`        | `ADMIN+DASH` | Svuota la coda: interrompe **tutti** i download in corso. `{"evicted": N}`. |
+| `DELETE` | `/slots/{id}`   | `ADMIN+DASH` | Interrompe un singolo download e libera il suo slot. `404` se lo slot non esiste (già finito). |
+
+Con `DASHBOARD_KEY` non impostata le route rispondono sempre `401`: sono
+pensate solo per la dashboard. Se il router è costruito senza coda (test)
+rispondono `503`.
+
+**`GET /` — forma della risposta** (identica per `PATCH` e `POST /reset`)
+
+```json
+{
+  "enabled": true,
+  "capacity": 50,
+  "retry_after_seconds": 60,
+  "active": 2,
+  "available": 48,
+  "acquired_total": 1234,
+  "rejected_total": 17,
+  "evicted_total": 0,
+  "defaults": { "enabled": true, "capacity": 50, "retry_after_seconds": 60 },
+  "slots": [
+    {
+      "id": 1233,
+      "product": "emly",
+      "version": "1.7.0",
+      "ip": "203.0.113.7",
+      "hostname": "pc-reception",
+      "hwid": "ABC123",
+      "started_at": "2026-09-30T08:12:44Z"
+    }
+  ]
+}
+```
+
+`available` è `capacity - active`, mai sotto zero. I contatori `*_total`
+ripartono da zero a ogni riavvio. `slots` è ordinato dal più vecchio.
+
+**`PATCH /` — corpo JSON**
+
+```json
+{ "enabled": true, "capacity": 80, "retry_after_seconds": 120 }
+```
+
+| Campo                 | Vincoli |
+|-----------------------|---------|
+| `enabled`             | booleano |
+| `capacity`            | intero `1..10000` |
+| `retry_after_seconds` | intero `1..86400` |
+
+Almeno un campo è richiesto, altrimenti `400`; un valore fuori range è `400`.
+Ridurre la capacità sotto il numero di download in corso non interrompe
+nessuno: quelli finiscono, e i nuovi vengono rifiutati finché `active` non
+scende sotto la nuova capacità.
+
+**`DELETE /slots/{id}`** annulla il contesto della richiesta di download: la
+lettura da S3 si interrompe e il client riceve un file troncato (lo stato
+`200` era già partito). Il log `installer download did not complete` riporta
+`reason: evicted from queue slot`.
+
 ---
 
 ## 6. Riepilogo autenticazione
@@ -852,8 +964,8 @@ eventi più vecchi di 24h vengono scartati.
 | Header            | Dove viene usato | Fallimento |
 |-------------------|------------------|------------|
 | `X-API-Key`       | Creazione bug report, manifest dell'Updater, `GET /v2/config`, `GET /v2/client/ws` | `401` |
-| `X-Admin-Key`     | Tutte le route admin, releases, config writes, bans, stats, comandi/eventi/notify di `/v2/client` | `401` |
-| `X-Dashboard-Key` | Bypass di entrambi i rate limiter, globale e per gruppo di route | nessuno, la richiesta prosegue limitata |
+| `X-Admin-Key`     | Tutte le route admin, releases, config writes, bans, stats, download-queue, comandi/eventi/notify di `/v2/client` | `401` |
+| `X-Dashboard-Key` | Bypass di entrambi i rate limiter, globale e per gruppo di route; **richiesto** (insieme a `X-Admin-Key`) da `/v2/download-queue` | nessuno per i limiter (la richiesta prosegue limitata); `401` su `/v2/download-queue` |
 | `X-Session-Token` | `auth/validate`, `auth/logout` | `401` o `403` |
 
 `API_KEY` e `ADMIN_KEY` accettano una lista separata da virgole, ma viene usato

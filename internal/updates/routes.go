@@ -5,8 +5,10 @@ import (
 
 	apimw "emly-api-go/internal/middleware"
 
+	"emly-api-go/internal/downloadqueue"
 	"emly-api-go/internal/statshub"
 	"emly-api-go/internal/storage"
+	"emly-api-go/internal/updaterclient"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
@@ -16,13 +18,15 @@ import (
 // the EMLy client manifest/releases under s3Prefix, and the EMLy Updater's own
 // self-update manifest/installer under updaterPrefix. hub may be nil; it is
 // only used to publish updater_events for /v2/stats/stream (recordUpdaterEvent
-// tolerates nil).
-func RegisterV2(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix, updaterPrefix string, hub *statshub.Hub) {
+// tolerates nil). queue caps how many of the two installer downloads stream
+// at once (nil means no cap; see internal/downloadqueue).
+func RegisterV2(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix, updaterPrefix string, hub *statshub.Hub, queue *downloadqueue.Queue) {
 	r.Route("/updates", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 			r.Get("/manifest", GetUpdateManifest(db, hub))
-			r.Get("/releases/{version}/download", DownloadRelease(db, s3conn, s3Prefix, hub))
+			r.With(queue.Middleware(updaterclient.ProductEMLy)).
+				Get("/releases/{version}/download", DownloadRelease(db, s3conn, s3Prefix, hub))
 		})
 
 		r.Group(func(r chi.Router) {
@@ -53,7 +57,8 @@ func RegisterV2(r chi.Router, db *sqlx.DB, s3conn *storage.S3Connector, s3Prefix
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 
-			r.Get("/download/updater/{version}", DownloadUpdater(db, s3conn, updaterPrefix, hub))
+			r.With(queue.Middleware(updaterclient.ProductUpdater)).
+				Get("/download/updater/{version}", DownloadUpdater(db, s3conn, updaterPrefix, hub))
 		})
 
 		r.Group(func(r chi.Router) {

@@ -48,6 +48,15 @@ type LogFileConfig struct {
 	RetentionDays int
 }
 
+// DownloadQueueConfig is the startup state of internal/downloadqueue: the
+// cap on installer downloads streaming at once. The admin routes can change
+// it at runtime, in memory only, until the next restart.
+type DownloadQueueConfig struct {
+	Enabled    bool
+	Slots      int
+	RetryAfter time.Duration
+}
+
 type Config struct {
 	Port                    string
 	DSN                     string
@@ -72,6 +81,7 @@ type Config struct {
 	UseS3APIFileStorage     bool
 	UseS3UpdatesStorage     bool
 	RateLimit               RateLimitConfig
+	DownloadQueue           DownloadQueueConfig
 	S3APIFile               S3BucketConfig
 	S3Updates               S3BucketConfig
 	Otel                    OtelConfig
@@ -210,6 +220,13 @@ func load() *Config {
 			BucketName:      os.Getenv("S3_UPDATES_BUCKET"),
 			Region:          envString("S3_UPDATES_REGION", "auto"),
 			Endpoint:        os.Getenv("S3_UPDATES_ENDPOINT"),
+		},
+		// DownloadQueue caps concurrent installer downloads (EMLy app and
+		// Updater); a download past the cap gets 429 + Retry-After.
+		DownloadQueue: DownloadQueueConfig{
+			Enabled:    strings.ToLower(strings.TrimSpace(envString("DOWNLOAD_QUEUE_ENABLED", "true"))) == "true",
+			Slots:      envInt("DOWNLOAD_QUEUE_SLOTS", 50),
+			RetryAfter: envDuration("DOWNLOAD_QUEUE_RETRY_AFTER", 60*time.Second),
 		},
 		RateLimit: RateLimitConfig{
 			UnauthMaxReqs:  envInt("RL_UNAUTH_MAX_REQS", 10),

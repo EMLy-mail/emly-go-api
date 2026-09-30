@@ -5,6 +5,7 @@ import (
 	"emly-api-go/internal/bugreports"
 	"emly-api-go/internal/clienthub"
 	"emly-api-go/internal/config"
+	"emly-api-go/internal/downloadqueue"
 	"emly-api-go/internal/health"
 	apimw "emly-api-go/internal/middleware"
 	"emly-api-go/internal/presencehub"
@@ -32,8 +33,9 @@ import (
 // GET /v2/client/ws - sessions, issued commands, recent events, and the
 // config.published notify on a config publish; pass nil to run without it
 // (see internal/clienthub). bans is the live permanent-block snapshot the
-// /v2/bans admin routes refresh after a write.
-func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror health.ConfigMirrorReporter, statsHub *statshub.Hub, presence *presencehub.Hub, clients *clienthub.Hub, bans bans.BanReloader) {
+// /v2/bans admin routes refresh after a write. downloadQueue caps concurrent
+// installer downloads and backs /v2/download-queue; pass nil for no cap.
+func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, configMirror health.ConfigMirrorReporter, statsHub *statshub.Hub, presence *presencehub.Hub, clients *clienthub.Hub, bans bans.BanReloader, downloadQueue *downloadqueue.Queue) {
 	dbName := config.Load().Database
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -44,7 +46,7 @@ func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storag
 	})
 
 	r.Mount("/v1", v1.NewRouter(db, apiFileS3conn))
-	r.Mount("/v2", v2.NewRouter(db, apiFileS3conn, updatesS3conn, configMirror, statsHub, presence, clients, bans))
+	r.Mount("/v2", v2.NewRouter(db, apiFileS3conn, updatesS3conn, configMirror, statsHub, presence, clients, bans, downloadQueue))
 	// Redirect /health to /v1/health
 	r.Get("/health", health.Health(db))
 

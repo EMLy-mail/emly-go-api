@@ -93,6 +93,7 @@ emly-api-go/
     ├── stats/                       # /v2/stats/* REST + /v2/stats/stream (WS)
     ├── clientws/                    # /v2/client/ws: connessione sempre aperta + route admin comandi/eventi/notify
     ├── bans/                        # block list permanente (admin)
+    ├── downloadqueue/               # tetto ai download installer simultanei (in RAM) + route admin
     ├── health/                       # /health
     │
     │   ── Foglie condivise: le feature le importano, loro non importano feature ──
@@ -670,7 +671,7 @@ Headers: X-Session-Token: <session_id>
 
 ### Fuori scala: `X-Dashboard-Key`
 
-Non autentica niente e non protegge nessun endpoint. Una richiesta che lo porta
+Per quasi tutte le route non autentica niente. Una richiesta che lo porta
 valido salta **entrambi** i rate limiter, quello globale custom e quello per
 gruppo di route, cosi' la dashboard puo' fare polling senza consumare la quota
 per IP. Il valore e' in `.env` come `DASHBOARD_KEY`.
@@ -682,6 +683,15 @@ divisa fra tutto lo staff. Come raggio d'azione la chiave equivale alla admin
 key, ed e' un segreto che resta sul server: la dashboard non la manda mai al
 browser. Se `DASHBOARD_KEY` non e' impostata l'esenzione e' semplicemente
 spenta.
+
+**L'unica eccezione e' `/v2/download-queue`**, che la *richiede*: il
+middleware `DashboardKeyAuth` (`internal/middleware/dashboardKey.go`) si
+monta *dopo* `AdminKeyAuth`, e una richiesta passa solo con **entrambe** le
+chiavi. In Express sarebbe `router.use(requireAdminKey, requireDashboardKey)`.
+Il motivo: quelle route decidono se tutta la flotta puo' scaricare un
+installer, e devono essere manovrate dalla dashboard, non da uno script
+qualunque che ha in mano solo la admin key. Con `DASHBOARD_KEY` vuota
+rispondono sempre `401`.
 
 ---
 
@@ -807,6 +817,49 @@ Tre cose da sapere prima di usarli:
   continuano a funzionare.
 - **Ribannare qualcosa gia' bannato risponde `200`**, non `409`, restituendo
   la riga esistente.
+
+---
+
+### Coda dei download (`internal/downloadqueue`)
+
+I due download di installer (`GET /v2/updates/releases/{version}/download`
+per EMLy e `GET /v2/updates/download/updater/{version}` per l'Updater)
+condividono un tetto di download **contemporanei**: di default 50 slot. Quando
+sono tutti occupati, la richiesta successiva prende `429 Too Many Requests`
+con header `Retry-After: 60` e un JSON che spiega che non ci sono slot liberi.
+
+Se vieni da Node, pensalo come un semaforo tipo `p-limit` messo davanti alla
+route, ma che invece di mettere in attesa la promise **rifiuta subito**: tenere
+la richiesta appesa occuperebbe proprio la banda/connessione che vogliamo
+proteggere, e l'Updater riprova comunque da solo. E' implementato come un
+middleware (`queue.Middleware(product)`) montato con `r.With(...)` solo sulle
+due route di download, *dopo* il rate limiter per IP: una richiesta gia'
+respinta dal limiter non occupa mai uno slot. Lo slot si libera con un
+`defer` quando l'handler ritorna, qualunque sia il motivo (download finito,
+client disconnesso, timeout, panic).
+
+Tutto vive **in RAM**, in una struct protetta da un `sync.Mutex` (l'equivalente
+Go di un lock attorno a una `Map` condivisa): nessuna tabella, nulla scritto su
+DB. Conseguenze:
+
+- i valori di `.env` (`DOWNLOAD_QUEUE_ENABLED`, `DOWNLOAD_QUEUE_SLOTS`,
+  `DOWNLOAD_QUEUE_RETRY_AFTER`) sono lo stato di partenza; le modifiche fatte
+  dalla dashboard durano fino al prossimo riavvio;
+- come `presencehub`/`statshub`, e' per-istanza: con due repliche dell'API
+  ognuna ha i suoi 50 slot.
+
+A coda disattivata i download vengono comunque tracciati (la dashboard vede
+quanti sono in corso prima di decidere se accenderla), ma nessuno e' rifiutato.
+
+La dashboard la manovra da `/v2/download-queue` (admin key **e** dashboard key):
+leggere lo stato, attivarla/spegnerla, allargare/ridurre la capacita', cambiare
+il `Retry-After`, tornare ai valori di `.env`, e interrompere un download (o
+tutti). Interrompere usa `context.WithCancelCause`: il middleware crea un
+contesto figlio per la richiesta e ne conserva la funzione di cancel nello
+slot; la route admin la chiama con la causa `downloadqueue.ErrEvicted`, la
+lettura da S3 si ferma, e `streamInstaller` logga il download troncato con
+`reason: evicted from queue slot` invece di "client disconnected". Dettaglio
+delle route in [ROUTES.md](ROUTES.md#510-coda-download--v2download-queue).
 
 ---
 

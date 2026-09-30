@@ -41,8 +41,11 @@ go run . --migrate-files
 # and the rate limiter, and a full identity->presence-online round trip over a
 # real listener, in internal/clientws), the client ws admin routes (issue/get
 # command, list events, notify, in internal/clientws), the daily log files
-# (naming, day rotation, retention in internal/logfile) and the raw-event
-# retention loop's disabled path (internal/eventprune)
+# (naming, day rotation, retention in internal/logfile), the raw-event
+# retention loop's disabled path (internal/eventprune), and the download
+# queue (slot acquire/release/evict, runtime settings, the 429 + Retry-After
+# middleware in internal/downloadqueue; admin+dashboard-key gating and its
+# mounting on both installer routes in internal/routes/v2)
 go test ./...
 go test ./internal/... -run TestName -v
 ```
@@ -83,7 +86,7 @@ The custom middleware live in `internal/middleware/`: `AccessLog` (`accesslog.go
 
 Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applies the custom `RateLimiter`, sets `X-Server`/`X-Powered-By` headers and exposes `GET /health`.
 
-**Each feature package registers its own v2 routes.** `v2.NewRouter` is a mount table and nothing else: it calls `updates.RegisterV2`, `stats.RegisterV2`, `configapi.RegisterV2`, `bans.RegisterV2`, `clientws.RegisterV2`, `admin.RegisterV2`, `bugreports.RegisterV2`, each defined in that feature's own `routes.go` next to the handlers it mounts. A new endpoint is therefore one file's worth of change - handler and route in the same package - not a handler here and a registration in a router package over there. **v1 is the deliberate exception**: its route files stay in `internal/routes/v1/`, calling the same exported handler constructors. It is frozen and sunsets 2026-10-31, so it is not worth giving a home inside the feature packages only to delete it weeks later.
+**Each feature package registers its own v2 routes.** `v2.NewRouter` is a mount table and nothing else: it calls `updates.RegisterV2`, `stats.RegisterV2`, `configapi.RegisterV2`, `bans.RegisterV2`, `clientws.RegisterV2`, `downloadqueue.RegisterV2`, `admin.RegisterV2`, `bugreports.RegisterV2`, each defined in that feature's own `routes.go` next to the handlers it mounts. A new endpoint is therefore one file's worth of change - handler and route in the same package - not a handler here and a registration in a router package over there. **v1 is the deliberate exception**: its route files stay in `internal/routes/v1/`, calling the same exported handler constructors. It is frozen and sunsets 2026-10-31, so it is not worth giving a home inside the feature packages only to delete it weeks later.
 
 **v1** (`/v1/api/...`) — **deprecated, sunset after 2026-10-31** (`v1.SunsetDate`). `v1.NewRouter` applies `v1.DeprecationWarning` right after the rate limiter, logging one **warn** line per request (`deprecated API version used`) with the caller's method, path, IP, hostname, HWID and User-Agent. The root-level legacy alias `POST /api/bug-reports` is wrapped with it too, since it is a v1 route mounted outside the v1 router. The line is per-request and not sampled on purpose: a sampled warning would hide the rare caller nobody remembers deploying until the sunset breaks it, and the noise ends when `/v1` does. Every v1 route has a v2 equivalent.
 
@@ -111,6 +114,7 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - `internal/stats/` — `/v2/stats/*` REST **and** its real-time counterpart `/v2/stats/stream`, which share the fetchers (`fetchStatsSummary`, `fetchStatsEvents`, `decorateOnline`) so a polled figure and a pushed one can never disagree.
 - `internal/clientws/` — `GET /v2/client/ws`, the connection the updater holds open for the lifetime of the service.
 - `internal/bans/` — the `bans` table's admin surface, enforced by `middleware.BanList`.
+- `internal/downloadqueue/` — the in-memory cap on concurrent installer downloads (EMLy release + updater installer share one pool, default 50 slots). `Queue.Middleware(product)` is mounted with `r.With` on both download routes by `updates.RegisterV2`, *after* `RouteLimitByIP`; a full, enabled queue answers **429** with `Retry-After` and a JSON body, never waits. Nothing is persisted: `DOWNLOAD_QUEUE_*` is the startup state, `/v2/download-queue` (admin key **and** dashboard key, via `middleware.DashboardKeyAuth`) changes it until restart, and can evict a download (`context.WithCancelCause` with `ErrEvicted`, logged by `streamInstaller` as `evicted from queue slot`). Slots are tracked even while disabled. Single-instance, like `presencehub`. Nil `*Queue` is safe (no cap; admin routes 503).
 - `internal/health/` — `GET /health`, plus the `ConfigMirrorReporter` interface a site mirror's state is reported through.
 
 **Shared leaf packages** — imported by features, importing none of them. A helper that two features need belongs in one of these, never in a sibling feature:
@@ -180,6 +184,7 @@ Other notable vars (see `.env.example` for full list + defaults):
 - Updates: `UPDATES_ENABLED`, `S3_UPDATES_PREFIX` (path prefix inside the updates bucket; manifest download links are built from the request's `Host`/`X-Forwarded-*` headers, not an env var), `S3_UPDATER_PREFIX` (default `updater`; separate prefix in the same updates bucket for the EMLy Updater's own installers)
 - Remote config: `CONFIG_UPSTREAM_URL` (empty on the cloud/primary instance; set on a site mirror to replicate `/v2/config` from upstream instead of accepting writes), `CONFIG_UPSTREAM_INTERVAL` (default `5m`), `CONFIG_UPSTREAM_API_KEY` (defaults to this instance's own `API_KEY`)
 - Real-time stats: `STATS_STREAM_TICK_INTERVAL` (default `30s`) — how often `GET /v2/stats/stream` pushes a resync tick to connected dashboards independent of any new `updater_events` row
+- Download queue: `DOWNLOAD_QUEUE_ENABLED` (default `true`), `DOWNLOAD_QUEUE_SLOTS` (default `50`), `DOWNLOAD_QUEUE_RETRY_AFTER` (default `60s`, sent as whole seconds) — startup state of `internal/downloadqueue`; runtime changes via `/v2/download-queue` are in memory only
 - Fleet stats: `STATS_CACHE_TTL` (default `30s`) — how long `GET /v2/stats/summary` and `GET /v2/stats/events` may serve a memoized payload; `0` disables the cache. `EVENTS_RETENTION_DAYS` (default `30`, `0` keeps everything) — how many days of raw `updater_events` rows `internal/eventprune` keeps; only the per-client history on `GET /v2/stats/clients/{id}` reads them, so this bounds detail, not the charts
 
 ### Adding new environment variables

@@ -24,6 +24,7 @@ import (
 	"emly-api-go/internal/configmirror"
 	"emly-api-go/internal/database"
 	"emly-api-go/internal/database/schema"
+	"emly-api-go/internal/downloadqueue"
 	"emly-api-go/internal/eventprune"
 	"emly-api-go/internal/logfile"
 	emlyMiddleware "emly-api-go/internal/middleware"
@@ -288,7 +289,16 @@ func main() {
 	rl := emlyMiddleware.NewRateLimiter(cfg)
 	r.Use(rl.Handler)
 
-	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub, presenceHub, clientHub, bans)
+	// In-memory cap on concurrent installer downloads (see
+	// internal/downloadqueue). Nothing is persisted: runtime changes made
+	// from the dashboard last until restart, then DOWNLOAD_QUEUE_* applies.
+	downloadQueue := downloadqueue.New(downloadqueue.Settings{
+		Enabled:    cfg.DownloadQueue.Enabled,
+		Capacity:   cfg.DownloadQueue.Slots,
+		RetryAfter: cfg.DownloadQueue.RetryAfter,
+	})
+
+	routes.RegisterAll(r, db, apiFileS3conn, updatesS3conn, configMirrorState, statsHub, presenceHub, clientHub, bans, downloadQueue)
 
 	// GET /v2/stats/stream hijacks the connection to complete its WebSocket
 	// upgrade (coder/websocket.Accept requires the ResponseWriter to

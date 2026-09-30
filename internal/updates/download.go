@@ -11,6 +11,7 @@ import (
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 
 
+	"emly-api-go/internal/downloadqueue"
 	"emly-api-go/internal/updaterclient"
 )
 
@@ -39,6 +40,8 @@ func streamInstaller(w http.ResponseWriter, r *http.Request, src io.Reader, prod
 
 	reason := "copy failed"
 	switch {
+	case errors.Is(context.Cause(r.Context()), downloadqueue.ErrEvicted):
+		reason = "evicted from queue slot"
 	case errors.Is(r.Context().Err(), context.DeadlineExceeded):
 		reason = "server timeout"
 	case errors.Is(r.Context().Err(), context.Canceled):
