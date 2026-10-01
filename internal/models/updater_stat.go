@@ -49,6 +49,12 @@ type UpdaterClient struct {
 	// on any row nobody has explicitly decorated (see decorateOnline in
 	// internal/stats/stats.route.go).
 	Online bool `db:"-" json:"online"`
+	// Products is the machine's installed-products inventory
+	// (updater_client_products), sorted by product. Like Online it is
+	// attached at response time, not a column: the stats client list and the
+	// stats:clients WS channel fill it (see attachProducts in
+	// internal/stats/stats.route.go), every other path leaves it nil.
+	Products []ClientProduct `db:"-" json:"products,omitempty"`
 }
 
 // UpdaterEvent is one client-facing update operation. Product tells apart

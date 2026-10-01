@@ -662,6 +662,11 @@ sommario va in `fetchStatsSummary`, dietro la cache, non nell'handler.
 | `online`         | `false` | `true` filtra i soli client visti nella finestra |
 | `window_minutes` |         | definisce "online" |
 
+Ogni client dell'elenco (e dello snapshot/delta del canale WS `stats:clients`)
+porta `products`: l'inventario dei prodotti installati, nella stessa forma del
+dettaglio (`[{product, version, updated_at}]`, ordinato per prodotto) — tutti,
+non solo quelli assegnati. `[]` se non ne ha nessuno.
+
 **`DELETE /clients/{id}`**
 
 Cancella prima tutte le righe di `updater_events` del client e poi la riga di

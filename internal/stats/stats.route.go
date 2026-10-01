@@ -318,6 +318,9 @@ func fetchStatsClientsPage(ctx context.Context, db *sqlx.DB, page, pageSize int,
 	); err != nil {
 		return nil, 0, err
 	}
+	if err = attachProducts(ctx, db, clients); err != nil {
+		return nil, 0, err
+	}
 
 	return clients, total, nil
 }
@@ -330,8 +333,49 @@ func fetchStatsClientsPage(ctx context.Context, db *sqlx.DB, page, pageSize int,
 func fetchAllStatsClients(ctx context.Context, db *sqlx.DB, scope session.Scope) ([]models.UpdaterClient, error) {
 	var clients []models.UpdaterClient
 	where, args := whereClientScope(scope)
-	err := db.SelectContext(ctx, &clients, `SELECT * FROM updater_clients`+where+` ORDER BY last_seen_at DESC`, args...)
-	return clients, err
+	if err := db.SelectContext(ctx, &clients, `SELECT * FROM updater_clients`+where+` ORDER BY last_seen_at DESC`, args...); err != nil {
+		return nil, err
+	}
+	if err := attachProducts(ctx, db, clients); err != nil {
+		return nil, err
+	}
+	return clients, nil
+}
+
+// attachProducts sets Products on each client to its installed-products
+// inventory (updater_client_products), in one query for the whole slice, so
+// the dashboard's client list can show it without a detail call per row.
+// Every installed product is listed, not only the session's assigned ones -
+// the same inventory GET /clients/{id} returns. A client with nothing
+// installed gets an empty, non-nil slice, so the field reads "none" rather
+// than "not reported".
+func attachProducts(ctx context.Context, db *sqlx.DB, clients []models.UpdaterClient) error {
+	if len(clients) == 0 {
+		return nil
+	}
+	ids := make([]interface{}, len(clients))
+	byID := make(map[int]*models.UpdaterClient, len(clients))
+	for i := range clients {
+		ids[i] = clients[i].ID
+		clients[i].Products = []models.ClientProduct{}
+		byID[clients[i].ID] = &clients[i]
+	}
+	var rows []struct {
+		ClientID int `db:"client_id"`
+		models.ClientProduct
+	}
+	if err := db.SelectContext(ctx, &rows,
+		`SELECT client_id, product, version, updated_at FROM updater_client_products WHERE client_id IN (`+placeholders(len(ids))+`) ORDER BY product`,
+		ids...,
+	); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if c, ok := byID[row.ClientID]; ok {
+			c.Products = append(c.Products, row.ClientProduct)
+		}
+	}
+	return nil
 }
 
 // decorateOnline sets Online on each client from presence (internal/

@@ -474,6 +474,11 @@ func (cn *wsConn) flush(ctx context.Context, db *sqlx.DB) {
 		// Map iteration order is random; sort so a delta carrying several
 		// clients is reproducible for a reader (and for a test).
 		sort.Slice(upserted, func(i, j int) bool { return upserted[i].ID < upserted[j].ID })
+		// The event's client row carries no inventory: without this a delta
+		// would blank the products the snapshot showed for that client.
+		if err := attachProducts(ctx, db, upserted); err != nil {
+			break
+		}
 		_ = cn.send(ctx, "update", channelClients, map[string]interface{}{
 			"upserted":    upserted,
 			"removed_ids": []int{},
