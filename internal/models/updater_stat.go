@@ -55,6 +55,21 @@ type UpdaterClient struct {
 	// stats:clients WS channel fill it (see attachProducts in
 	// internal/stats/stats.route.go), every other path leaves it nil.
 	Products []ClientProduct `db:"-" json:"products,omitempty"`
+	// RecentChecks summarises the client's manifest_check events over the
+	// last few polling intervals (see attachRecentChecks in
+	// internal/stats/stats.route.go): how many, and the first and last of
+	// them, so the dashboard can tell a machine that has been polling for a
+	// while apart from one that just came up. Attached where Products is.
+	RecentChecks *RecentManifestChecks `db:"-" json:"recent_manifest_checks,omitempty"`
+}
+
+// RecentManifestChecks is the manifest_check activity of one client inside
+// a recent window. FirstAt/LastAt are nil when Count is 0.
+type RecentManifestChecks struct {
+	WindowMinutes int        `json:"window_minutes"`
+	Count         int        `json:"count"`
+	FirstAt       *time.Time `json:"first_at,omitempty"`
+	LastAt        *time.Time `json:"last_at,omitempty"`
 }
 
 // UpdaterEvent is one client-facing update operation. Product tells apart

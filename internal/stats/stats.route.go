@@ -385,6 +385,47 @@ func attachProducts(ctx context.Context, db *sqlx.DB, clients []models.UpdaterCl
 			c.Products = append(c.Products, row.ClientProduct)
 		}
 	}
+	return attachRecentChecks(ctx, db, clients, byID, ids)
+}
+
+// recentChecksWindowMinutes covers three 15-minute polling intervals plus
+// some slack for jitter: enough to see "has been polling for half an hour".
+const recentChecksWindowMinutes = 50
+
+// attachRecentChecks sets RecentChecks on each client: the count, first and
+// last of its manifest_check events in the last recentChecksWindowMinutes.
+// One poll can log several checks (one per product), so the dashboard reads
+// the first-to-last span as well as the count. Served by the
+// (client_id, created_at) index from migration 18.
+func attachRecentChecks(ctx context.Context, db *sqlx.DB, clients []models.UpdaterClient, byID map[int]*models.UpdaterClient, ids []interface{}) error {
+	for i := range clients {
+		clients[i].RecentChecks = &models.RecentManifestChecks{WindowMinutes: recentChecksWindowMinutes}
+	}
+	var rows []struct {
+		ClientID int       `db:"client_id"`
+		Count    int       `db:"n"`
+		FirstAt  time.Time `db:"first_at"`
+		LastAt   time.Time `db:"last_at"`
+	}
+	args := append([]interface{}{recentChecksWindowMinutes}, ids...)
+	if err := db.SelectContext(ctx, &rows,
+		`SELECT client_id, COUNT(*) AS n, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+		 FROM updater_events
+		 WHERE event_type = 'manifest_check' AND created_at >= NOW() - INTERVAL ? MINUTE
+		   AND client_id IN (`+placeholders(len(ids))+`)
+		 GROUP BY client_id`,
+		args...,
+	); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if c, ok := byID[row.ClientID]; ok {
+			first, last := row.FirstAt, row.LastAt
+			c.RecentChecks.Count = row.Count
+			c.RecentChecks.FirstAt = &first
+			c.RecentChecks.LastAt = &last
+		}
+	}
 	return nil
 }
 
