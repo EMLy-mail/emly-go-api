@@ -75,4 +75,16 @@ func TestClientScopeClause(t *testing.T) {
 	if !strings.Contains(c, "cp.product IN (?, ?)") || !reflect.DeepEqual(a, []interface{}{"emly", "foo"}) {
 		t.Errorf("scoped: %q %v", c, a)
 	}
+	if strings.Contains(c, "NOT EXISTS") {
+		t.Errorf("a plain scope must not see unassigned machines, got %q", c)
+	}
+
+	// Admins also see the machines with no product installed.
+	if c, a := clientScopeClause(session.Restricted("u1").WithUnassignedClients()); !strings.HasPrefix(c, "NOT EXISTS") || a != nil {
+		t.Errorf("admin, no products: %q %v", c, a)
+	}
+	c, a = clientScopeClause(session.Restricted("u1", "foo", "emly").WithUnassignedClients())
+	if !strings.HasPrefix(c, "(EXISTS") || !strings.Contains(c, " OR NOT EXISTS") || !reflect.DeepEqual(a, []interface{}{"emly", "foo"}) {
+		t.Errorf("admin, scoped: %q %v", c, a)
+	}
 }

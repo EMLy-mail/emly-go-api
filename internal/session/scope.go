@@ -27,13 +27,18 @@ import (
 //     without assignments (unrestrictedRole);
 //   - a token that resolves to any other enabled user: exactly that user's
 //     assigned products, admins included - below owner the role does not
-//     widen it;
+//     widen the products. An admin additionally sees the machines that have
+//     no product installed at all (UnassignedClients): they belong to no
+//     product, so no assignment could ever reveal them otherwise;
 //   - a token that is unknown, expired or belongs to a disabled user:
 //     restricted to nothing. Falling back to "unrestricted" would let any
 //     dashboard request carrying a stale token see everything.
 type Scope struct {
 	restricted bool
 	products   map[string]bool
+	// unassignedClients widens a restricted scope to the machines with no
+	// product installed. Meaningless for an unrestricted scope.
+	unassignedClients bool
 	// UserID is the user the token resolved to, "" when there is none.
 	UserID string
 }
@@ -53,6 +58,17 @@ func Restricted(userID string, products ...string) Scope {
 
 // IsRestricted reports whether the scope limits anything.
 func (s Scope) IsRestricted() bool { return s.restricted }
+
+// WithUnassignedClients returns s also allowed to see machines that have no
+// product installed.
+func (s Scope) WithUnassignedClients() Scope {
+	s.unassignedClients = true
+	return s
+}
+
+// SeesUnassignedClients reports whether s may see machines that have no
+// product installed. Always true for an unrestricted scope.
+func (s Scope) SeesUnassignedClients() bool { return !s.restricted || s.unassignedClients }
 
 // Allows reports whether product is visible in this scope.
 func (s Scope) Allows(product string) bool { return !s.restricted || s.products[product] }
@@ -77,7 +93,11 @@ func (s Scope) Key() string {
 	if !s.restricted {
 		return "*"
 	}
-	return strings.Join(s.Products(), ",")
+	key := strings.Join(s.Products(), ",")
+	if s.unassignedClients {
+		key += "|+unassigned"
+	}
+	return key
 }
 
 // ScopeFromToken resolves token to a Scope. It returns an error only for a
@@ -120,7 +140,11 @@ func ScopeFromToken(ctx context.Context, db *sqlx.DB, token string) (Scope, erro
 	if err != nil {
 		return Scope{}, err
 	}
-	return Restricted(row.UserID, products...), nil
+	scope := Restricted(row.UserID, products...)
+	if row.Role == models.UserRoleAdmin {
+		scope = scope.WithUnassignedClients()
+	}
+	return scope, nil
 }
 
 // unrestrictedRole reports whether a role sees every product regardless of

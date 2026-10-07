@@ -93,19 +93,29 @@ func productAllowed(scope session.Scope, product string) bool {
 }
 
 // clientScopeClause constrains updater_clients to the machines scope may see:
-// those with at least one assigned product installed (updater_client_products).
-// Unrestricted scopes get no clause; a scope with no products sees no machine.
-// The clause is a bare condition, to be joined with WHERE or AND.
+// those with at least one assigned product installed (updater_client_products),
+// plus, for a scope that sees them (admins), those with no product installed.
+// Unrestricted scopes get no clause; a scope with no products and no
+// unassigned machines sees no machine. The clause is a bare condition, to be
+// joined with WHERE or AND.
 func clientScopeClause(scope session.Scope) (clause string, args []interface{}) {
 	if !scope.IsRestricted() {
 		return "", nil
 	}
+	const unassigned = "NOT EXISTS (SELECT 1 FROM updater_client_products cp WHERE cp.client_id = updater_clients.id)"
 	products := scope.Products()
 	if len(products) == 0 {
+		if scope.SeesUnassignedClients() {
+			return unassigned, nil
+		}
 		return "0 = 1", nil
 	}
-	return "EXISTS (SELECT 1 FROM updater_client_products cp WHERE cp.client_id = updater_clients.id AND cp.product IN (" +
-		placeholders(len(products)) + "))", stringArgs(products)
+	assigned := "EXISTS (SELECT 1 FROM updater_client_products cp WHERE cp.client_id = updater_clients.id AND cp.product IN (" +
+		placeholders(len(products)) + "))"
+	if scope.SeesUnassignedClients() {
+		return "(" + assigned + " OR " + unassigned + ")", stringArgs(products)
+	}
+	return assigned, stringArgs(products)
 }
 
 // whereClientScope renders clientScopeClause as a complete WHERE clause

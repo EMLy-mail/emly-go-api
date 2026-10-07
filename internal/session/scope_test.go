@@ -38,6 +38,12 @@ func TestRestrictedScope(t *testing.T) {
 	if Restricted("u1").Key() == Unrestricted().Key() {
 		t.Error("an empty scope must not share the unrestricted cache key")
 	}
+	if s.WithUnassignedClients().Key() == s.Key() {
+		t.Error("an admin scope sees more machines and must not share the plain cache key")
+	}
+	if s.SeesUnassignedClients() || !s.WithUnassignedClients().SeesUnassignedClients() || !Unrestricted().SeesUnassignedClients() {
+		t.Error("SeesUnassignedClients wrong")
+	}
 }
 
 func TestLoadScopePutsScopeOnContext(t *testing.T) {
