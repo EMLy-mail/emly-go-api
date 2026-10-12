@@ -250,5 +250,13 @@
         { "type": "index_not_exists", "table": "update_releases", "index": "idx_product_beta" }
       ]
     }
+    ,{
+      "id": "27_updater_client_logs",
+      "sql_file": "27_updater_client_logs.sql",
+      "description": "Create updater_client_logs (log files fetched from machines with log.send_latest).",
+      "conditions": [
+        { "type": "table_not_exists", "table": "updater_client_logs" }
+      ]
+    }
   ]
 }

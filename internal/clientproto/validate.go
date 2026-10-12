@@ -86,7 +86,7 @@ func ValidateArgs(name string, raw json.RawMessage) *ErrorBody {
 			return invalid("machine.reboot: when_user_active must be %q or %q", WhenUserActiveWarn, WhenUserActiveSkip)
 		}
 		return nil
-	case CmdEMLyManifestCheck, CmdUpdaterManifestCheck, CmdAppsListUpgradable, CmdServiceRestart:
+	case CmdEMLyManifestCheck, CmdUpdaterManifestCheck, CmdAppsListUpgradable, CmdServiceRestart, CmdLogSendLatest:
 		var none struct{}
 		if err := decodeStrict(raw, &none); err != nil {
 			return invalid("%s takes no arguments: %v", name, err)

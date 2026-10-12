@@ -6,6 +6,7 @@ import (
 	apimw "emly-api-go/internal/middleware"
 
 	"emly-api-go/internal/clienthub"
+	"emly-api-go/internal/clientlogs"
 	"emly-api-go/internal/presencehub"
 
 	"github.com/go-chi/chi/v5"
@@ -17,8 +18,10 @@ import (
 // (docs/superpowers/specs/2026-09-17-client-presence-ws-api-design.md).
 // presence may be nil (tests, or a build that never constructs one);
 // ClientWS and presencehub.Hub's own methods tolerate that. hub is the
-// protocol v2 state (internal/clienthub); nil is likewise tolerated.
-func RegisterV2(r chi.Router, db *sqlx.DB, presence *presencehub.Hub, hub *clienthub.Hub) {
+// protocol v2 state (internal/clienthub); nil is likewise tolerated. logs
+// stores what log.send_latest brings back (internal/clientlogs); its routes
+// sit with the rest of the channel's admin surface, under /v2/client.
+func RegisterV2(r chi.Router, db *sqlx.DB, presence *presencehub.Hub, hub *clienthub.Hub, logs *clientlogs.Store) {
 	r.Route("/client", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(apimw.APIKeyAuth(db))
@@ -31,6 +34,7 @@ func RegisterV2(r chi.Router, db *sqlx.DB, presence *presencehub.Hub, hub *clien
 			r.Use(apimw.AdminKeyAuth(db))
 			r.Use(apimw.RouteLimitByIP(30, time.Minute))
 			mountAdmin(r, hub)
+			clientlogs.MountAdmin(r, logs)
 		})
 	})
 }

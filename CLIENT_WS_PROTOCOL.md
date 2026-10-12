@@ -63,6 +63,7 @@ WebSocket persistente `GET /v2/client/ws`.
 | Update disponibile (EMLy e Updater) | `event` `update.available` (la macchina lo ha visto) e `notify` `release.published` (il server lo annuncia) | C→S, S→C | `Cycle` / `selfUpdate` |
 | Update applicato | `event` `update.started`, `update.applied`, `update.failed` | C→S | `Updater.install`, `selfupdate` (esito al riavvio) |
 | Machine info | `command` `machine.info` → `result`; `event` `machine.info` subito dopo l'handshake e quando cambia | S→C, C→S | `internal/machineinfo` |
+| Log dell'Updater | `command` `log.send_latest` → `ack` + `result` | S→C, C→S | `internal/logging.ReadTail` (coda di `updater.log`) |
 
 La tabella è il perimetro della v2. Un caso nuovo si aggiunge come nuovo
 `name` dentro una famiglia esistente (§5), non come nuovo `type`.
@@ -451,6 +452,40 @@ campi di `identity` (stessi nomi) più quello che non viaggia negli header.
 Qualsiasi sezione che il client non riesce a raccogliere si omette; non fa
 fallire il messaggio.
 
+### 6.6 `LogFile`
+
+Payload di `result` di `log.send_latest`: la coda del file di log corrente
+dell'Updater (`%ProgramData%\EMLyUpdater\logs\updater.log`), compressa per
+stare in un frame.
+
+```json
+{
+  "name": "updater.log",
+  "size_bytes": 1834221,
+  "modified_at": "2026-10-12T08:14:59Z",
+  "offset": 1371904,
+  "included_bytes": 462317,
+  "level": "info",
+  "encoding": "gzip+base64",
+  "content": "H4sIAAAAAAAC/+y9a3MbR5Yo+H1+...",
+  "collected_at": "2026-10-12T08:15:02Z"
+}
+```
+
+| Campo | Significato |
+|---|---|
+| `name` | Nome del file letto (oggi sempre `updater.log`). |
+| `size_bytes` | Dimensione del file al momento della lettura. |
+| `modified_at` | Ultima scrittura del file; omesso se sconosciuto. |
+| `offset` | Byte del file da cui parte `content`; `0` = file intero. È sempre l'inizio di una riga. |
+| `included_bytes` | Byte di log (non compressi) in `content`: `offset + included_bytes = size_bytes`. |
+| `level` | Livello di log attivo sul servizio (`debug`/`info`/`warn`/`error`): dice cosa *non* può esserci nel file. |
+| `encoding` | Sempre `gzip+base64`: gzip (RFC 1952) dei byte inclusi, poi base64 standard con padding. |
+| `content` | Il log, codificato come dice `encoding`. |
+| `collected_at` | Quando l'Updater ha letto il file. |
+
+`result.truncated` è `true` esattamente quando `offset > 0`.
+
 ## 7. Catalogo comandi (server → client)
 
 Ogni comando: `ack` entro 5s; `result` entro il timeout indicato (misurato dal
@@ -466,6 +501,7 @@ riceve `ack` con `busy`.
 | `apps.list_upgradable` | — | `result` `{packages}` | 180s | lettura |
 | `service.restart` | — | `event` `service.started` | 120s | **distruttivo** |
 | `machine.reboot` | `delay_seconds`, `when_user_active` | `event` `service.started` | `delay_seconds` + 15 min | **distruttivo** |
+| `log.send_latest` | — | `result` `LogFile` | 30s | lettura (**opt-in**, §12.3) |
 
 "Distruttivo" significa: autorizzazione rafforzata lato server (admin key +
 conferma in dashboard, come `service_restart` nella spec agent-channel) **e**
@@ -591,6 +627,32 @@ macchina che non è tornata): il server lo segna `timeout`, non `failed`.
 Rifiuti possibili: `busy` (installazione in corso, oppure un
 `service.restart`/`machine.reboot` già pending — vedi §7.5), `user_active`
 (con `skip`), `disabled_by_policy` (§12.3).
+
+### 7.7 `log.send_latest`
+
+Manda la coda del file di log corrente dell'Updater, per diagnosticare una
+macchina senza accedervi. Solo lettura. `args` assente o `{}`: qualsiasi
+campo è `invalid_args`.
+
+Il client legge al massimo gli ultimi 2 MiB di `updater.log`, li comprime con
+gzip e, se il `result` non sta in §11, scarta righe **dall'inizio** finché non
+ci sta: le righe più recenti sono sempre incluse e il taglio cade sempre a
+inizio riga. Un log reale si comprime circa 11:1, quindi un frame contiene
+circa gli ultimi 450-500 KB di log. Niente chunking su più frame e niente
+upload HTTP: una diagnosi non ne ha bisogno, e un file intero per macchina
+sarebbe un picco sul link MPLS.
+
+`result.payload` = `LogFile` (§6.6).
+
+Errori specifici: `not_found` (il file non esiste: servizio appena installato,
+log cancellato a mano), `internal` (lettura fallita). Un file vuoto non è un
+errore.
+
+Lato API, un `result` `ok` viene salvato da `internal/clientlogs` (via
+`clienthub.Hub.OnResult`, fuori dal lock dell'hub): decodificato, controllato
+(encoding, base64, gzip, al massimo 4 MiB decompressi) e conservato come
+`.log.gz` nel bucket dei file API, o nella riga stessa senza bucket. Resta
+consultabile dalle route di §13 dopo che il `CommandRecord` è uscito dal hub.
 
 ## 8. Catalogo eventi (client → server)
 
@@ -810,7 +872,7 @@ Usati in `error.code` di `error`, `ack`, `result` e degli eventi `update.*`.
 | `winget_module_missing` | `result` | Modulo Microsoft.WinGet.Client assente. |
 | `powershell_not_found` | `result` | `powershell.exe` non nel PATH. |
 | `sources_unreachable` | `result`, `ManifestCheck.error` | Nessun server della catena ha risposto (evento 101). |
-| `not_found` | `ManifestCheck.error` | 404: il server non pubblica quel manifest (mirror non aggiornato). |
+| `not_found` | `ManifestCheck.error`, `result` | 404: il server non pubblica quel manifest (mirror non aggiornato). Per `log.send_latest`: il file di log non esiste. |
 | `manifest_invalid` | `ManifestCheck.error` | JSON del manifest non valido. |
 | `timeout` | `result` | Operazione interna scaduta (es. PowerShell). |
 | `internal` | ovunque | Errore imprevisto; il dettaglio è in `message` e nel log locale. |
@@ -908,6 +970,14 @@ agent-channel §4.5), il client applica un'allowlist dal documento remoto:
 - Default, assente o legacy: solo i comandi di **lettura**. I due distruttivi
   vanno abilitati esplicitamente, e si possono pilotare su pochi host con un
   override `match: {hostnames: [...]}`, come `clientWs.enabled` oggi.
+- `log.send_latest` è di lettura ma **non** è nei default: porta fuori dalla
+  macchina hostname, utenti, IP e URL dei server, quindi il documento deve
+  nominarlo. **Rischio di rollout**: un Updater ≤ 1.8.1 non conosce il nome e
+  rifiuta l'*intero* documento, anche se compare solo nella patch di un
+  override che non lo riguarda. Va pubblicato solo quando tutta la flotta è
+  sulla release che lo implementa (e, se ci sono, quando ogni mirror di sito
+  ha un'API che lo conosce: `internal/configmirror` valida con lo stesso
+  `remoteconfig.Parse`).
 - `"commands": []` (lista **presente** ma vuota) è diverso da `commands`
   assente: significa esplicitamente "nessun comando", non "default del
   client" (i comandi di sola lettura). Sul wire, `Commands` è un puntatore a
@@ -1063,6 +1133,51 @@ tutti) — un limite su quante *identità* si possono accumulare, non solo su
 quanti byte per identità, perché anche un evento senza `payload` costa una
 voce nella mappa.
 
+### 13.1 Log delle macchine (`log.send_latest`)
+
+Quattro route in più, stesso gruppo e stessa autenticazione (`X-Admin-Key`),
+servite da `internal/clientlogs`. Al contrario dei `CommandRecord`, questi
+**sono persistiti** (tabella `updater_client_logs`, migration 27; il gzip nel
+bucket dei file API quando `USE_S3_API_FILE_STORAGE` è attivo, nella riga
+altrimenti). `log_id` è l'`id` del comando che ha portato il log.
+
+| Metodo | Path | Risposta | Codici |
+|---|---|---|---|
+| `GET` | `/v2/client/{client_id}/logs` | `{"logs": [ClientLogRecord, …]}`, più recenti prima | `200` (lista vuota se nessuno); `400` `client_id` |
+| `GET` | `/v2/client/logs/{log_id}` | `ClientLogRecord` | `200`; `400` `log_id` non è un ULID; `404` |
+| `GET` | `/v2/client/logs/{log_id}/content` | Il log in chiaro, `text/plain; charset=utf-8`, come allegato. Con `?format=gz` il gzip così come salvato, `application/gzip` | `200`; `400`; `404`; `502` bucket irraggiungibile |
+| `DELETE` | `/v2/client/logs/{log_id}` | — | `204`; `400`; `404` |
+
+`ClientLogRecord`:
+
+```json
+{
+  "id": "01J9ZQ6T3M6X9K2V7B4N1C5D8E", "client_id": 42, "issued_by": "admin:f.fois",
+  "file_name": "updater.log", "size_bytes": 1834221, "offset": 1371904,
+  "included_bytes": 462317, "truncated": true, "mismatch": false, "level": "info",
+  "modified_at": "2026-10-12T08:14:59Z", "collected_at": "2026-10-12T08:15:02Z",
+  "received_at": "2026-10-12T08:15:02Z", "gzip_bytes": 41873,
+  "updater_version": "1.9.0", "hostname": "PC-MI-0042"
+}
+```
+
+- `mismatch: true`: il contenuto decompresso non è lungo `included_bytes`. Il
+  log è conservato comunque (serve proprio a diagnosticare).
+- `hostname`/`updater_version` sono quelli della macchina all'arrivo del log.
+- `content` risponde sempre con `Content-Disposition: attachment`
+  (`<hostname>_<yyyyMMdd-HHmmss>_updater.log`, caratteri fuori da
+  `[A-Za-z0-9._-]` sostituiti da `_`), `X-Content-Type-Options: nosniff` e
+  `Cache-Control: private, no-store`: il testo viene da una macchina e non va
+  mai reso come HTML.
+- Un `result` scartato dalla validazione (encoding sconosciuto, base64 o gzip
+  rotti, oltre 4 MiB decompressi) non produce nessuna riga: resta solo il
+  warn `client log not saved` nel log dell'API, e il `CommandRecord` in memoria.
+- Conservazione: gli ultimi 20 log per macchina, nessuno più vecchio di 30
+  giorni, e niente per una macchina cancellata da `updater_clients` (la
+  tabella non ha foreign key apposta: una cascata cancellerebbe le righe
+  lasciando orfani gli oggetti nel bucket). Il prune gira ogni ora e cancella
+  sempre prima l'oggetto, poi la riga.
+
 ## 14. Esempi di sequenza completi
 
 ### 14.1 Handshake v2 e snapshot iniziale
@@ -1086,7 +1201,17 @@ C→S {"type":"ack","id":"01J…Y","reply_to":"01J…X","data":{"accepted":true}
 C→S {"type":"result","id":"01J…Z","reply_to":"01J…X","data":{"status":"ok","duration_ms":8421,"payload":{"packages":[…],"collected_at":"…"}}}
 ```
 
-### 14.3 Riavvio PC
+### 14.3 Log dell'Updater
+
+```
+POST /v2/client/42/commands {"name":"log.send_latest","issued_by":"admin:f.fois"}
+S→C {"type":"command","id":"01J…X","data":{"name":"log.send_latest","expires_at":"…","issued_by":"admin:f.fois"}}
+C→S {"type":"ack","reply_to":"01J…X","data":{"accepted":true}}
+C→S {"type":"result","reply_to":"01J…X","data":{"status":"ok","duration_ms":212,"truncated":true,"payload":{"name":"updater.log","offset":1371904,…,"encoding":"gzip+base64","content":"H4sI…"}}}
+API: internal/clientlogs salva → GET /v2/client/logs/01J…X/content
+```
+
+### 14.4 Riavvio PC
 
 ```
 S→C {"type":"command","id":"01J…R","data":{"name":"machine.reboot","args":{"delay_seconds":300,"when_user_active":"warn"},"expires_at":"…"}}
@@ -1100,7 +1225,7 @@ S→C {"type":"welcome", …}
 C→S {"type":"event","id":"01J…T","data":{"name":"service.started","payload":{"reason":"boot","completed_commands":["01J…R"], …}}}
 ```
 
-### 14.4 Nuova release EMLy annunciata e applicata
+### 14.5 Nuova release EMLy annunciata e applicata
 
 ```
 S→C {"type":"notify","id":"01J…N","data":{"topic":"release.published","payload":{"target":"emly","channel":"stable","version":"3.5.0","jitter_seconds":600}}}
@@ -1110,7 +1235,7 @@ C→S {"type":"event","data":{"name":"update.started","payload":{"target":"emly"
 C→S {"type":"event","data":{"name":"update.applied","payload":{"target":"emly","from_version":"3.4.1","to_version":"3.5.0","duration_ms":48210,"reinstalled":false}}}
 ```
 
-### 14.5 Cambio sessione (riconnessione RDP)
+### 14.6 Cambio sessione (riconnessione RDP)
 
 ```
       (SCM: remote-disconnect, remote-connect, unlock — coalescite in 1.5s)
@@ -1143,6 +1268,9 @@ C→S {"type":"event","data":{"name":"session.changed","payload":{"events":["rem
       (`testdata/remoteconfig/invalid/clientws-unknown-command*`,
       `override-clientws-unknown-command*`).
 - [x] `ROUTES.md` §5.9 e `DOCS.md` aggiornati (questo giro).
+- [x] `log.send_latest`: `clientproto`, `remoteconfig.KnownClientWSCommands`
+      + fixture `valid/clientws-log-send-latest.json`, persistenza in
+      `internal/clientlogs` (§7.7, §13.1).
 
 **Updater (`emly-updater`)**
 

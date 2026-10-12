@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"emly-api-go/internal/clienthub"
+	"emly-api-go/internal/clientlogs"
 	"emly-api-go/internal/clientws"
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/configmirror"
@@ -262,6 +263,14 @@ func main() {
 	// aggregates read is never pruned - and does nothing at all when that is
 	// 0. Stopped via backgroundCancel like the loops above.
 	go eventprune.Start(backgroundCtx, db, time.Duration(cfg.EventsRetentionDays)*24*time.Hour)
+
+	// What log.send_latest brings back is saved off the hub's in-memory
+	// record (internal/clientlogs): to the API file bucket when there is one,
+	// to the database otherwise. The same loop keeps it bounded (newest 20 per
+	// machine, 30 days).
+	clientLogs := clientlogs.New(db, apiFileS3conn)
+	clientHub.OnResult(clientLogs.HandleResult)
+	go clientLogs.Start(backgroundCtx)
 
 	r := chi.NewRouter()
 

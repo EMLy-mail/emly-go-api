@@ -64,6 +64,9 @@ func TestValidateArgs(t *testing.T) {
 		{CmdMachineReboot, `{"delay_seconds":-1}`, ErrInvalidArgs},
 		{CmdMachineReboot, `{"when_user_active":"force"}`, ErrInvalidArgs},
 		{CmdMachineReboot, `{"message":"hi"}`, ErrInvalidArgs},
+		{CmdLogSendLatest, ``, ""},
+		{CmdLogSendLatest, `{}`, ""},
+		{CmdLogSendLatest, `{"lines":100}`, ErrInvalidArgs},
 		{"machine.format_disk", `{}`, ErrUnsupportedCommand},
 		{CmdMachineInfo, `[1]`, ErrInvalidArgs},
 	}
@@ -85,6 +88,9 @@ func TestResultTimeout(t *testing.T) {
 	if got := ResultTimeout(CmdMachineReboot, json.RawMessage(`{"delay_seconds":600}`)); got != 600*time.Second+15*time.Minute {
 		t.Errorf("machine.reboot 600 = %v", got)
 	}
+	if got := ResultTimeout(CmdLogSendLatest, nil); got != 30*time.Second {
+		t.Errorf("log.send_latest = %v", got)
+	}
 	if got := ResultTimeout(CmdMachineReboot, nil); got != 300*time.Second+15*time.Minute {
 		t.Errorf("machine.reboot default = %v", got)
 	}
@@ -99,7 +105,7 @@ func TestIntersectKeepsOfferedOrderAndDropsUnknown(t *testing.T) {
 
 func TestEveryCommandHasASpec(t *testing.T) {
 	for _, name := range []string{CmdMachineInfo, CmdEMLyManifestCheck, CmdUpdaterManifestCheck,
-		CmdAppsListUpgradable, CmdServiceRestart, CmdMachineReboot} {
+		CmdAppsListUpgradable, CmdServiceRestart, CmdMachineReboot, CmdLogSendLatest} {
 		if _, ok := Commands[name]; !ok {
 			t.Errorf("no CommandSpec for %s", name)
 		}

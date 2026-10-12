@@ -93,6 +93,7 @@ emly-api-go/
     ├── configapi/                   # /v2/config: documento e revisioni (HTTP)
     ├── stats/                       # /v2/stats/* REST + /v2/stats/stream (WS)
     ├── clientws/                    # /v2/client/ws: connessione sempre aperta + route admin comandi/eventi/notify
+    ├── clientlogs/                  # log delle macchine portati da log.send_latest: salvataggio, route admin, prune
     ├── bans/                        # block list permanente (admin)
     ├── downloadqueue/               # tetto ai download installer simultanei (in RAM) + route admin
     ├── health/                       # /health
@@ -1164,6 +1165,50 @@ campo nuovo sarebbe far hashare al mirror i byte grezzi ricevuti dal monte
 invece di ri-derivarli dalla propria struct — coerente con quello che gia'
 fa per il contenuto salvato (verbatim, non ri-serializzato) — ma non e' stato
 fatto in questo giro.
+
+#### Log delle macchine: `internal/clientlogs`
+
+Il comando `log.send_latest` chiede a una macchina la coda del suo
+`updater.log` (CLIENT_WS_PROTOCOL.md §7.7). La risposta arriva come un
+`result` qualsiasi, quindi finirebbe nel `CommandRecord` in memoria e
+sparirebbe dopo 24h o al primo riavvio: per un log che si chiede per
+diagnosticare un problema non basta. `internal/clientlogs` lo salva.
+
+**Come si aggancia senza bloccare il hub.** `clienthub.Hub` protegge tutto con
+un solo mutex, e un upload su S3 dentro `HandleResult` terrebbe fermi tutti
+gli `ack`, i `result` e gli eventi della flotta per la durata dell'upload. Il
+hub espone quindi un hook, `Hub.OnResult(fn)`, che chiama `fn` in **una
+goroutine propria** con una copia del record, una volta per comando concluso
+`done`. E' l'equivalente di un `emitter.on('result', ...)` di Node in cui il
+listener viene lanciato con `setImmediate`: chi emette non aspetta. `main.go`
+registra `clientLogs.HandleResult`, che ignora ogni comando che non sia
+`log.send_latest`.
+
+**Il contenuto non e' fidato.** Arriva da una macchina: prima di salvarlo si
+controlla che l'encoding sia `gzip+base64`, che base64 e gzip siano validi e
+che decompresso non superi 4 MiB (`io.LimitReader`: una "gzip bomb" di pochi
+KB che si gonfia a gigabyte viene fermata li'). Un log scartato lascia solo un
+warn nel log dell'API.
+
+**Dove finiscono i byte.** Il gzip si salva cosi' come e' arrivato, senza
+ricomprimerlo: nel bucket dei file API se c'e' (`USE_S3_API_FILE_STORAGE`),
+altrimenti in una colonna `MEDIUMBLOB` della riga — la stessa degradazione dei
+file dei bug report. I metadati stanno in `updater_client_logs` (migration
+27), una riga per comando con l'`id` del comando come chiave primaria: dalla
+dashboard si passa dal comando al suo log senza un id in piu'.
+
+**Pulizia.** `Store.Start` (lanciato da `main.go` come `eventprune`) gira ogni
+ora: tiene gli ultimi 20 log per macchina, nessuno oltre 30 giorni, e cancella
+quelli delle macchine rimosse. La tabella non ha foreign key verso
+`updater_clients` apposta: un `ON DELETE CASCADE` cancellerebbe le righe ma
+lascerebbe per sempre gli oggetti nel bucket. Il prune cancella sempre prima
+l'oggetto e poi la riga, cosi' un errore S3 lascia tutto com'era e si riprova
+all'ora dopo.
+
+**`Store` non ha stato.** Contiene solo `db` e il bucket, quindi `main.go`
+(per hook e prune) e `v2.NewRouter` (per le route) ne costruiscono uno a testa
+invece di passarselo attraverso tutte le firme: come due istanze dello stesso
+repository Laravel sopra la stessa connessione.
 
 ### Volume degli eventi updater — rollup, coalescing e retention
 

@@ -36,6 +36,7 @@ const (
 	CmdAppsListUpgradable   = "apps.list_upgradable"
 	CmdServiceRestart       = "service.restart"
 	CmdMachineReboot        = "machine.reboot"
+	CmdLogSendLatest        = "log.send_latest"
 )
 
 // Event names (§8).
@@ -202,6 +203,25 @@ type ServiceStarted struct {
 	CompletedCommands []string `json:"completed_commands,omitempty"`
 }
 
+// LogEncodingGzipBase64 is LogFile.Encoding: Content is the gzip of the
+// included bytes, base64 (standard alphabet, padded).
+const LogEncodingGzipBase64 = "gzip+base64"
+
+// LogFile is the result payload of log.send_latest (§6.6): the tail of the
+// updater's current log file. Offset > 0 means the start of the file did
+// not fit one frame; Offset is always at a line start.
+type LogFile struct {
+	Name          string `json:"name"`
+	SizeBytes     int64  `json:"size_bytes"`
+	ModifiedAt    string `json:"modified_at,omitempty"`
+	Offset        int64  `json:"offset"`
+	IncludedBytes int64  `json:"included_bytes"`
+	Level         string `json:"level,omitempty"`
+	Encoding      string `json:"encoding"`
+	Content       string `json:"content"`
+	CollectedAt   string `json:"collected_at"`
+}
+
 // ReleasePublished / ConfigPublished are the notify payloads of §9.
 type ReleasePublished struct {
 	Target        string `json:"target"`
@@ -235,6 +255,7 @@ var Commands = map[string]CommandSpec{
 	CmdAppsListUpgradable:   {ResultTimeout: 180 * time.Second},
 	CmdServiceRestart:       {ResultTimeout: 120 * time.Second, Destructive: true, ResultViaEvent: true},
 	CmdMachineReboot:        {ResultTimeout: 15 * time.Minute, Destructive: true, ResultViaEvent: true},
+	CmdLogSendLatest:        {ResultTimeout: 30 * time.Second},
 }
 
 // ServerCapabilities is every command, event and topic this server
@@ -242,7 +263,7 @@ var Commands = map[string]CommandSpec{
 // intersected with it.
 var ServerCapabilities = []string{
 	CmdMachineInfo, CmdEMLyManifestCheck, CmdUpdaterManifestCheck,
-	CmdAppsListUpgradable, CmdServiceRestart, CmdMachineReboot,
+	CmdAppsListUpgradable, CmdServiceRestart, CmdMachineReboot, CmdLogSendLatest,
 	EvtMachineInfo, EvtSessionChanged, EvtUpdateAvailable, EvtUpdateStarted,
 	EvtUpdateApplied, EvtUpdateFailed, EvtServiceStarted,
 	TopicReleasePublished, TopicConfigPublished,

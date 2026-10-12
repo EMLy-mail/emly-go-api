@@ -524,3 +524,40 @@ func TestHubPruneDropsOldFinishedCommands(t *testing.T) {
 		t.Fatal("finished record older than retention survived Prune")
 	}
 }
+
+// OnResult fires once per command that finishes done, off the caller's
+// goroutine - never for a failed result, never again for a redelivery.
+func TestHubOnResultFiresOncePerDoneCommand(t *testing.T) {
+	h, _ := newHub()
+	got := make(chan CommandRecord, 4)
+	h.OnResult(func(rec CommandRecord) { got <- rec })
+	h.Attach(7, clientproto.ProtocolV2, allCaps, (&capture{}).send)
+
+	ok, _ := h.Issue(context.Background(), 7, clientproto.CmdLogSendLatest, nil, time.Hour, "admin:x")
+	h.HandleAck(7, ok.ID, clientproto.Ack{Accepted: true})
+	h.HandleResult(7, ok.ID, clientproto.Result{Status: clientproto.ResultOK, Payload: json.RawMessage(`{}`)})
+	h.HandleResult(7, ok.ID, clientproto.Result{Status: clientproto.ResultOK, Payload: json.RawMessage(`{}`)})
+
+	bad, _ := h.Issue(context.Background(), 7, clientproto.CmdMachineInfo, nil, time.Hour, "")
+	h.HandleAck(7, bad.ID, clientproto.Ack{Accepted: true})
+	h.HandleResult(7, bad.ID, clientproto.Result{Status: clientproto.ResultError, Error: &clientproto.ErrorBody{Code: clientproto.ErrInternal}})
+
+	select {
+	case rec := <-got:
+		if rec.ID != ok.ID || rec.Status != StatusDone || rec.Result == nil || rec.IssuedBy != "admin:x" {
+			t.Fatalf("hook got %+v", rec)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hook never ran")
+	}
+	select {
+	case rec := <-got:
+		t.Fatalf("hook ran again for %s (%s)", rec.ID, rec.Status)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestHubOnResultNilHubIsNoOp(t *testing.T) {
+	var h *Hub
+	h.OnResult(func(CommandRecord) {})
+}

@@ -204,7 +204,7 @@ type ClientWS struct {
 // mirrors clientproto.Commands; internal/clientws pins the two equal.
 var KnownClientWSCommands = []string{
 	"machine.info", "emly.manifest.check", "updater.manifest.check",
-	"apps.list_upgradable", "service.restart", "machine.reboot",
+	"apps.list_upgradable", "service.restart", "machine.reboot", "log.send_latest",
 }
 
 // ProductSettings is one entry of the products section.

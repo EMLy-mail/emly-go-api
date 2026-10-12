@@ -832,6 +832,10 @@ sempre lo stato corrente, non un flusso di eventi.
 | `GET`  | `/v2/client/commands/{command_id}`   | `ADMIN` | Legge lo stato/esito di un comando già inviato. |
 | `GET`  | `/v2/client/{client_id}/events`      | `ADMIN` | Ultimi eventi (`event`, §8) ricevuti da quella macchina — un anello in memoria, non uno storico permanente. |
 | `POST` | `/v2/client/notify`                  | `ADMIN` | Manda un `notify` (§9) a una o più macchine connesse, o a tutte quelle che dichiarano quel `topic`. |
+| `GET`  | `/v2/client/{client_id}/logs`        | `ADMIN` | Log dell'Updater portati da `log.send_latest` per quella macchina, più recenti prima (solo metadati). |
+| `GET`  | `/v2/client/logs/{log_id}`           | `ADMIN` | Metadati di un log. `log_id` è l'id del comando che l'ha portato. |
+| `GET`  | `/v2/client/logs/{log_id}/content`   | `ADMIN` | Scarica il log: testo in chiaro, o il gzip salvato con `?format=gz`. |
+| `DELETE` | `/v2/client/logs/{log_id}`         | `ADMIN` | Cancella un log (oggetto nel bucket, poi riga). |
 
 L'autenticazione (`X-Api-Key`) avviene tramite lo stesso middleware
 `apimw.APIKeyAuth` del manifest self-update dell'Updater, come middleware di
@@ -966,6 +970,38 @@ sua sessione, non lo storico), ed è per-istanza come `presencehub`/
 è visibile né eseguibile dall'altra. Un ticker in `main.go` pota ogni 10
 minuti: i comandi conclusi (`done`/`failed`/`rejected`/`timeout`) e gli
 eventi più vecchi di 24h vengono scartati.
+
+**Log delle macchine (`log.send_latest`) — persistiti**
+(`internal/clientlogs`, `CLIENT_WS_PROTOCOL.md` §7.7 e §13.1). Unica
+eccezione allo "stato in memoria" qui sopra: quando un `log.send_latest`
+finisce `done`, il hub passa il record a `clientlogs` (`Hub.OnResult`, in una
+goroutine propria, fuori dal lock), che decodifica e controlla il contenuto
+(encoding `gzip+base64`, base64 e gzip validi, al massimo 4 MiB
+decompressi) e lo salva nella tabella `updater_client_logs` (migration 27).
+Il gzip va nel bucket dei file API (`emly-api-files/client-logs/{client_id}/{log_id}.log.gz`)
+quando `USE_S3_API_FILE_STORAGE` è attivo e il bucket risponde, nella colonna
+`content` altrimenti — la stessa degradazione dei file dei bug report. Un
+`result` che non passa i controlli non lascia nessuna riga, solo un warn
+`client log not saved`. Ogni ora un prune tiene gli ultimi 20 log per
+macchina, nessuno oltre 30 giorni, e cancella quelli di una macchina rimossa
+da `updater_clients` (oggetto prima, riga poi).
+
+- `GET /v2/client/{client_id}/logs`: `200` con `{"logs": [...]}` (lista vuota
+  se nessuno); `400` se `client_id` non è un intero positivo. Ogni voce è un
+  `ClientLogRecord` (forma in `CLIENT_WS_PROTOCOL.md` §13.1), senza contenuto.
+- `GET /v2/client/logs/{log_id}`: `200` col `ClientLogRecord`; `400` se
+  `log_id` non è un ULID (26 caratteri Crockford base32: controllato prima di
+  qualsiasi query o chiave S3); `404`.
+- `GET /v2/client/logs/{log_id}/content`: il log come allegato. Default
+  `text/plain; charset=utf-8` (decompresso al volo); `?format=gz` restituisce
+  i byte gzip così come salvati (`application/gzip`); un altro `format` è
+  `400`. Sempre `Content-Disposition: attachment` con nome
+  `<hostname>_<yyyyMMdd-HHmmss>_updater.log` (solo `[A-Za-z0-9._-]`),
+  `X-Content-Type-Options: nosniff` e `Cache-Control: private, no-store`: il
+  testo arriva da una macchina e non deve mai essere reso come HTML. `404`;
+  `502` se il log è nel bucket e il bucket non risponde.
+- `DELETE /v2/client/logs/{log_id}`: `204`; `404`.
+- Senza database (test) tutte e quattro rispondono `503`.
 
 ### 5.10 Coda download — `/v2/download-queue`
 
@@ -1186,7 +1222,7 @@ prodotto creato sulla prima entro un minuto.
 | Header            | Dove viene usato | Fallimento |
 |-------------------|------------------|------------|
 | `X-API-Key`       | Creazione bug report, manifest dell'Updater, `GET /v2/config`, `GET /v2/client/ws` | `401` |
-| `X-Admin-Key`     | Tutte le route admin, releases, config writes, bans, stats, download-queue, comandi/eventi/notify di `/v2/client` | `401` |
+| `X-Admin-Key`     | Tutte le route admin, releases, config writes, bans, stats, download-queue, comandi/eventi/notify/log di `/v2/client` | `401` |
 | `X-Dashboard-Key` | Bypass di entrambi i rate limiter, globale e per gruppo di route; **richiesto** (insieme a `X-Admin-Key`) da `/v2/download-queue` | nessuno per i limiter (la richiesta prosegue limitata); `401` su `/v2/download-queue` |
 | `X-Session-Token` | `auth/validate`, `auth/logout`; sulle route *scoped* (release, `/v2/products`, `/v2/stats/*`, anche `?session_token=` sullo stream) limita ai prodotti assegnati all'utente | `401` o `403`; sulle route scoped `403`/`404` per prodotti e macchine fuori scope |
 

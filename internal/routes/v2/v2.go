@@ -5,6 +5,7 @@ import (
 	"emly-api-go/internal/bans"
 	"emly-api-go/internal/bugreports"
 	"emly-api-go/internal/clienthub"
+	"emly-api-go/internal/clientlogs"
 	"emly-api-go/internal/clientws"
 	"emly-api-go/internal/config"
 	"emly-api-go/internal/configapi"
@@ -66,7 +67,9 @@ func NewRouter(db *sqlx.DB, apiFileS3conn, updatesS3conn *storage.S3Connector, c
 	configapi.RegisterV2(r, db, config.Load(), clients)
 	bans.RegisterV2(r, db, reloader)
 	downloadqueue.RegisterV2(r, db, queue)
-	clientws.RegisterV2(r, db, presence, clients)
+	// A Store of its own, over the same db/bucket as main.go's (which feeds
+	// the hub's OnResult hook and runs the prune loop): Store is stateless.
+	clientws.RegisterV2(r, db, presence, clients, clientlogs.New(db, apiFileS3conn))
 
 	r.Route("/api", func(r chi.Router) {
 		admin.RegisterV2(r, db)

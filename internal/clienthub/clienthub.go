@@ -118,6 +118,23 @@ type Hub struct {
 	sessions map[int64]*session
 	commands map[string]*CommandRecord
 	events   map[int64][]EventRecord
+	// onResult runs after a command finishes done (see OnResult).
+	onResult func(CommandRecord)
+}
+
+// OnResult registers fn to be called, on its own goroutine, with a copy of
+// every command that finishes done with a result - once per command, a
+// redelivered result included. It is how something with I/O to do (e.g.
+// internal/clientlogs saving a log.send_latest result) hooks in without
+// HandleResult ever running it under h.mu: the whole hub would wait on it.
+// Set it once, at startup, before any connection is accepted.
+func (h *Hub) OnResult(fn func(CommandRecord)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.onResult = fn
+	h.mu.Unlock()
 }
 
 // New returns an empty Hub; now is time.Now outside tests.
@@ -288,6 +305,9 @@ func (h *Hub) HandleResult(clientID int64, replyTo string, res clientproto.Resul
 	rec.FinishedAt, rec.Result = &now, &res
 	if res.Status == clientproto.ResultOK {
 		rec.Status = StatusDone
+		if fn := h.onResult; fn != nil {
+			go fn(h.snapshot(rec))
+		}
 	} else {
 		rec.Status, rec.Error = StatusFailed, res.Error
 	}
