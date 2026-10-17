@@ -1034,6 +1034,24 @@ mappa: resta online per una finestra di grazia di 15s
 (`presencehub.DefaultGraceDuration`), cosi' un calo di rete o una
 riconnessione veloce non fa lampeggiare il pallino verde della dashboard.
 
+Lo stesso hub ricorda anche *perche'* una macchina e' offline, quando lo sa.
+Se l'Updater, prima di chiudere, manda l'evento `service.stopped`
+(spegnimento, aggiornamento, stop manuale...), `clientws` chiama
+`presence.Stopping(tok, ...)` sulla connessione corrente; quando la finestra
+di grazia scade il motivo passa in una seconda map, `stopped`, e ci resta
+finche' quella macchina non si riconnette (`Connect` la cancella). `stats` lo
+legge con `Stopped(id)` e lo espone come `offline_stop`. E' l'equivalente di
+tenere in una `Map` di Node l'ultimo messaggio "addio" di ogni socket: vale
+solo per il periodo offline in corso, e si perde a un riavvio dell'API. Per
+questo lo stesso evento viene anche scritto su DB, nelle colonne
+`updater_clients.last_stop_*` (migration 28, `updaterclient.UpdateLastStop`):
+quelle sono "l'ultimo arresto, comunque sia andata", sopravvivono ai riavvii
+e vengono riscritte anche dal campo `last_stop` del `service.started`
+successivo — che e' l'unica notizia dell'arresto quando allo spegnimento la
+rete era gia' giu', o quando il processo e' morto (`unexpected`). Come per
+`session.changed`, quella scrittura **non tocca `last_seen_at`**: una
+macchina che si spegne non e' una macchina che si e' fatta viva.
+
 `GET /v2/client/ws` e' la rotta che alimenta quell'hub. E' diversa dal resto
 dell'API in un modo preciso: l'EMLy Updater la apre una volta all'avvio e la
 tiene aperta per tutta la vita del servizio, invece di fare una richiesta per

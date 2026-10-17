@@ -501,3 +501,91 @@ func TestKnownClientWSCommandsMatchProtocol(t *testing.T) {
 		}
 	}
 }
+
+func TestStopFromWire(t *testing.T) {
+	s, ok := stopFromWire("self_update", "", "2026-10-17T09:12:40+02:00")
+	if !ok || s.Category != "automatic" || !s.At.Equal(time.Date(2026, 10, 17, 7, 12, 40, 0, time.UTC)) || s.At.Location() != time.UTC {
+		t.Fatalf("got %+v, %v", s, ok)
+	}
+	// Unknown values are kept as received; a crash has no time.
+	if s, ok := stopFromWire("hibernate_v2", "future", ""); !ok || s.Reason != "hibernate_v2" || s.Category != "future" || !s.At.IsZero() {
+		t.Fatalf("got %+v, %v", s, ok)
+	}
+	if _, ok := stopFromWire("", "manual", ""); ok {
+		t.Fatal("a stop without a reason was accepted")
+	}
+	if s, _ := stopFromWire(strings.Repeat("x", 30), "manual", ""); len(s.Reason) != 20 {
+		t.Fatalf("reason not capped to the column: %q", s.Reason)
+	}
+}
+
+func TestClientWSServiceStoppedRecordsLastStopAndPresence(t *testing.T) {
+	stubUpsert(t, 42)
+	type call struct {
+		id               int64
+		reason, category string
+		at               time.Time
+	}
+	calls := make(chan call, 2)
+	prev := updateLastStopFn
+	updateLastStopFn = func(_ context.Context, _ *sqlx.DB, id int64, reason, category string, at time.Time) error {
+		calls <- call{id, reason, category, at}
+		return nil
+	}
+	t.Cleanup(func() { updateLastStopFn = prev })
+
+	presence := presencehub.New(10 * time.Millisecond)
+	srv := httptest.NewServer(ClientWS(nil, presence, clienthub.New(nil)))
+	defer srv.Close()
+	c, _ := dialV2(t, srv.URL, []string{"service.stopped", "service.started"})
+
+	writeJSON(t, c, map[string]any{"type": "event", "id": clientproto.NewID(), "data": map[string]any{
+		"name": "service.stopped", "payload": map[string]any{
+			"reason": "shutdown", "category": "machine", "at": "2026-10-16T18:02:11Z",
+			"uptime_seconds": 10, "updater_version": "1.9.0",
+		}}})
+	select {
+	case got := <-calls:
+		if got.id != 42 || got.reason != "shutdown" || got.category != "machine" || !got.at.Equal(time.Date(2026, 10, 16, 18, 2, 11, 0, time.UTC)) {
+			t.Fatalf("got %+v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("UpdateLastStop never called for service.stopped")
+	}
+	c.Close(websocket.StatusGoingAway, "")
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if s, ok := presence.Stopped(42); ok {
+			if s.Reason != "shutdown" {
+				t.Fatalf("Stopped = %+v", s)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("presence never reported the announced stop")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The next process replays it as last_stop; a crash has no "at".
+	c2, _ := dialV2(t, srv.URL, []string{"service.started"})
+	defer c2.CloseNow()
+	if _, ok := presence.Stopped(42); ok {
+		t.Fatal("reconnecting did not clear the offline reason")
+	}
+	writeJSON(t, c2, map[string]any{"type": "event", "id": clientproto.NewID(), "data": map[string]any{
+		"name": "service.started", "payload": map[string]any{
+			"reason": "boot", "started_at": "2026-10-17T07:31:40Z",
+			"last_stop": map[string]any{"reason": "unexpected", "category": "unexpected", "sent": false,
+				"previous_started_at": "2026-10-16T07:58:40Z"},
+		}}})
+	select {
+	case got := <-calls:
+		if got.reason != "unexpected" || got.category != "unexpected" || !got.at.IsZero() {
+			t.Fatalf("got %+v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("UpdateLastStop never called for last_stop")
+	}
+}

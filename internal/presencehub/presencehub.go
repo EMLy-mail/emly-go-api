@@ -32,6 +32,19 @@ type entry struct {
 	gen        uint64
 	supersede  chan struct{}
 	graceTimer *time.Timer
+	// stop is set by Stopping: the connection announced it is going away
+	// (service.stopped) before it dropped.
+	stop *Stop
+}
+
+// Stop is why a client went offline, as its last service.stopped said
+// (CLIENT_WS_PROTOCOL.md §8.7). Reason and Category are kept verbatim, so a
+// value this server does not know is still reported. At is zero when the
+// payload carried none, or one that did not parse.
+type Stop struct {
+	Reason   string
+	Category string
+	At       time.Time
 }
 
 // Hub tracks online presence per updater_clients.id. The zero value is not
@@ -40,6 +53,10 @@ type Hub struct {
 	mu      sync.Mutex
 	grace   time.Duration
 	entries map[int64]*entry
+	// stopped holds the announced Stop of clients whose connection ended
+	// after a service.stopped, until they connect again. One entry per
+	// machine at most, so it is bounded by the fleet.
+	stopped map[int64]Stop
 	nextGen uint64
 }
 
@@ -47,7 +64,7 @@ type Hub struct {
 // DefaultGraceDuration; tests pass a shorter one so they don't have to sleep
 // for 15 real seconds.
 func New(graceDuration time.Duration) *Hub {
-	return &Hub{grace: graceDuration, entries: make(map[int64]*entry)}
+	return &Hub{grace: graceDuration, entries: make(map[int64]*entry), stopped: make(map[int64]Stop)}
 }
 
 // Connect registers clientID as online for a new connection. It returns a
@@ -78,6 +95,7 @@ func (h *Hub) Connect(clientID int64) (Token, <-chan struct{}) {
 		}
 		close(old.supersede)
 	}
+	delete(h.stopped, clientID)
 
 	h.nextGen++
 	gen := h.nextGen
@@ -113,6 +131,9 @@ func (h *Hub) Disconnect(tok Token) {
 		defer h.mu.Unlock()
 		if cur, ok := h.entries[clientID]; ok && cur.gen == gen {
 			delete(h.entries, clientID)
+			if cur.stop != nil {
+				h.stopped[clientID] = *cur.stop
+			}
 		}
 	})
 }
@@ -129,4 +150,41 @@ func (h *Hub) Online(clientID int64) bool {
 	defer h.mu.Unlock()
 	_, ok := h.entries[clientID]
 	return ok
+}
+
+// Stopping records that the connection behind tok announced its own end
+// (service.stopped), so that once it drops and the grace period runs out
+// Stopped reports why the client is offline. A later stop on the same
+// connection replaces the earlier one. The grace period itself is left
+// alone: a "restart" is back within it, and should not flicker offline any
+// more than a network blip does. A token that no longer matches the current
+// entry (superseded), a zero Token or a nil Hub is a no-op.
+func (h *Hub) Stopping(tok Token, s Stop) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if e, ok := h.entries[tok.clientID]; ok && e.gen == tok.gen {
+		e.stop = &s
+	}
+}
+
+// Stopped returns the announced Stop of an offline client whose last
+// connection ended after a service.stopped. It reports false while the
+// client is online (grace window included), once it has connected again,
+// for a connection that dropped without announcing anything, and for every
+// client after an API restart - this is the reason for the current offline
+// spell, not a history (that is updater_clients.last_stop_*).
+func (h *Hub) Stopped(clientID int64) (Stop, bool) {
+	if h == nil {
+		return Stop{}, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, online := h.entries[clientID]; online {
+		return Stop{}, false
+	}
+	s, ok := h.stopped[clientID]
+	return s, ok
 }

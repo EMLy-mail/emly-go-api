@@ -667,6 +667,24 @@ porta `products`: l'inventario dei prodotti installati, nella stessa forma del
 dettaglio (`[{product, version, updated_at}]`, ordinato per prodotto) — tutti,
 non solo quelli assegnati. `[]` se non ne ha nessuno.
 
+Ogni client (elenco, dettaglio, canale `stats:clients`) porta anche come si è
+fermato l'ultima volta il servizio dell'Updater e, se è offline per un
+arresto annunciato, perché:
+
+| Campo                | Fonte | Note |
+|----------------------|-------|------|
+| `last_stop_reason`   | colonna (migration 28) | `manual`, `uninstall`, `restart`, `upgrade`, `self_update`, `command`, `shutdown`, `reboot`, `unexpected` (`CLIENT_WS_PROTOCOL.md` §8.7). Un valore sconosciuto è riportato così com'è. |
+| `last_stop_category` | colonna | `manual` \| `automatic` \| `machine` \| `unexpected`. |
+| `last_stop_at`       | colonna | Quando si è fermato; assente per `unexpected` (un crash non lascia l'ora). |
+| `offline_stop`       | memoria (`presencehub`) | `{reason, category, at}` del `service.stopped` che ha preceduto **questo** periodo offline. Assente se il client è online, se la connessione è caduta senza annunciare nulla (rete, crash, corrente) e per tutti dopo un riavvio dell'API. |
+
+I tre `last_stop_*` sono l'ultimo valore, non uno storico, e sopravvivono a
+riconnessioni e riavvii dell'API: vanno letti contro `last_seen_at`, come
+`logged_user`. Assenti per una macchina che non ha mai riportato un arresto
+(Updater precedente a questi eventi). `offline_stop` invece risponde a "perché
+è offline adesso": una macchina tornata online e poi caduta per la rete ha
+ancora `last_stop_*` dell'arresto precedente, ma nessun `offline_stop`.
+
 **`DELETE /clients/{id}`**
 
 Cancella prima tutte le righe di `updater_events` del client e poi la riga di
@@ -882,7 +900,10 @@ eventi, notify, implementato lato API in `internal/clientproto` +
 finestra di grazia di 15s alla disconnessione prima di segnare il client
 offline — assorbe un calo di rete breve o una riconnessione. Una nuova
 connessione con lo stesso client sostituisce quella precedente, che viene
-chiusa dal server.
+chiusa dal server. Se la connessione ha mandato un `service.stopped` prima di
+cadere, alla fine della finestra di grazia il motivo resta associato al
+client offline (`offline_stop`) finché non si riconnette; la finestra stessa
+non cambia, così un `restart` che torna entro 15s non risulta mai offline.
 
 Il campo `"online"` che questo canale alimenta compare in
 `GET /v2/stats/clients` e nel canale `stats:clients` di
@@ -947,6 +968,16 @@ vuota (mai `404`) se quel client non ha eventi registrati o non esiste. Il
 (altrimenti l'evento resta comunque in lista, ma senza `payload`) e solo
 fino a 8 KiB, oltre i quali viene scartato e `truncated: true` compare
 invece (`CLIENT_WS_PROTOCOL.md` §13).
+
+Eventi di ciclo di vita del servizio che compaiono qui (`CLIENT_WS_PROTOCOL.md`
+§8.6–§8.8): `service.started` (con `last_stop`, come è finito il processo
+precedente, `sent: false` se il `service.stopped` dal vivo non era arrivato),
+`service.stopped` (`reason`/`category`/`at`, mandato mentre il servizio si
+ferma, best-effort) e `machine.power` (`state`: `suspend`/`resume`; per la
+cronologia vale `payload.at`, non `received_at`, perché un `suspend` non
+passato arriva dal buffer insieme al `resume`). L'anello si svuota dopo 24h:
+l'ultimo arresto resta su `updater_clients.last_stop_*`, vedi
+`GET /v2/stats/clients` (§5.7).
 
 **`POST /v2/client/notify` — corpo JSON**
 

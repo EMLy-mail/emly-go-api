@@ -48,6 +48,8 @@ const (
 	EvtUpdateApplied   = "update.applied"
 	EvtUpdateFailed    = "update.failed"
 	EvtServiceStarted  = "service.started"
+	EvtServiceStopped  = "service.stopped"
+	EvtMachinePower    = "machine.power"
 )
 
 // Notify topics (§9).
@@ -201,6 +203,81 @@ type ServiceStarted struct {
 	UpdaterVersion    string   `json:"updater_version,omitempty"`
 	PreviousVersion   string   `json:"previous_version,omitempty"`
 	CompletedCommands []string `json:"completed_commands,omitempty"`
+	// LastStop is how the agent's previous process ended (§8.6); absent when
+	// the agent has no history, or predates the field.
+	LastStop *LastStop `json:"last_stop,omitempty"`
+}
+
+// service.stopped reasons (§8.7). Each belongs to exactly one category, see
+// StopCategory.
+const (
+	StopReasonManual     = "manual"
+	StopReasonUninstall  = "uninstall"
+	StopReasonRestart    = "restart"
+	StopReasonSelfUpdate = "self_update"
+	StopReasonUpgrade    = "upgrade"
+	StopReasonCommand    = "command"
+	StopReasonShutdown   = "shutdown"
+	StopReasonReboot     = "reboot"
+	StopReasonUnexpected = "unexpected" // last_stop only
+)
+
+// service.stopped categories (§8.7).
+const (
+	StopCategoryManual     = "manual"
+	StopCategoryAutomatic  = "automatic"
+	StopCategoryMachine    = "machine"
+	StopCategoryUnexpected = "unexpected"
+)
+
+// StopCategory is the category a stop reason belongs to; the agent sends it
+// too, this is for a payload that lacks it.
+func StopCategory(reason string) string {
+	switch reason {
+	case StopReasonSelfUpdate, StopReasonUpgrade, StopReasonCommand:
+		return StopCategoryAutomatic
+	case StopReasonShutdown, StopReasonReboot:
+		return StopCategoryMachine
+	case StopReasonUnexpected:
+		return StopCategoryUnexpected
+	default:
+		return StopCategoryManual
+	}
+}
+
+// ServiceStopped is the payload of event service.stopped (§8.7).
+type ServiceStopped struct {
+	Reason         string `json:"reason"`
+	Category       string `json:"category"`
+	At             string `json:"at"`
+	CommandID      string `json:"command_id,omitempty"`
+	ToVersion      string `json:"to_version,omitempty"`
+	UptimeSeconds  int64  `json:"uptime_seconds"`
+	UpdaterVersion string `json:"updater_version,omitempty"`
+}
+
+// LastStop is service.started's last_stop (§8.6).
+type LastStop struct {
+	Reason            string `json:"reason"`
+	Category          string `json:"category"`
+	At                string `json:"at,omitempty"`
+	CommandID         string `json:"command_id,omitempty"`
+	ToVersion         string `json:"to_version,omitempty"`
+	Sent              bool   `json:"sent"`
+	PreviousStartedAt string `json:"previous_started_at,omitempty"`
+	PreviousVersion   string `json:"previous_version,omitempty"`
+}
+
+// machine.power states (§8.8).
+const (
+	PowerSuspend = "suspend"
+	PowerResume  = "resume"
+)
+
+// MachinePower is the payload of event machine.power (§8.8).
+type MachinePower struct {
+	State string `json:"state"`
+	At    string `json:"at"`
 }
 
 // LogEncodingGzipBase64 is LogFile.Encoding: Content is the gzip of the
@@ -265,7 +342,8 @@ var ServerCapabilities = []string{
 	CmdMachineInfo, CmdEMLyManifestCheck, CmdUpdaterManifestCheck,
 	CmdAppsListUpgradable, CmdServiceRestart, CmdMachineReboot, CmdLogSendLatest,
 	EvtMachineInfo, EvtSessionChanged, EvtUpdateAvailable, EvtUpdateStarted,
-	EvtUpdateApplied, EvtUpdateFailed, EvtServiceStarted,
+	EvtUpdateApplied, EvtUpdateFailed, EvtServiceStarted, EvtServiceStopped,
+	EvtMachinePower,
 	TopicReleasePublished, TopicConfigPublished,
 }
 

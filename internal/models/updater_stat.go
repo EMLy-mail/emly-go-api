@@ -41,6 +41,16 @@ type UpdaterClient struct {
 	LastIP          *string    `db:"last_ip"           json:"last_ip,omitempty"`
 	FirstSeenAt     time.Time  `db:"first_seen_at"     json:"first_seen_at"`
 	LastSeenAt      time.Time  `db:"last_seen_at"      json:"last_seen_at"`
+	// LastStopReason, LastStopCategory and LastStopAt are how the updater
+	// service last stopped (CLIENT_WS_PROTOCOL.md §8.7), from service.stopped
+	// or from the next service.started's last_stop. Kept verbatim, so a reason
+	// this API does not know is still shown. LastStopAt is nil for reason
+	// "unexpected" (a crash leaves no time); all three are nil for a client
+	// that has never reported a stop. The last value, not a history: read it
+	// against LastSeenAt, like LoggedUser.
+	LastStopReason   *string    `db:"last_stop_reason"   json:"last_stop_reason,omitempty"`
+	LastStopCategory *string    `db:"last_stop_category" json:"last_stop_category,omitempty"`
+	LastStopAt       *time.Time `db:"last_stop_at"       json:"last_stop_at,omitempty"`
 	// Online reports whether this client currently holds an open
 	// GET /v2/client/ws connection (internal/presencehub), or is inside the
 	// short grace window after one dropped. It is computed at response time
@@ -49,6 +59,13 @@ type UpdaterClient struct {
 	// on any row nobody has explicitly decorated (see decorateOnline in
 	// internal/stats/stats.route.go).
 	Online bool `db:"-" json:"online"`
+	// OfflineStop is why the client is offline right now, when its last
+	// connection announced its end with service.stopped before dropping
+	// (internal/presencehub). Nil while online, after a drop that announced
+	// nothing (network loss, crash, power cut) and for everyone after an API
+	// restart - unlike LastStop*, it describes the current offline spell
+	// only. Attached at response time with Online.
+	OfflineStop *ClientStop `db:"-" json:"offline_stop,omitempty"`
 	// Products is the machine's installed-products inventory
 	// (updater_client_products), sorted by product. Like Online it is
 	// attached at response time, not a column: the stats client list and the
@@ -61,6 +78,14 @@ type UpdaterClient struct {
 	// them, so the dashboard can tell a machine that has been polling for a
 	// while apart from one that just came up. Attached where Products is.
 	RecentChecks *RecentManifestChecks `db:"-" json:"recent_manifest_checks,omitempty"`
+}
+
+// ClientStop is one announced service stop: reason and category as the
+// updater sent them, At nil when the payload carried no usable time.
+type ClientStop struct {
+	Reason   string     `json:"reason"`
+	Category string     `json:"category"`
+	At       *time.Time `json:"at,omitempty"`
 }
 
 // RecentManifestChecks is the manifest_check activity of one client inside

@@ -29,8 +29,10 @@ go run . --migrate-files
 # admin-key gating in internal/routes/v2; auth gating, the query-string key
 # fallback, a full ping/pong handshake over a real listener, and the
 # coalescing state that keeps it off the database on every event, in
-# internal/stats), the presence hub (connect/disconnect/grace-period/
-# supersede semantics, nil-Hub safety, in internal/presencehub), the client ws
+# internal/stats; plus the offline_stop decoration), the presence hub
+# (connect/disconnect/grace-period/supersede semantics, the announced-stop
+# reason kept for the offline spell, nil-Hub safety, in
+# internal/presencehub), the client ws
 # protocol v2 wire format (envelope framing, ULID generation/ordering, command
 # argument validation in internal/clientproto), its in-memory hub (session
 # attach/detach and generation-guarded supersede, command issue/ack/result
@@ -38,8 +40,9 @@ go run . --migrate-files
 # event ring, concurrent fan-out in internal/clienthub), the GET /v2/client/ws
 # handshake (v1 hello/identity/error framing, the v1/v2 branch on
 # identity.protocol, welcome/capability negotiation, command/event dispatch
-# and the rate limiter, and a full identity->presence-online round trip over a
-# real listener, in internal/clientws), the client ws admin routes (issue/get
+# and the rate limiter, a full identity->presence-online round trip over a
+# real listener, and service.stopped/last_stop -> last_stop_* + presence, in
+# internal/clientws), the client ws admin routes (issue/get
 # command, list events, notify, in internal/clientws), the daily log files
 # (naming, day rotation, retention in internal/logfile), the raw-event
 # retention loop's disabled path (internal/eventprune), and the download
@@ -147,7 +150,7 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 - `internal/configmirror/` — Background loop for a site mirror (`CONFIG_UPSTREAM_URL` set): polls upstream `/v2/config`, validates with `remoteconfig.Parse`, and stores the bytes as received under the upstream's own revision/etag. A no-op `State` (nothing started) when `CONFIG_UPSTREAM_URL` is empty.
 - `internal/statshub/` — HTTP- and DB-free like `internal/remoteconfig`: an in-process `Hub` (pub/sub, `Subscribe`/`Publish`/`Active`) that fans updater-event and periodic-tick notifications out to every open `GET /v2/stats/stream` connection. Single-instance only by design (no Postgres LISTEN/NOTIFY or Redis in this stack) — see the package doc. `internal/updaterclient` (`RecordEvent`) and `internal/stats` (`stats_stream.route.go`) are its only callers; `main.go` constructs the one `Hub` and runs its tick loop.
 - `internal/eventprune/` — HTTP-free background loop (like `internal/configmirror`) that keeps `updater_events` bounded: every hour it deletes raw rows older than `EVENTS_RETENTION_DAYS`, by primary key in batches of 5000 (no index starts with `created_at`, so a `WHERE created_at < ?` batch loop would full-scan per batch). Safe to delete because no aggregate reads raw rows any more — `/v2/stats/summary` and `/v2/stats/events` are served from the `updater_event_hourly` rollup, which is never pruned. `main.go` is its only caller.
-- `internal/presencehub/` — HTTP- and DB-free like `internal/statshub`: an in-process `Hub` tracking which EMLy Updater clients currently hold an open `GET /v2/client/ws` connection, with a short grace period on disconnect so a brief drop/reconnect never flickers "offline". Single-instance only, same limit as `statshub`. `internal/clientws` (`ClientWS`) and `internal/stats` (the `online` decoration on `GET /v2/stats/clients` / the `stats:clients` WS channel) are its only callers; `main.go` constructs the one `Hub`.
+- `internal/presencehub/` — HTTP- and DB-free like `internal/statshub`: an in-process `Hub` tracking which EMLy Updater clients currently hold an open `GET /v2/client/ws` connection, with a short grace period on disconnect so a brief drop/reconnect never flickers "offline". It also remembers, until the next `Connect`, the `service.stopped` a connection announced before dropping (`Stopping`/`Stopped`), surfaced as `offline_stop` next to `online`; the durable counterpart is `updater_clients.last_stop_*` (migration 28), written by `clientws.handleEvent` from `service.stopped` and from `service.started.last_stop` without touching `last_seen_at`. Single-instance only, same limit as `statshub`. `internal/clientws` (`ClientWS`) and `internal/stats` (the `online` decoration on `GET /v2/stats/clients` / the `stats:clients` WS channel) are its only callers; `main.go` constructs the one `Hub`.
 - `internal/clientproto/` — HTTP- and DB-free: the wire format of protocol v2 of `GET /v2/client/ws` (`CLIENT_WS_PROTOCOL.md`) — the `Envelope`, `Command`/`Ack`/`Result`/`Event`/`Notify` payload types, the command/event/notify name and error-code constants, `ValidateArgs`, `NewID` (ULID). No dependency on any feature package; `internal/clientws` and `internal/clienthub` are its only callers. `id.go` is copied verbatim into `emly-updater/internal/wsclient/id.go` (package name aside) so both ends mint identically-shaped IDs — the two repos share no Go module, so nothing enforces that automatically.
 - `internal/clienthub/` — HTTP- and DB-free like `internal/presencehub`: an in-process `Hub` holding protocol v2's session/command/event state — which `updater_clients.id` has a v2 connection open and what it declared it can do, the commands issued to machines and their outcome (`Issue`/`HandleAck`/`HandleResult`/`CompleteByRestart`), and a 50-entry ring of each machine's recent events. Nil-receiver safe throughout, same as `presencehub`. Single-instance only, same limit as `statshub`/`presencehub` — a command issued on one API replica only reaches a machine connected to that replica, and nothing survives a restart; a ticker in `main.go` prunes finished commands/events older than 24h every 10 minutes. `internal/clientws` is its only caller; `main.go` constructs the one `Hub` and passes it through `internal/routes` as `configapi.ConfigNotifier` too (`NotifyConfigPublished`).
 

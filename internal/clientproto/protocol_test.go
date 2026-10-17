@@ -114,3 +114,31 @@ func TestEveryCommandHasASpec(t *testing.T) {
 		t.Error("destructive/result-via-event flags wrong")
 	}
 }
+
+// An event the server leaves out of ServerCapabilities is never accepted in
+// welcome, so the agent drops it before sending.
+func TestServerAcceptsTheLifecycleEvents(t *testing.T) {
+	for _, name := range []string{EvtServiceStarted, EvtServiceStopped, EvtMachinePower} {
+		if len(Intersect([]string{name}, ServerCapabilities)) != 1 {
+			t.Errorf("%s missing from ServerCapabilities", name)
+		}
+	}
+}
+
+func TestStopCategory(t *testing.T) {
+	for reason, want := range map[string]string{
+		StopReasonManual:     StopCategoryManual,
+		StopReasonUninstall:  StopCategoryManual,
+		StopReasonRestart:    StopCategoryManual,
+		StopReasonSelfUpdate: StopCategoryAutomatic,
+		StopReasonUpgrade:    StopCategoryAutomatic,
+		StopReasonCommand:    StopCategoryAutomatic,
+		StopReasonShutdown:   StopCategoryMachine,
+		StopReasonReboot:     StopCategoryMachine,
+		StopReasonUnexpected: StopCategoryUnexpected,
+	} {
+		if got := StopCategory(reason); got != want {
+			t.Errorf("StopCategory(%q) = %q, want %q", reason, got, want)
+		}
+	}
+}

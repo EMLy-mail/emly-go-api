@@ -468,7 +468,7 @@ func (cn *wsConn) flush(ctx context.Context, db *sqlx.DB) {
 		}
 		upserted := make([]models.UpdaterClient, 0, len(clients))
 		for _, client := range clients {
-			client.Online = cn.presence.Online(int64(client.ID))
+			decorateClientOnline(&client, cn.presence)
 			upserted = append(upserted, client)
 		}
 		// Map iteration order is random; sort so a delta carrying several

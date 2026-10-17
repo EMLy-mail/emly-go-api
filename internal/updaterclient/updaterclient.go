@@ -229,6 +229,22 @@ func UpdateLoggedUser(ctx context.Context, db *sqlx.DB, clientID int64, id Ident
 	return err
 }
 
+// UpdateLastStop writes how the client's updater service last stopped
+// (updater_clients.last_stop_*, migration 28). Like UpdateLoggedUser it
+// leaves last_seen_at alone: a stop is reported by the machine going away,
+// or replayed at its next start, and neither is a sighting. The three
+// columns are always written together - a stop with no time clears the
+// previous one's - so the row never mixes two stops. A zero at is NULL.
+func UpdateLastStop(ctx context.Context, db *sqlx.DB, clientID int64, reason, category string, at time.Time) error {
+	_, err := db.ExecContext(ctx,
+		`UPDATE updater_clients
+		 SET last_stop_reason = ?, last_stop_category = ?, last_stop_at = ?
+		 WHERE id = ?`,
+		reason, category, dbvalue.NullTime(at), clientID,
+	)
+	return err
+}
+
 // Values of X-EMLy-LoggedUserState, and of updater_clients.logged_user_state.
 // They are a wire contract with the EMLy Updater (machineinfo.SessionState).
 const (

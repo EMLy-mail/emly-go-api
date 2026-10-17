@@ -120,7 +120,7 @@ var errRateLimited = errors.New("rate limited")
 // clientWSReadLoop is the connection's single reader (see the v1 comment:
 // the idle deadline and "unknown type is ignored" still hold). In v2 it also
 // dispatches ack/result to the hub and events to handleEvent.
-func clientWSReadLoop(ctx context.Context, c *websocket.Conn, db *sqlx.DB, hub *clienthub.Hub, clientID int64, uaVersion string, v2 bool) error {
+func clientWSReadLoop(ctx context.Context, c *websocket.Conn, db *sqlx.DB, hub *clienthub.Hub, presence *presencehub.Hub, tok presencehub.Token, clientID int64, uaVersion string, v2 bool) error {
 	limiter := newEventLimiter(clientproto.DefaultLimits.MaxEventsPerMinute, time.Minute, timeNow)
 	for {
 		rctx, cancel := context.WithTimeout(ctx, clientWSIdleTimeout)
@@ -155,7 +155,7 @@ func clientWSReadLoop(ctx context.Context, c *websocket.Conn, db *sqlx.DB, hub *
 			}
 			var ev clientproto.Event
 			if json.Unmarshal(env.Data, &ev) == nil {
-				handleEvent(ctx, db, hub, clientID, uaVersion, env, ev)
+				handleEvent(ctx, db, hub, presence, tok, clientID, uaVersion, env, ev)
 			}
 		default:
 			slog.DebugContext(ctx, "client ws: unrecognized message type", "type", env.Type)
@@ -299,7 +299,7 @@ func ClientWS(db *sqlx.DB, presence *presencehub.Hub, hub *clienthub.Hub) http.H
 			}
 		}()
 
-		loopErr := clientWSReadLoop(ctx, c, db, hub, clientID, identity.UAVersion, v2)
+		loopErr := clientWSReadLoop(ctx, c, db, hub, presence, tok, clientID, identity.UAVersion, v2)
 
 		cancel()
 		wg.Wait()

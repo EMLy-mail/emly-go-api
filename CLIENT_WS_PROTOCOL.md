@@ -64,6 +64,8 @@ WebSocket persistente `GET /v2/client/ws`.
 | Update applicato | `event` `update.started`, `update.applied`, `update.failed` | C→S | `Updater.install`, `selfupdate` (esito al riavvio) |
 | Machine info | `command` `machine.info` → `result`; `event` `machine.info` subito dopo l'handshake e quando cambia | S→C, C→S | `internal/machineinfo` |
 | Log dell'Updater | `command` `log.send_latest` → `ack` + `result` | S→C, C→S | `internal/logging.ReadTail` (coda di `updater.log`) |
+| Arresto del servizio e motivo | `event` `service.stopped`; al riavvio `service.started.last_stop` | C→S | gestore SCM (`Stop`/`PreShutdown`/`Shutdown`), `internal/service/stopevents.go`, `state.json` |
+| Sospensione / ripresa macchina | `event` `machine.power` | C→S | gestore SCM (`SERVICE_CONTROL_POWEREVENT`) |
 
 La tabella è il perimetro della v2. Un caso nuovo si aggiunge come nuovo
 `name` dentro una famiglia esistente (§5), non come nuovo `type`.
@@ -187,6 +189,7 @@ Esempio di `identity` v2:
       "emly.manifest.check", "updater.manifest.check", "machine.info",
       "session.changed", "update.available", "update.started",
       "update.applied", "update.failed", "service.started",
+      "service.stopped", "machine.power",
       "release.published", "config.published"
     ]
   }
@@ -665,6 +668,8 @@ consultabile dalle route di §13 dopo che il `CommandRecord` è uscito dal hub.
 | `update.applied` | installazione verificata (`VerifyInstalled` / versione al riavvio) | §8.4 |
 | `update.failed` | tentativo fallito | §8.5 |
 | `service.started` | dopo ogni handshake riuscito che segue un avvio del processo | §8.6 |
+| `service.stopped` | mentre il servizio si ferma, best-effort, mai in buffer | §8.7 |
+| `machine.power` | la macchina va in sospensione / ibernazione e ne riprende | §8.8 |
 
 ### 8.1 `session.changed`
 
@@ -787,7 +792,12 @@ in `state.json` / tentativi self-update rimasti). Event Log: 201 (emly), 802
   "started_at": "2026-09-23T08:31:40Z",
   "updater_version": "1.9.0",
   "previous_version": "1.8.2",
-  "completed_commands": ["01J8ZQ6T3M6X9K2V7B4N1C5D8E"]
+  "completed_commands": ["01J8ZQ6T3M6X9K2V7B4N1C5D8E"],
+  "last_stop": {
+    "reason": "shutdown", "category": "machine", "at": "2026-09-22T18:02:11Z",
+    "sent": false, "previous_started_at": "2026-09-22T07:58:40Z",
+    "previous_version": "1.8.2"
+  }
 }
 ```
 
@@ -796,10 +806,69 @@ in `state.json` / tentativi self-update rimasti). Event Log: 201 (emly), 802
 | `reason` | `boot` (servizio partito entro pochi minuti dal boot), `command` (riavvio da `service.restart`), `self_update` (la build è cambiata rispetto a `previous_version`), `install` (prima installazione), `unknown`. Best-effort: serve alla dashboard, non a decidere nulla. |
 | `previous_version` | Solo se diversa da `updater_version`. |
 | `completed_commands` | `id` di `service.restart`/`machine.reboot` letti da `state.json` e poi rimossi. Il server chiude quei comandi come `done`. |
+| `last_stop` | Come è finito il processo precedente, letto da `state.json` (`run`/`lastStop`). Stessi `reason`/`category`/`command_id`/`to_version` di §8.7, più `sent` (il `service.stopped` dal vivo era arrivato), `previous_started_at`, `previous_version`. `reason: "unexpected"` (categoria `unexpected`, senza `at`) se il processo precedente ha lasciato il record di avvio ma nessun record di arresto: crash, mancanza di corrente, kill forzato. Omesso se non c'è storia (prima installazione, o `state.json` di una build precedente). |
 
 Mandato **una sola volta per vita del processo**, alla prima connessione
 riuscita, non a ogni riconnessione: una rete instabile non deve sembrare un
 servizio che si riavvia.
+
+### 8.7 `service.stopped`
+
+```json
+{ "reason": "self_update", "category": "automatic", "at": "2026-10-17T09:12:40Z",
+  "to_version": "1.9.0", "uptime_seconds": 86412, "updater_version": "1.8.2" }
+```
+
+| `reason` | `category` | Quando |
+|---|---|---|
+| `manual` | `manual` | `Stop` dello SCM senza altra causa nota: services.msc, `sc stop`, `net stop`, `EMLyUpdater.exe stop`. |
+| `uninstall` | `manual` | `EMLyUpdater.exe uninstall` (il disinstallatore). |
+| `restart` | `manual` | `restart-service` lanciato a mano, o `apply-settings` (impostazioni salvate dal tray). |
+| `upgrade` | `automatic` | Un setup lanciato dall'esterno (`stop --reason=upgrade` da `PrepareToInstall`). |
+| `self_update` | `automatic` | Questo processo ha lanciato il proprio setup; `to_version` è la versione attesa. |
+| `command` | `automatic` | `service.restart` dal canale; `command_id` è il suo `id`. |
+| `shutdown` | `machine` | `PreShutdown`/`Shutdown`: spegnimento **o** riavvio, Windows non li distingue. |
+| `reboot` | `machine` | Come `shutdown`, ma per un `machine.reboot` nostro; `command_id` è il suo `id`. |
+
+`unexpected` (categoria `unexpected`) esiste solo in `last_stop` (§8.6).
+Motivi e categorie sono contratto sul filo.
+
+Lo SCM non dice perché arriva uno `Stop`: il motivo lo ricostruisce
+l'updater. I processi che fermano il servizio (`stop --reason`, `uninstall`,
+`restart-service`, `apply-settings`) mandano prima un controllo utente
+(210–212) che registra l'intento per 15 minuti. Un utente interattivo può
+mandare quei controlli ma non fermare il servizio: al massimo etichetta male
+l'arresto successivo, in un campo che non decide nulla.
+
+Best-effort per costruzione: inviato dal vivo con un limite di 3s e **mai
+messo nel buffer** (per questo processo non ci sarà un'altra connessione).
+Il motivo viene scritto in `state.json` *prima* dell'invio, quindi se
+l'invio fallisce (allo spegnimento la rete può già essere giù; per
+`service.restart` la connessione è già chiusa con 1001) arriva comunque al
+riavvio come `last_stop` con `sent: false`. Il server lo registra
+nell'anello eventi e ne scrive `reason`/`category`/`at` su
+`updater_clients.last_stop_*` (migration 28, senza toccare `last_seen_at`,
+come §8.1); lo stesso fa con `last_stop` di §8.6, `sent` o no (con `sent:
+true` riscrive lo stesso valore). Tiene inoltre il motivo in memoria sulla
+presenza della connessione (`internal/presencehub`), così quando questa cade
+il client risulta offline *per quel motivo* (`offline_stop` di
+`GET /v2/stats/clients`) fino alla riconnessione. Un `reason`/`category` che
+il server non conosce è memorizzato così com'è.
+
+### 8.8 `machine.power`
+
+```json
+{ "state": "suspend", "at": "2026-10-17T12:30:02Z" }
+```
+
+`state`: `suspend` (`PBT_APMSUSPEND`) o `resume` (`PBT_APMRESUMEAUTOMATIC`).
+Non è un arresto: il processo sopravvive alla sospensione, e un
+`service.stopped` non verrebbe mai seguito da un `service.started` (§8.6, una
+volta per processo). `suspend` viene inviato subito (limite 2s); se non
+passa resta nel buffer e arriva, insieme a `resume`, quando il canale si
+riconnette dopo il risveglio. Con l'Avvio rapido attivo, "Arresta il sistema"
+iberna la sessione 0 e qui appare come `suspend`/`resume`, non come
+`service.stopped`; il riavvio è sempre un arresto vero.
 
 ## 9. Catalogo notify (server → client)
 
@@ -1251,7 +1320,10 @@ C→S {"type":"event","data":{"name":"session.changed","payload":{"events":["rem
 - [x] Parsing di `event` (`session.changed` → aggiornamento `logged_user*`
       senza toccare `last_seen_at`; gli altri → registrati nell'anello di
       `internal/clienthub` e loggati, `service.started` chiude i comandi
-      `ResultViaEvent` via `completed_commands`).
+      `ResultViaEvent` via `completed_commands`). `service.stopped` e
+      `machine.power` sono in `ServerCapabilities`; `service.stopped` e
+      `service.started.last_stop` scrivono `updater_clients.last_stop_*`
+      e `service.stopped` marca la presenza (`offline_stop`).
 - [x] Registro comandi in memoria per connessione (`id` → stato, timeout di
       `ack`/`result`) — `internal/clienthub.Hub` (`Issue`/`HandleAck`/
       `HandleResult`/`applyTimeout`).
@@ -1298,3 +1370,8 @@ C→S {"type":"event","data":{"name":"session.changed","payload":{"events":["rem
       `commandSession.Secure()` in `admitCommand`, `internal/service/clientcmd.go`.
 - [x] `AGENTS.md`: convenzione "i `SessionChangeKind` sono contratto sul filo",
       nuovi event ID per comandi ricevuti/eseguiti/rifiutati (924/925/926).
+- [x] `service.stopped` (§8.7), `service.started.last_stop` (§8.6) e
+      `machine.power` (§8.8): `internal/service/stopevents.go`, `run`/`lastStop`
+      in `state.json`, `AcceptPreShutdown`/`AcceptPowerEvent` nel gestore SCM,
+      controlli d'intento 210–212, `stop --reason=upgrade` nell'installer;
+      Event Log 927/928.

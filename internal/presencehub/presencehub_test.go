@@ -145,3 +145,59 @@ func TestDifferentClientsAreIndependent(t *testing.T) {
 		t.Fatal("client 2 must stay online, unaffected by client 1's disconnect")
 	}
 }
+
+func TestStoppedAfterAnnouncedStop(t *testing.T) {
+	h := New(testGrace)
+	tok, _ := h.Connect(1)
+	h.Stopping(tok, Stop{Reason: "shutdown", Category: "machine"})
+	if _, ok := h.Stopped(1); ok {
+		t.Fatal("Stopped(1) reported while still connected")
+	}
+	h.Disconnect(tok)
+	if _, ok := h.Stopped(1); ok {
+		t.Fatal("Stopped(1) reported during the grace period")
+	}
+	time.Sleep(testGrace * 3)
+	s, ok := h.Stopped(1)
+	if !ok || s.Reason != "shutdown" || s.Category != "machine" {
+		t.Fatalf("Stopped(1) = %+v, %v after grace", s, ok)
+	}
+
+	// Connecting again ends the offline spell, and with it the reason.
+	tok2, _ := h.Connect(1)
+	h.Disconnect(tok2)
+	time.Sleep(testGrace * 3)
+	if _, ok := h.Stopped(1); ok {
+		t.Fatal("Stopped(1) kept the previous reason across a reconnect")
+	}
+}
+
+func TestStoppedNotSetByUnannouncedDrop(t *testing.T) {
+	h := New(testGrace)
+	tok, _ := h.Connect(1)
+	h.Disconnect(tok)
+	time.Sleep(testGrace * 3)
+	if _, ok := h.Stopped(1); ok {
+		t.Fatal("Stopped(1) reported for a drop with no service.stopped")
+	}
+}
+
+func TestStoppingIgnoresSupersededToken(t *testing.T) {
+	h := New(testGrace)
+	old, _ := h.Connect(1)
+	cur, _ := h.Connect(1)
+	h.Stopping(old, Stop{Reason: "manual"})
+	h.Disconnect(cur)
+	time.Sleep(testGrace * 3)
+	if _, ok := h.Stopped(1); ok {
+		t.Fatal("a superseded connection's stop was applied to the newer one")
+	}
+}
+
+func TestStoppedNilHub(t *testing.T) {
+	var h *Hub
+	h.Stopping(Token{}, Stop{Reason: "manual"})
+	if _, ok := h.Stopped(1); ok {
+		t.Fatal("nil Hub reported a stop")
+	}
+}

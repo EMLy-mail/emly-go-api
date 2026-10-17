@@ -258,5 +258,13 @@
         { "type": "table_not_exists", "table": "updater_client_logs" }
       ]
     }
+    ,{
+      "id": "28_updater_clients_last_stop",
+      "sql_file": "28_updater_clients_last_stop.sql",
+      "description": "Add last_stop_reason/last_stop_category/last_stop_at to updater_clients so how a machine's service last stopped (service.stopped, service.started.last_stop) outlives the in-memory event ring.",
+      "conditions": [
+        { "type": "column_not_exists", "table": "updater_clients", "column": "last_stop_reason" }
+      ]
+    }
   ]
 }

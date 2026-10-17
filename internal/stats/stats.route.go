@@ -436,9 +436,20 @@ func attachRecentChecks(ctx context.Context, db *sqlx.DB, clients []models.Updat
 // stats:clients WS channel) decorates it - presence being nil (tests, or a
 // build that never constructs one) decorates every client as offline rather
 // than panicking, never leaves the field simply unset.
+//
+// It sets OfflineStop from the same hub: the service.stopped that preceded
+// the current offline spell, if there was one.
 func decorateOnline(clients []models.UpdaterClient, presence *presencehub.Hub) {
 	for i := range clients {
-		clients[i].Online = presence.Online(int64(clients[i].ID))
+		decorateClientOnline(&clients[i], presence)
+	}
+}
+
+func decorateClientOnline(c *models.UpdaterClient, presence *presencehub.Hub) {
+	c.Online = presence.Online(int64(c.ID))
+	c.OfflineStop = nil
+	if stop, ok := presence.Stopped(int64(c.ID)); ok {
+		c.OfflineStop = &models.ClientStop{Reason: stop.Reason, Category: stop.Category, At: dbvalue.NullTime(stop.At)}
 	}
 }
 

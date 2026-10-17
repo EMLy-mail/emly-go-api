@@ -2,6 +2,7 @@ package stats
 
 import (
 	"testing"
+	"time"
 
 	"emly-api-go/internal/models"
 	"emly-api-go/internal/presencehub"
@@ -55,5 +56,24 @@ func TestDecorateOnline_SingleClientSlice(t *testing.T) {
 	decorateOnline(offline, presence)
 	if offline[0].Online {
 		t.Fatal("client 99 should decorate Online=false (never connected) via the one-element-slice path")
+	}
+}
+
+func TestDecorateOnlineOfflineStop(t *testing.T) {
+	presence := presencehub.New(time.Millisecond)
+	tok, _ := presence.Connect(42)
+	at := time.Date(2026, 10, 17, 18, 2, 11, 0, time.UTC)
+	presence.Stopping(tok, presencehub.Stop{Reason: "shutdown", Category: "machine", At: at})
+	presence.Disconnect(tok)
+	time.Sleep(20 * time.Millisecond)
+
+	clients := []models.UpdaterClient{{ID: 42}, {ID: 7}}
+	decorateOnline(clients, presence)
+	s := clients[0].OfflineStop
+	if clients[0].Online || s == nil || s.Reason != "shutdown" || s.Category != "machine" || s.At == nil || !s.At.Equal(at) {
+		t.Fatalf("client 42 = online %v, offline_stop %+v", clients[0].Online, s)
+	}
+	if clients[1].OfflineStop != nil {
+		t.Fatal("client 7 never announced a stop")
 	}
 }
