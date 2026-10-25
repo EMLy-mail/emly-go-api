@@ -852,7 +852,10 @@ come §8.1); lo stesso fa con `last_stop` di §8.6, `sent` o no (con `sent:
 true` riscrive lo stesso valore). Tiene inoltre il motivo in memoria sulla
 presenza della connessione (`internal/presencehub`), così quando questa cade
 il client risulta offline *per quel motivo* (`offline_stop` di
-`GET /v2/stats/clients`) fino alla riconnessione. Un `reason`/`category` che
+`GET /v2/stats/clients`) fino alla riconnessione. Per la categoria
+`machine` (`shutdown`, `reboot`) il client è segnato offline appena la
+connessione cade, senza la finestra di grazia di 15s che vale per gli altri
+casi. Un `reason`/`category` che
 il server non conosce è memorizzato così com'è.
 
 ### 8.8 `machine.power`

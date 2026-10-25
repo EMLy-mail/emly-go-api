@@ -240,6 +240,14 @@ func validateUpdater(u *UpdaterTuning) []Problem {
 	if u.CriticalWarning != nil && u.CriticalWarning.Seconds < 0 {
 		problems = append(problems, problemf("/updater/criticalWarning/seconds", "must be >= 0"))
 	}
+	if cw := u.CriticalWarning; cw != nil {
+		if cw.SnoozeHours != nil && (*cw.SnoozeHours < 1 || *cw.SnoozeHours > 168) {
+			problems = append(problems, problemf("/updater/criticalWarning/snoozeHours", "must be between 1 and 168"))
+		}
+		if cw.MaxSnoozes != nil && (*cw.MaxSnoozes < 0 || *cw.MaxSnoozes > 10) {
+			problems = append(problems, problemf("/updater/criticalWarning/maxSnoozes", "must be between 0 and 10"))
+		}
+	}
 	if u.DCLookupRetry != nil {
 		if u.DCLookupRetry.Attempts < 0 {
 			problems = append(problems, problemf("/updater/dcLookupRetry/attempts", "must be >= 0"))

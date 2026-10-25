@@ -165,6 +165,12 @@ type UpdaterTuning struct {
 type CriticalWarning struct {
 	Enabled bool `json:"enabled"`
 	Seconds int  `json:"seconds"`
+	// SnoozeHours and MaxSnoozes bound the "Ignora" of an agent's critical
+	// update dialog (products other than EMLy). Pointers with omitempty: an
+	// absent field must stay absent in the canonical document, so the agent
+	// falls back to config.ini - a serialized 0 would mean "never snooze".
+	SnoozeHours *int `json:"snoozeHours,omitempty"`
+	MaxSnoozes  *int `json:"maxSnoozes,omitempty"`
 }
 
 type DCLookupRetry struct {

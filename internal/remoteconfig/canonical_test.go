@@ -82,3 +82,27 @@ func TestCanonical_NoTrailingNewlineOrIndent(t *testing.T) {
 		}
 	}
 }
+
+// The snooze limits survive the canonical round-trip when set, and stay
+// absent when not: a serialized 0 would tell agents "never snooze".
+func TestCanonical_CriticalWarningSnooze(t *testing.T) {
+	const base = `{"schemaVersion":1,"revision":1,"generatedAt":"2026-10-25T00:00:00Z","servers":{"a":"https://a.example.com"},"defaultServer":"a","updater":{"criticalWarning":%s}}`
+	for in, want := range map[string][]string{
+		`{"enabled":true,"seconds":30,"snoozeHours":6,"maxSnoozes":0}`: {`"snoozeHours":6`, `"maxSnoozes":0`},
+		`{"enabled":true,"seconds":30}`:                                 nil,
+	} {
+		doc, problems := Parse([]byte(strings.Replace(base, "%s", in, 1)))
+		if len(problems) != 0 {
+			t.Fatalf("%s invalid: %+v", in, problems)
+		}
+		b, _ := Canonical(doc)
+		for _, w := range want {
+			if !strings.Contains(string(b), w) {
+				t.Errorf("%s: %s missing from %s", in, w, b)
+			}
+		}
+		if want == nil && (strings.Contains(string(b), "snoozeHours") || strings.Contains(string(b), "maxSnoozes")) {
+			t.Errorf("%s: absent snooze fields serialized: %s", in, b)
+		}
+	}
+}

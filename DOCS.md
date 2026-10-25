@@ -87,7 +87,7 @@ emly-api-go/
     │   ├── bug_report.route.go      #   gli handler
     │   ├── routes.go                #   RegisterV2: monta le sue route su /v2
     │   └── templates/               #   template del testo nello ZIP
-    ├── admin/                       # admin/auth (login/sessioni) + admin/users
+    ├── admin/                       # admin/auth (login/sessioni, SSO) + admin/users
     ├── updates/                     # release per prodotto (EMLy e gli altri) + self-update dell'Updater
     ├── products/                    # /v2/products: il registro dei prodotti (admin)
     ├── configapi/                   # /v2/config: documento e revisioni (HTTP)
@@ -112,6 +112,7 @@ emly-api-go/
     │   ├── database.go              #   Apre la connessione MySQL (pool)
     │   └── schema/                  #   Migration condizionali (migrator + *.sql)
     ├── middleware/                  # API key, admin key, rate limit, ban list
+    ├── oidc/                        # verifica dei token SSO (OIDC) e gruppi -> ruolo
     ├── models/                      # Struct che mappano tabelle DB e JSON
     ├── remoteconfig/                # il documento /v2/config, senza HTTP ne' DB
     ├── configmirror/                # replica /v2/config da un'istanza upstream
@@ -672,6 +673,60 @@ Headers: X-Session-Token: <session_id>
 - UUID utenti generati con `crypto/rand` (UUID v4)
 - Session ID: 32 byte random, encoded come hex (64 caratteri)
 
+**Single sign-on (OIDC).** Oltre a username e password, un utente puo' entrare
+con il login aziendale: un provider OpenID Connect (Keycloak davanti ad Active
+Directory). E' opzionale: resta spento finche' `OIDC_ISSUER` e
+`OIDC_CLIENT_ID` non sono impostati, e in quel caso le route SSO rispondono
+`404`. Se vieni da Node e' quello che faresti con `passport-openidconnect` o
+`openid-client`, da Laravel con Socialite, ma con i compiti divisi in due:
+
+- **la dashboard** fa tutto il giro nel browser (redirect al provider, ritorno
+  con il codice, scambio del codice con l'ID token) e poi chiama
+  `POST /v2/api/admin/auth/oidc` con l'ID token e il nonce con cui aveva
+  avviato il flusso;
+- **l'API** si limita a verificare quel token (`internal/oidc`, libreria
+  `coreos/go-oidc`): firma con le chiavi pubbliche dell'issuer, issuer,
+  audience, scadenza, nonce. Per questo non le serve un client secret. La
+  discovery del provider avviene al primo login, non all'avvio: se Keycloak e'
+  giu' l'API parte lo stesso, e falliscono solo i login SSO finche' non torna.
+
+Il **ruolo** non si assegna dalla dashboard: lo decidono i gruppi AD. Il claim
+`OIDC_GROUPS_CLAIM` (default `groups`) viene confrontato con
+`OIDC_OWNER_GROUPS`, `OIDC_ADMIN_GROUPS`, `OIDC_USER_GROUPS` (liste separate da
+virgola, senza distinzione di maiuscole e ignorando la `/` iniziale che il
+group mapper di Keycloak aggiunge); vince il ruolo piu' alto, e chi non e' in
+nessun gruppo viene rifiutato (`403`). `owner` si ottiene **solo** cosi': la
+creazione utenti locale accetta solo `admin` e `user`.
+
+Al primo login l'utente viene creato (`auth_provider = 'oidc'`, `external_id`
+= il claim `sub`, che a differenza dello username non cambia mai); ai login
+successivi ruolo e displayname vengono riletti dal token, quindi spostare
+qualcuno di gruppo in AD vale dal suo prossimo login. Dopo, e' una sessione
+come le altre: stesso `X-Session-Token`, stesso `validate`, stesso scope
+prodotti — solo la durata e' diversa (`OIDC_SESSION_DURATION`, default una
+settimana, cosi' i gruppi vengono riletti abbastanza spesso). Due regole
+tengono separati i due mondi:
+
+- un'identita' SSO non "adotta" mai un account locale con lo stesso username:
+  il login risponde `409`, perche' altrimenti chi controlla il provider
+  potrebbe prendersi l'account `admin` locale;
+- un account SSO non ha password (`password_hash` e' un valore che
+  `verifyPassword` rifiuta sempre), il login locale lo ignora e il reset
+  password risponde `404`: la password la gestisce il provider.
+
+**Logout dal provider.** Quando qualcuno esce da Keycloak, il provider lo
+notifica alla dashboard con un *logout token* firmato (OpenID Connect
+Back-Channel Logout), e la dashboard lo inoltra a
+`POST /v2/api/admin/auth/oidc/backchannel-logout`. L'API lo verifica come un ID
+token, controlla le regole della spec (evento di logout presente, `sub`
+presente, nessun `nonce`, cosi' un ID token rubato non puo' essere spacciato
+per un logout) e cancella tutte le sessioni di quell'utente. Entrambe le route
+SSO richiedono `X-Admin-Key`: le chiama il server della dashboard, mai il
+browser.
+
+Lo schema arriva con la migration `21_user_oidc`: aggiunge `owner` all'ENUM
+`role` e le colonne `auth_provider` / `external_id` a `user`.
+
 **Scope prodotti: cosa puo' vedere un utente.** Ogni utente ha un elenco di
 prodotti assegnati (tabella `user_products`, gestita da
 `PUT /v2/api/admin/users/{id}/products`). Le route della dashboard che parlano
@@ -1038,7 +1093,9 @@ Lo stesso hub ricorda anche *perche'* una macchina e' offline, quando lo sa.
 Se l'Updater, prima di chiudere, manda l'evento `service.stopped`
 (spegnimento, aggiornamento, stop manuale...), `clientws` chiama
 `presence.Stopping(tok, ...)` sulla connessione corrente; quando la finestra
-di grazia scade il motivo passa in una seconda map, `stopped`, e ci resta
+di grazia scade (o subito, senza grazia, se il motivo e' di categoria
+`machine`: spegnimento o riavvio del PC, che non torna in 15s) il motivo
+passa in una seconda map, `stopped`, e ci resta
 finche' quella macchina non si riconnette (`Connect` la cancella). `stats` lo
 legge con `Stopped(id)` e lo espone come `offline_stop`. E' l'equivalente di
 tenere in una `Map` di Node l'ultimo messaggio "addio" di ogni socket: vale
@@ -1667,11 +1724,14 @@ però la stessa trappola di rollout dei mirror di sede descritta per `clientWs.c
   "displayname": "Mario Rossi",
   "role": "admin",
   "enabled": true,
+  "auth_provider": "local",
   "created_at": "2026-03-23T10:00:00Z"
 }
 ```
 
 **Nota:** `password_hash` non viene mai esposto nelle risposte JSON (`json:"-"`).
+`role` e' `owner`, `admin` o `user`; `auth_provider` e' `local` (password) o
+`oidc` (single sign-on, vedi la sezione 8).
 
 ---
 

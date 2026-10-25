@@ -149,7 +149,7 @@ func TestDifferentClientsAreIndependent(t *testing.T) {
 func TestStoppedAfterAnnouncedStop(t *testing.T) {
 	h := New(testGrace)
 	tok, _ := h.Connect(1)
-	h.Stopping(tok, Stop{Reason: "shutdown", Category: "machine"})
+	h.Stopping(tok, Stop{Reason: "self_update", Category: "automatic"})
 	if _, ok := h.Stopped(1); ok {
 		t.Fatal("Stopped(1) reported while still connected")
 	}
@@ -159,7 +159,7 @@ func TestStoppedAfterAnnouncedStop(t *testing.T) {
 	}
 	time.Sleep(testGrace * 3)
 	s, ok := h.Stopped(1)
-	if !ok || s.Reason != "shutdown" || s.Category != "machine" {
+	if !ok || s.Reason != "self_update" || s.Category != "automatic" {
 		t.Fatalf("Stopped(1) = %+v, %v after grace", s, ok)
 	}
 
@@ -199,5 +199,53 @@ func TestStoppedNilHub(t *testing.T) {
 	h.Stopping(Token{}, Stop{Reason: "manual"})
 	if _, ok := h.Stopped(1); ok {
 		t.Fatal("nil Hub reported a stop")
+	}
+}
+
+// A machine shutting down or rebooting is offline as soon as its connection
+// drops: no grace window, it is not coming back within it.
+func TestMachineStopSkipsTheGrace(t *testing.T) {
+	for _, reason := range []string{"shutdown", "reboot"} {
+		h := New(time.Hour) // a grace that would never run out in the test
+		tok, _ := h.Connect(1)
+		h.Stopping(tok, Stop{Reason: reason, Category: "machine"})
+		if !h.Online(1) {
+			t.Fatalf("%s: offline before the connection dropped", reason)
+		}
+		h.Disconnect(tok)
+		if h.Online(1) {
+			t.Fatalf("%s: still online right after the drop", reason)
+		}
+		s, ok := h.Stopped(1)
+		if !ok || s.Reason != reason || s.Category != "machine" {
+			t.Fatalf("%s: Stopped(1) = %+v, %v", reason, s, ok)
+		}
+
+		// Back up: online again, and the reason is gone.
+		tok2, _ := h.Connect(1)
+		if !h.Online(1) {
+			t.Fatalf("%s: not online after reconnecting", reason)
+		}
+		if _, ok := h.Stopped(1); ok {
+			t.Fatalf("%s: Stopped(1) kept across a reconnect", reason)
+		}
+		h.Disconnect(tok2)
+	}
+}
+
+// A superseded connection that announced a shutdown does not take the newer
+// connection offline when it drops.
+func TestMachineStopOnSupersededConnectionIsIgnored(t *testing.T) {
+	h := New(time.Hour)
+	old, _ := h.Connect(1)
+	h.Stopping(old, Stop{Reason: "shutdown", Category: "machine"})
+	cur, _ := h.Connect(1)
+	h.Disconnect(old)
+	if !h.Online(1) {
+		t.Fatal("the newer connection went offline because the old one announced a shutdown")
+	}
+	h.Disconnect(cur)
+	if !h.Online(1) {
+		t.Fatal("an unannounced drop skipped the grace window")
 	}
 }

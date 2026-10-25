@@ -19,6 +19,10 @@ import (
 // superseding an older one - without a flicker on the dashboard.
 const DefaultGraceDuration = 15 * time.Second
 
+// stopCategoryMachine is clientproto.StopCategoryMachine (shutdown, reboot),
+// spelled here so this package stays free of the wire types.
+const stopCategoryMachine = "machine"
+
 // Token identifies one Connect call. Its matching Disconnect only acts on
 // the entry it created: a superseded connection's own (deferred) Disconnect
 // must be a no-op on the newer connection that replaced it, not undo its
@@ -111,6 +115,13 @@ func (h *Hub) Connect(clientID int64) (Token, <-chan struct{}) {
 // connection was superseded - see Connect) is a no-op, so cleanup from the
 // old connection never touches the new one's state.
 //
+// A connection that announced a stop of category "machine" (the PC shutting
+// down or rebooting, see Stopping) goes offline at once instead: the grace
+// window is there to absorb a reconnect, and a machine that is switching
+// off will not reconnect within it. Every other announced stop - a restart
+// of the service alone, a self-update - keeps the grace window, so it does
+// not flicker offline.
+//
 // A nil *Hub, or a zero-value Token (what a nil Hub's own Connect returns),
 // is a no-op - same nil-safety rationale as Connect above.
 func (h *Hub) Disconnect(tok Token) {
@@ -126,6 +137,11 @@ func (h *Hub) Disconnect(tok Token) {
 	}
 
 	clientID, gen := tok.clientID, tok.gen
+	if e.stop != nil && e.stop.Category == stopCategoryMachine {
+		delete(h.entries, clientID)
+		h.stopped[clientID] = *e.stop
+		return
+	}
 	e.graceTimer = time.AfterFunc(h.grace, func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -156,8 +172,9 @@ func (h *Hub) Online(clientID int64) bool {
 // (service.stopped), so that once it drops and the grace period runs out
 // Stopped reports why the client is offline. A later stop on the same
 // connection replaces the earlier one. The grace period itself is left
-// alone: a "restart" is back within it, and should not flicker offline any
-// more than a network blip does. A token that no longer matches the current
+// alone - a "restart" is back within it, and should not flicker offline any
+// more than a network blip does - except for a "machine" stop, which skips
+// it (see Disconnect). A token that no longer matches the current
 // entry (superseded), a zero Token or a nil Hub is a no-op.
 func (h *Hub) Stopping(tok Token, s Stop) {
 	if h == nil {

@@ -250,6 +250,9 @@ Le password sono verificate in formato PHC.
 { "password": "nuova-password" }
 ```
 
+`404` anche per un utente SSO (`auth_provider = oidc`): la sua password la
+gestisce il provider. Le risposte utente includono `auth_provider`.
+
 ### 4.5 Alias legacy
 
 | Metodo   | Path                             | Auth        | Cosa fa |
@@ -298,6 +301,7 @@ esiste in v2.
 | `GET`    | `/auth/validate`              | `SESSION` |
 | `POST`   | `/auth/logout`                | `SESSION` |
 | `POST`   | `/auth/oidc`                  | `ADMIN`   |
+| `POST`   | `/auth/oidc/backchannel-logout` | `ADMIN` |
 | `GET`    | `/users/`                     | `ADMIN`   |
 | `POST`   | `/users/`                     | `ADMIN`   |
 | `GET`    | `/users/{id}`                 | `ADMIN`   |
@@ -312,7 +316,57 @@ esiste in v2.
 prodotti assegnati all'utente (per un `owner`, tutti i prodotti del registro): è lo stesso elenco con cui l'API limita le
 sue richieste, quindi la dashboard ci costruisce il selettore prodotto.
 (Il campo compare anche su `/v1/.../validate`, che usa lo stesso handler: è
-additivo.)
+additivo.) Sia login che validate restituiscono anche `user.auth_provider`:
+`local` (password) o `oidc` (single sign-on).
+
+**Single sign-on (OIDC)** — solo v2, attivo solo se `OIDC_ISSUER` e
+`OIDC_CLIENT_ID` sono impostati; altrimenti entrambe le route rispondono `404`
+(`sso is not enabled`). Il flusso nel browser (authorization code con il
+provider, es. Keycloak davanti ad Active Directory) lo fa la dashboard: l'API
+vede solo il token finale, lo verifica con le chiavi pubbliche dell'issuer e
+quindi non ha bisogno di client secret. Le due route sono chiamate dal server
+della dashboard, per questo richiedono la admin key.
+
+**`POST /auth/oidc` — corpo JSON**
+
+```json
+{ "id_token": "<ID token del provider>", "nonce": "<nonce usato per avviare il flusso>" }
+```
+
+Verifica firma, issuer, audience (`OIDC_CLIENT_ID`), scadenza e nonce, poi
+ricava il ruolo dai gruppi del claim `OIDC_GROUPS_CLAIM` (default `groups`):
+vince il ruolo più alto fra `OIDC_OWNER_GROUPS`, `OIDC_ADMIN_GROUPS`,
+`OIDC_USER_GROUPS` (confronto senza maiuscole e senza `/` iniziale). Al primo
+login crea l'utente (`auth_provider = oidc`, `external_id` = claim `sub`,
+username da `preferred_username`, poi `email`, poi `sub`); ai login successivi
+ne aggiorna ruolo e displayname, quindi un cambio di gruppo AD vale dal login
+dopo. Apre una sessione normale che dura `OIDC_SESSION_DURATION` (default
+`168h`) e risponde come `/auth/login`: `{"session_id": "...", "user": {...}}`.
+
+Esiti: `400` JSON non valido o `id_token`/`nonce` mancanti, `401` token non
+valido, `403` utente in nessun gruppo abilitato o account disabilitato, `409`
+esiste già un account **locale** con lo stesso username (un'identità SSO non
+prende mai il posto di un account locale). Un utente SSO appena creato non ha
+prodotti assegnati: se non è `owner` non vede niente finché non gliene
+assegnano.
+
+**`POST /auth/oidc/backchannel-logout` — corpo JSON**
+
+```json
+{ "logout_token": "<logout token firmato dal provider>" }
+```
+
+Quando un utente esce dal provider, questo avvisa la dashboard (OpenID Connect
+Back-Channel Logout 1.0), che inoltra qui il logout token. L'API lo verifica
+come un ID token, più le regole della spec: deve contenere l'evento
+`backchannel-logout` e un `sub`, e non deve avere un `nonce` (così un ID token
+non può essere riusato come logout token). Poi cancella **tutte** le sessioni
+di quell'utente → `{"sessions_removed": 2}`. Un `sub` sconosciuto è un
+successo con `0`: l'utente potrebbe non aver mai usato la console. `400` se il
+token manca o non è valido.
+
+Gli account SSO non hanno una password utilizzabile: `POST /auth/login` li
+ignora (`401`), e `POST /users/{id}/reset-password` su di loro risponde `404`.
 
 **`POST /users/{id}/migrate-sso`** → `{"migrated": true}`. Converte un account
 locale in SSO: la password smette subito di funzionare e le sue sessioni
@@ -916,6 +970,9 @@ chiusa dal server. Se la connessione ha mandato un `service.stopped` prima di
 cadere, alla fine della finestra di grazia il motivo resta associato al
 client offline (`offline_stop`) finché non si riconnette; la finestra stessa
 non cambia, così un `restart` che torna entro 15s non risulta mai offline.
+Unica eccezione: un `service.stopped` di categoria `machine` (`shutdown`,
+`reboot`) salta la finestra di grazia, e il client risulta offline con il suo
+`offline_stop` appena la connessione cade.
 
 Il campo `"online"` che questo canale alimenta compare in
 `GET /v2/stats/clients` e nel canale `stats:clients` di
