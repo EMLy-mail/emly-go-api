@@ -105,6 +105,10 @@ type authUser struct {
 	AuthProvider string `json:"auth_provider"`
 }
 
+// ErrSSORequired is the error text of a password login on an SSO account. The
+// dashboard matches it to tell it apart from the other 403, "account disabled".
+const ErrSSORequired = "sso required"
+
 // LoginUser handles POST /v1/api/admin/auth/login
 func LoginUser(db *sqlx.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -126,12 +130,20 @@ func LoginUser(db *sqlx.DB) http.HandlerFunc {
 			PasswordHash string `db:"password_hash"`
 		}
 		err := db.GetContext(r.Context(), &row,
-			"SELECT id, username, displayname, password_hash, role, enabled, auth_provider FROM `user` WHERE username = ? AND auth_provider = 'local' LIMIT 1",
+			"SELECT id, username, displayname, password_hash, role, enabled, auth_provider FROM `user` WHERE username = ? LIMIT 1",
 			body.Username,
 		)
 		if err != nil {
 			// Return 401 whether the user doesn't exist or query failed to avoid enumeration
 			response.Error(w, http.StatusUnauthorized, "invalid credentials")
+			return
+		}
+		// SSO accounts (migrated ones included) have no password: say so rather
+		// than "invalid credentials", so the user knows to use SSO. This tells
+		// a caller the username exists and is SSO, which is accepted - SSO
+		// usernames are the directory's own and not secret.
+		if row.AuthProvider == models.AuthProviderOIDC {
+			response.Error(w, http.StatusForbidden, ErrSSORequired)
 			return
 		}
 

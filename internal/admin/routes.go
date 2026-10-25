@@ -46,6 +46,7 @@ func RegisterV2(r chi.Router, db *sqlx.DB) {
 			r.Get("/{id}", GetUserByID(db))
 			r.Patch("/{id}", UpdateUser(db))
 			r.Post("/{id}/reset-password", ResetPassword(db))
+			r.Post("/{id}/migrate-sso", MigrateUserToSSO(db, verifier))
 			r.Delete("/{id}", DeleteUser(db))
 			r.Get("/{id}/products", GetUserProducts(db))
 			r.Put("/{id}/products", PutUserProducts(db))

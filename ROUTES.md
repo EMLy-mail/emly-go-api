@@ -220,7 +220,9 @@ la dashboard ne è esente (vedi §2).
 { "username": "admin", "password": "..." }
 ```
 
-Esiti: `400` campi mancanti, `401` credenziali errate, `403` account disabilitato.
+Esiti: `400` campi mancanti, `401` credenziali errate, `403` account disabilitato,
+`403` con `{"error": "sso required"}` se l'account è SSO (anche migrato): deve
+accedere tramite SSO.
 Le password sono verificate in formato PHC.
 
 ### 4.4 Gestione utenti — `/v1/api/admin/users`
@@ -301,6 +303,7 @@ esiste in v2.
 | `GET`    | `/users/{id}`                 | `ADMIN`   |
 | `PATCH`  | `/users/{id}`                 | `ADMIN`   |
 | `POST`   | `/users/{id}/reset-password`  | `ADMIN`   |
+| `POST`   | `/users/{id}/migrate-sso`     | `ADMIN`   |
 | `DELETE` | `/users/{id}`                 | `ADMIN`   |
 | `GET`    | `/users/{id}/products`        | `ADMIN`   |
 | `PUT`    | `/users/{id}/products`        | `ADMIN`   |
@@ -310,6 +313,14 @@ prodotti assegnati all'utente (per un `owner`, tutti i prodotti del registro): �
 sue richieste, quindi la dashboard ci costruisce il selettore prodotto.
 (Il campo compare anche su `/v1/.../validate`, che usa lo stesso handler: è
 additivo.)
+
+**`POST /users/{id}/migrate-sso`** → `{"migrated": true}`. Converte un account
+locale in SSO: la password smette subito di funzionare e le sue sessioni
+vengono chiuse. Il primo login SSO con lo stesso username prende l'account
+(stesso `id`, prodotti e storico) e ne fissa il `sub`; da lì ruolo e nome
+arrivano dai gruppi del provider, come per ogni utente SSO. Esiti: `404` utente
+assente, `409` se l'utente è già SSO o se l'SSO non è abilitato. Con un
+`X-Session-Token`, solo `admin` e `owner` (`403` per `user`).
 
 **`GET /users/{id}/products`** → `{"user_id": "...", "products": ["emly"]}`.
 `404` se l'utente non esiste.
