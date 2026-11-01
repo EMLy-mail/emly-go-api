@@ -68,6 +68,7 @@ services:
       DASHBOARD_KEY: ${DASHBOARD_KEY}
     volumes:
       - logs:/logs
+      - data:/data
     logging:
       driver: "json-file"
       options:
@@ -85,4 +86,5 @@ services:
 
 volumes:
   logs:
+  data:
   grafana_data:

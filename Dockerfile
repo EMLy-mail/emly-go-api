@@ -21,7 +21,7 @@ COPY --from=builder /build/internal/database/schema ./internal/database/schema
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-RUN mkdir -p /logs
+RUN mkdir -p /logs /data
 
 EXPOSE 8080
 
