@@ -31,12 +31,6 @@ CREATE TABLE IF NOT EXISTS `bug_report_files` (
                                                   INDEX `idx_report_id` (`report_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS `rate_limit_hwid` (
-                                                 `hwid` VARCHAR(255) PRIMARY KEY,
-                                                 `window_start` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                                                 `count` INT UNSIGNED NOT NULL DEFAULT 0
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
 CREATE TABLE IF NOT EXISTS `user` (
                                       `id` VARCHAR(255) PRIMARY KEY,
                                       `username` VARCHAR(255) NOT NULL UNIQUE,

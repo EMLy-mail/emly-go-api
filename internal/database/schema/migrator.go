@@ -58,7 +58,7 @@ func Migrate(db *sqlx.DB, dbName string) error {
 		slog.Info("migrate: checking tables")
 		var tableNames []string
 		var foundTables []string
-		tableNames = append(tableNames, "bug_reports", "bug_report_files", "rate_limit_hwid", "user", "session")
+		tableNames = append(tableNames, "bug_reports", "bug_report_files", "user", "session")
 		for _, tableName := range tableNames {
 			found, err := tableExists(db, dbName, tableName)
 			if err != nil {
