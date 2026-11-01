@@ -5,9 +5,11 @@
 //
 // HTTP- and DB-free like internal/presencehub, and subject to the same
 // single-instance limit: a command issued on one API replica can only reach
-// a machine connected to that replica. Nothing survives a restart - command
-// history is a debugging aid for now, not an audit trail (the agent-channel
-// spec's persistence is the follow-up).
+// a machine connected to that replica. Only the event rings survive a
+// restart, and only through SaveEvents/LoadEvents (snapshot.go) when
+// CLIENT_EVENTS_SNAPSHOT_PATH is set - command history is a debugging aid
+// for now, not an audit trail (the agent-channel spec's persistence is the
+// follow-up).
 package clienthub
 
 import (

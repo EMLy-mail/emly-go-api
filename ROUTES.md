@@ -919,7 +919,7 @@ sempre lo stato corrente, non un flusso di eventi.
 | `GET`  | `/v2/client/ws`                      | `API`   | Upgrade WebSocket che l'EMLy Updater tiene aperta per tutta la vita del servizio, per la presenza online/offline in tempo reale e, dal protocollo v2, per comandi/eventi/notify. |
 | `POST` | `/v2/client/{client_id}/commands`    | `ADMIN` | Invia un comando (§7 di `CLIENT_WS_PROTOCOL.md`) alla macchina connessa con quell'`updater_clients.id`. |
 | `GET`  | `/v2/client/commands/{command_id}`   | `ADMIN` | Legge lo stato/esito di un comando già inviato. |
-| `GET`  | `/v2/client/{client_id}/events`      | `ADMIN` | Ultimi eventi (`event`, §8) ricevuti da quella macchina — un anello in memoria, non uno storico permanente. |
+| `GET`  | `/v2/client/{client_id}/events`      | `ADMIN` | Ultimi eventi (`event`, §8) ricevuti da quella macchina — un anello in memoria (50 per macchina, 24h), salvato su file e ricaricato al riavvio se `CLIENT_EVENTS_SNAPSHOT_PATH` è impostato. |
 | `POST` | `/v2/client/notify`                  | `ADMIN` | Manda un `notify` (§9) a una o più macchine connesse, o a tutte quelle che dichiarano quel `topic`. |
 | `GET`  | `/v2/client/{client_id}/logs`        | `ADMIN` | Log dell'Updater portati da `log.send_latest` per quella macchina, più recenti prima (solo metadati). |
 | `GET`  | `/v2/client/logs/{log_id}`           | `ADMIN` | Metadati di un log. `log_id` è l'id del comando che l'ha portato. |

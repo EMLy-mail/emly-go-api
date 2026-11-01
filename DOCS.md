@@ -187,6 +187,9 @@ PORT=8080
 DB_DSN=root:secret@tcp(127.0.0.1:3306)/emly?parseTime=true&loc=UTC
 DATABASE_NAME=emly
 
+# Eventi client ws salvati su file (vuoto = solo in memoria)
+CLIENT_EVENTS_SNAPSHOT_PATH=data/client-events.json.gz
+
 # API v1 deprecata: false la spegne (/v1 e POST /api/bug-reports -> 404)
 V1_ENABLED=true
 
@@ -1196,6 +1199,23 @@ non e' visibile né eseguibile dalla replica B, e tutto (sessioni, comandi,
 eventi) sparisce a un riavvio dell'API — non e' un log di controllo, e' cache
 di lavoro. Un ticker in `main.go` la pota ogni 10 minuti (comandi conclusi e
 eventi piu' vecchi di 24h).
+
+**Gli eventi possono sopravvivere al riavvio.** Con
+`CLIENT_EVENTS_SNAPSHOT_PATH` impostato, gli anelli di eventi (solo quelli:
+sessioni e comandi no, non hanno senso dopo un riavvio) vengono salvati in un
+file JSON compresso con gzip — pensalo come un `fs.writeFile` periodico di
+`JSON.stringify(map)`, non come un database. `clienthub.SaveEvents` lo scrive
+ogni `CLIENT_EVENTS_SNAPSHOT_INTERVAL` (default `1m`), solo se qualcosa e'
+cambiato, piu' un'ultima volta allo shutdown; `clienthub.LoadEvents` lo
+rilegge all'avvio. La scrittura va su un file temporaneo nella stessa cartella
+che poi viene rinominato sopra quello vero: il rename e' atomico, quindi un
+crash o un disco pieno a meta' scrittura lasciano intatto lo snapshot
+precedente invece di un file troncato. Un file illeggibile non blocca
+l'avvio: riga di warn e si parte vuoti, come prima. Perche' un file e non una
+tabella: sono al massimo 50 eventi per macchina (qualche MB per tutta la
+flotta), letti solo dalla dashboard, e il DB lo vogliamo piu' snello, non
+piu' grande. Il limite e' lo stesso dell'istanza singola: un file per
+processo. In Docker sta nel volume `data` (`/data/client-events.json.gz`).
 
 **Ciclo di vita di un comando**: `sent` (appena inviato, in attesa di `ack`)
 → `acked` (la macchina ha confermato di eseguirlo) → uno stato finale,
