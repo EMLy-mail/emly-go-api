@@ -225,6 +225,19 @@ func main() {
 	// instance via internal/configapi.
 	clientHub := clienthub.New(time.Now)
 
+	// Event rings survive a restart through a snapshot file when
+	// CLIENT_EVENTS_SNAPSHOT_PATH is set: loaded here, before the router
+	// exists, saved by the loop below and once more at shutdown. An
+	// unreadable file is logged and the hub starts empty, as it always did.
+	eventsSnapshot := cfg.ClientEventsSnapshot
+	if eventsSnapshot.Path != "" {
+		if n, err := clientHub.LoadEvents(eventsSnapshot.Path); err != nil {
+			slog.Warn("client events snapshot not loaded, starting empty", "path", eventsSnapshot.Path, "err", err)
+		} else {
+			slog.Info("client events snapshot loaded", "path", eventsSnapshot.Path, "clients", n)
+		}
+	}
+
 	// Background loop that replicates /v2/config from CONFIG_UPSTREAM_URL
 	// when this instance is a site mirror; a no-op State on the cloud/
 	// primary instance (config.Load().ConfigUpstreamURL == ""). Stopped via
@@ -256,6 +269,23 @@ func main() {
 			}
 		}
 	}()
+
+	if eventsSnapshot.Path != "" && eventsSnapshot.Interval > 0 {
+		go func() {
+			t := time.NewTicker(eventsSnapshot.Interval)
+			defer t.Stop()
+			for {
+				select {
+				case <-backgroundCtx.Done():
+					return
+				case <-t.C:
+					if _, err := clientHub.SaveEvents(eventsSnapshot.Path); err != nil {
+						slog.Error("client events snapshot save failed", "path", eventsSnapshot.Path, "err", err)
+					}
+				}
+			}
+		}()
+	}
 
 	// Background loop that keeps updater_events from growing without bound
 	// (see internal/eventprune package doc). It only trims raw rows past
@@ -409,6 +439,14 @@ func main() {
 		slog.Error("server shutdown error", "err", err)
 	} else {
 		slog.Info("server shutdown complete")
+	}
+
+	if eventsSnapshot.Path != "" {
+		if _, err := clientHub.SaveEvents(eventsSnapshot.Path); err != nil {
+			slog.Error("client events snapshot save failed", "path", eventsSnapshot.Path, "err", err)
+		} else {
+			slog.Info("client events snapshot saved", "path", eventsSnapshot.Path)
+		}
 	}
 
 	// Close database connection
