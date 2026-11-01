@@ -846,6 +846,48 @@ All'avvio, `schema.Migrate(db, cfg.Database)` esegue questi passi:
 }
 ```
 
+### Mappa delle tabelle
+
+Un solo schema MySQL, tabelle raggruppate per dominio. Ogni tabella ha **un
+solo package proprietario**: e' l'unico che ci scrive, gli altri al massimo
+leggono. E' la stessa regola che in Laravel avresti con "un Model, un
+Repository": se due feature dovessero scrivere sulla stessa tabella, la
+logica va nel package che la possiede e l'altro lo chiama.
+
+Perche' non uno schema per dominio o per prodotto: in MySQL uno schema e'
+solo una cartella logica sullo stesso server, quindi non rende nulla piu'
+leggero, e in cambio obbliga a nomi qualificati nelle query, a un migrator
+che sa quale migration va dove e, per i prodotti, a `UNION` per ogni
+statistica di flotta. Il prodotto e' una colonna (`product`), non uno
+schema: aggiungere un prodotto e' una riga in `products`, non una migration.
+
+| Dominio      | Tabella                   | Package proprietario         | FK verso                         |
+|--------------|---------------------------|------------------------------|----------------------------------|
+| Identita'    | `user`                    | `internal/admin`             | —                                |
+|              | `session`                 | `internal/admin`             | `user` (cascade)                 |
+|              | `user_products`           | `internal/admin`             | `user`, `products` (cascade)     |
+| Catalogo     | `products`                | `internal/products`          | —                                |
+|              | `update_releases`         | `internal/updates`           | — (`product` e' una colonna)     |
+|              | `updater_releases`        | `internal/updates`           | —                                |
+| Flotta       | `updater_clients`         | `internal/updaterclient`     | —                                |
+|              | `updater_client_products` | `internal/updaterclient`     | `updater_clients` (cascade)      |
+|              | `updater_events`          | `internal/updaterclient`     | `updater_clients` (cascade)      |
+|              | `updater_event_hourly`    | `internal/updaterclient`     | — (mai potata, mai cancellata)   |
+|              | `updater_client_logs`     | `internal/clientlogs`        | — (niente FK apposta: una cascade lascerebbe orfani i file nel bucket) |
+| Config       | `remote_config_revisions` | `internal/configapi`         | —                                |
+| Operazioni   | `bans`                    | `internal/bans`              | —                                |
+| Bug report   | `bug_reports`             | `internal/bugreports`        | —                                |
+|              | `bug_report_files`        | `internal/bugreports`        | `bug_reports` (cascade)          |
+
+`internal/stats` legge le tabelle della flotta ma non le possiede: l'unica
+scrittura che fa (`DELETE /v2/stats/clients/{id}`) cancella eventi e
+macchina in una transazione. Gli eventi del canale `GET /v2/client/ws` non
+sono qui: stanno in memoria in `internal/clienthub` e, se configurato, in un
+file (`CLIENT_EVENTS_SNAPSHOT_PATH`).
+
+`rate_limit_hwid` stava in `init.sql` ma nessun codice la usava: la toglie la
+migration `29_drop_rate_limit_hwid`.
+
 ---
 
 ## 10. Endpoints API completi

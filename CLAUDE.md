@@ -181,6 +181,8 @@ Each version's `NewRouter` (in `internal/routes/v1/v1.go`, `v2/v2.go`) re-applie
 2. Reads `migrations/tasks.json` for conditional tasks.
 3. For each task, checks its condition against the live DB before running the corresponding `migrations/*.sql`.
 
+One schema, tables grouped by domain, each with **exactly one owning package** — the only one that writes it (map in `DOCS.md`, "Mappa delle tabelle"): identity (`user`, `session`, `user_products` → `admin`), catalogue (`products` → `products`; `update_releases`, `updater_releases` → `updates`), fleet (`updater_clients`, `updater_client_products`, `updater_events`, `updater_event_hourly` → `updaterclient`; `updater_client_logs` → `clientlogs`), `remote_config_revisions` → `configapi`, `bans` → `bans`, `bug_reports`/`bug_report_files` → `bugreports`. A new table gets an owner and a row in that map in the same commit. Products are a `product` column, never a schema or a table per product. `rate_limit_hwid` was never used and is dropped by migration 29.
+
 Supported condition types: `column_not_exists`, `column_exists`, `index_not_exists`, `index_exists`, `table_not_exists`, `table_exists`, `column_type_not` (the column exists with a `COLUMN_TYPE` other than `column_type`, case-insensitive; a missing column does not match). Conditions within a task are OR'd, and a task runs its whole file or nothing, so a repair that must be safe on databases in different states is split into one task per step (see the `26_*` tasks).
 
 ## Environment
