@@ -267,6 +267,14 @@
       ]
     }
     ,{
+      "id": "29_drop_rate_limit_hwid",
+      "sql_file": "29_drop_rate_limit_hwid.sql",
+      "description": "Drop rate_limit_hwid, created by init.sql but never read or written by any code.",
+      "conditions": [
+        { "type": "table_exists", "table": "rate_limit_hwid" }
+      ]
+    }
+    ,{
       "id": "21_user_oidc",
       "sql_file": "21_user_oidc.sql",
       "description": "Add the owner role plus auth_provider/external_id columns to user so accounts created by OIDC single sign-on can be told apart from local ones.",
