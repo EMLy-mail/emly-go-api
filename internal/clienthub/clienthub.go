@@ -120,6 +120,13 @@ type Hub struct {
 	sessions map[int64]*session
 	commands map[string]*CommandRecord
 	events   map[int64][]EventRecord
+	// eventsVer counts changes to h.events and savedVer is the value the
+	// last SaveEvents wrote, so a save with nothing new is skipped. saveMu
+	// keeps two saves (the periodic one and the one at shutdown) from
+	// racing on the file.
+	eventsVer uint64
+	savedVer  uint64
+	saveMu    sync.Mutex
 	// onResult runs after a command finishes done (see OnResult).
 	onResult func(CommandRecord)
 }
@@ -414,6 +421,7 @@ func (h *Hub) RecordEvent(ev EventRecord) {
 		ring = ring[len(ring)-eventRingSize:]
 	}
 	h.events[ev.ClientID] = ring
+	h.eventsVer++
 
 	if !existed && len(h.events) > maxEventClients {
 		h.evictLeastRecentEventsClientLocked()
@@ -544,6 +552,7 @@ func (h *Hub) Prune() {
 	for id, ring := range h.events {
 		if len(ring) > 0 && ring[len(ring)-1].ReceivedAt.Before(cutoff) {
 			delete(h.events, id)
+			h.eventsVer++
 		}
 	}
 }
