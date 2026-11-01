@@ -4,6 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -560,4 +564,105 @@ func TestHubOnResultFiresOncePerDoneCommand(t *testing.T) {
 func TestHubOnResultNilHubIsNoOp(t *testing.T) {
 	var h *Hub
 	h.OnResult(func(CommandRecord) {})
+}
+
+func TestSaveLoadEventsRoundTrip(t *testing.T) {
+	clk := &fakeClock{t: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)}
+	h := New(clk.now)
+	h.Attach(7, 2, []string{"service.started"}, (&capture{}).send)
+	h.RecordEvent(EventRecord{ID: "a", ClientID: 7, Name: "service.started", ReceivedAt: clk.now(), Payload: json.RawMessage(`{"v":1}`)})
+	h.RecordEvent(EventRecord{ID: "b", ClientID: 7, Name: "service.stopped", ReceivedAt: clk.now()})
+
+	path := filepath.Join(t.TempDir(), "sub", "events.json.gz")
+	wrote, err := h.SaveEvents(path)
+	if err != nil || !wrote {
+		t.Fatalf("SaveEvents = %v, %v; want true, nil", wrote, err)
+	}
+	if wrote, err := h.SaveEvents(path); err != nil || wrote {
+		t.Fatalf("second SaveEvents with no change = %v, %v; want false, nil", wrote, err)
+	}
+
+	h2 := New(clk.now)
+	n, err := h2.LoadEvents(path)
+	if err != nil || n != 1 {
+		t.Fatalf("LoadEvents = %d, %v; want 1, nil", n, err)
+	}
+	got := h2.Events(7)
+	if len(got) != 2 || got[0].ID != "a" || got[1].ID != "b" || string(got[0].Payload) != `{"v":1}` {
+		t.Fatalf("restored events = %+v", got)
+	}
+}
+
+func TestLoadEventsMissingFileIsNotAnError(t *testing.T) {
+	n, err := New(nil).LoadEvents(filepath.Join(t.TempDir(), "absent.json.gz"))
+	if err != nil || n != 0 {
+		t.Fatalf("LoadEvents on a missing file = %d, %v; want 0, nil", n, err)
+	}
+}
+
+func TestLoadEventsCorruptFileLeavesHubEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.json.gz")
+	if err := os.WriteFile(path, []byte("not gzip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := New(nil)
+	if _, err := h.LoadEvents(path); err == nil {
+		t.Fatal("LoadEvents on a corrupt file returned nil error")
+	}
+	if len(h.events) != 0 {
+		t.Fatalf("hub has %d clients after a failed load", len(h.events))
+	}
+}
+
+func TestLoadEventsAppliesLimits(t *testing.T) {
+	clk := &fakeClock{t: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)}
+	h := New(clk.now)
+	// Written straight into the map to stand in for a file from a build with
+	// looser limits: an over-long ring, an oversized payload, a stale client.
+	for i := 0; i < eventRingSize+10; i++ {
+		h.events[1] = append(h.events[1], EventRecord{ID: fmt.Sprint(i), Name: "e", ReceivedAt: clk.now()})
+	}
+	h.events[1][len(h.events[1])-1].Payload = json.RawMessage(`"` + strings.Repeat("x", eventPayloadCapBytes) + `"`)
+	h.events[2] = []EventRecord{{ID: "old", Name: "e", ReceivedAt: clk.now().Add(-recordRetention - time.Minute)}}
+	h.eventsVer++
+
+	path := filepath.Join(t.TempDir(), "events.json.gz")
+	if _, err := h.SaveEvents(path); err != nil {
+		t.Fatal(err)
+	}
+
+	h2 := New(clk.now)
+	n, err := h2.LoadEvents(path)
+	if err != nil || n != 1 {
+		t.Fatalf("LoadEvents = %d, %v; want 1 (stale client skipped), nil", n, err)
+	}
+	ring := h2.Events(1)
+	if len(ring) != eventRingSize {
+		t.Fatalf("restored ring has %d events, want %d", len(ring), eventRingSize)
+	}
+	last := ring[len(ring)-1]
+	if last.Payload != nil || !last.Truncated || last.ClientID != 1 {
+		t.Fatalf("oversized payload not dropped / client id not set: %+v", last)
+	}
+	if h2.Events(2) != nil {
+		t.Fatal("stale client restored")
+	}
+}
+
+func TestSaveEventsAfterPruneRewrites(t *testing.T) {
+	clk := &fakeClock{t: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)}
+	h := New(clk.now)
+	h.RecordEvent(EventRecord{ClientID: 3, Name: "e", ReceivedAt: clk.now()})
+	path := filepath.Join(t.TempDir(), "events.json.gz")
+	if _, err := h.SaveEvents(path); err != nil {
+		t.Fatal(err)
+	}
+	clk.add(recordRetention + time.Minute)
+	h.Prune()
+	if wrote, err := h.SaveEvents(path); err != nil || !wrote {
+		t.Fatalf("SaveEvents after Prune = %v, %v; want true, nil", wrote, err)
+	}
+	if n, _ := New(clk.now).LoadEvents(path); n != 0 {
+		t.Fatalf("pruned client came back from the snapshot (%d clients)", n)
+	}
 }
