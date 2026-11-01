@@ -60,6 +60,19 @@ type DownloadQueueConfig struct {
 	Timeout time.Duration
 }
 
+// EventsArchiveConfig controls the SQL dump internal/eventprune uploads
+// before deleting expired updater_events rows. S3 is a bucket of its own,
+// but every S3_ARCHIVE_* left empty falls back to the API file bucket's
+// value: setting only S3_ARCHIVE_BUCKET puts the archive in another bucket
+// of the same account, setting nothing puts it in the API file bucket.
+type EventsArchiveConfig struct {
+	Enabled bool
+	// Prefix is the folder inside the bucket, without leading or trailing
+	// slashes.
+	Prefix string
+	S3     S3BucketConfig
+}
+
 // ClientEventsSnapshotConfig controls the file internal/clienthub saves its
 // per-machine event rings to, so they survive a restart. Empty Path leaves
 // them in memory only.
@@ -111,6 +124,7 @@ type Config struct {
 	StatsStreamTickInterval time.Duration
 	StatsCacheTTL           time.Duration
 	EventsRetentionDays     int
+	EventsArchive           EventsArchiveConfig
 	ClientEventsSnapshot    ClientEventsSnapshotConfig
 	UseS3APIFileStorage     bool
 	UseS3UpdatesStorage     bool
@@ -276,6 +290,21 @@ func load() *Config {
 			BucketName:      os.Getenv("S3_UPDATES_BUCKET"),
 			Region:          envString("S3_UPDATES_REGION", "auto"),
 			Endpoint:        os.Getenv("S3_UPDATES_ENDPOINT"),
+		},
+		// EventsArchive dumps every pruned updater_events batch to S3 as SQL
+		// before deleting it. Off by default: with it on and no reachable
+		// bucket, pruning stops rather than drop unarchived rows.
+		EventsArchive: EventsArchiveConfig{
+			Enabled: strings.ToLower(strings.TrimSpace(os.Getenv("EVENTS_ARCHIVE_ENABLED"))) == "true",
+			Prefix:  strings.Trim(envString("EVENTS_ARCHIVE_PREFIX", "emly-api-files/archive/updater_events"), "/"),
+			S3: S3BucketConfig{
+				AccountID:       envString("S3_ARCHIVE_ACCOUNT_ID", os.Getenv("S3_API_FILE_ACCOUNT_ID")),
+				AccessKeyID:     envString("S3_ARCHIVE_ACCESS_KEY_ID", os.Getenv("S3_API_FILE_ACCESS_KEY_ID")),
+				SecretAccessKey: envString("S3_ARCHIVE_SECRET_ACCESS_KEY", os.Getenv("S3_API_FILE_SECRET_ACCESS_KEY")),
+				BucketName:      envString("S3_ARCHIVE_BUCKET", os.Getenv("S3_API_FILE_BUCKET")),
+				Region:          envString("S3_ARCHIVE_REGION", envString("S3_API_FILE_REGION", "auto")),
+				Endpoint:        envString("S3_ARCHIVE_ENDPOINT", os.Getenv("S3_API_FILE_ENDPOINT")),
+			},
 		},
 		// DownloadQueue caps concurrent installer downloads (EMLy app and
 		// Updater); a download past the cap gets 429 + Retry-After.

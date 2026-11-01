@@ -1410,6 +1410,37 @@ Cosa si perde cancellando: solo la cronologia per-evento di
 `GET /v2/stats/clients/{id}` oltre la finestra. Totali e grafici vengono dal
 rollup, che non viene mai potato — la storia aggregata resta per sempre.
 
+**Archivio su S3 prima di cancellare (`EVENTS_ARCHIVE_ENABLED=true`).** Con
+l'archivio attivo, ogni blocco di righe da cancellare viene prima letto e
+scritto come script SQL compresso con gzip su S3, sotto
+`<EVENTS_ARCHIVE_PREFIX>/AAAA/MM/GG/updater_events_<id min>-<id max>.sql.gz`
+(la data e' quella della riga piu' vecchia del blocco; il prefisso di default
+e' `emly-api-files/archive/updater_events`).
+
+Il bucket e' un terzo bucket indipendente (`S3_ARCHIVE_*`), ma ogni variabile
+lasciata vuota eredita il valore corrispondente di `S3_API_FILE_*` — come un
+`{ ...apiFileConfig, ...archiveConfig }` in JavaScript. Quindi: nessuna
+variabile = bucket dei file API; solo `S3_ARCHIVE_BUCKET` = altro bucket dello
+stesso account; tutte = un bucket anche su un altro provider. Se la config
+risultante coincide con quella dei file API, `main.go` riusa la connessione
+gia' aperta invece di crearne una seconda. E' lo stesso risultato
+di un `mysqldump --where=...` mirato, fatto dall'API invece che da un cron.
+L'ordine e' quello che conta: **prima l'upload, poi la `DELETE` di esattamente
+quelle righe** (`WHERE id BETWEEN min AND max`). Se il bucket non risponde la
+`DELETE` non parte, le righe restano e il prossimo giro orario riprova — un
+po' come una transazione che fa rollback se l'ultimo passo fallisce. Se
+l'archivio e' attivo ma il bucket d'archivio non e' configurato (o non era
+raggiungibile all'avvio), la pulizia **si sospende del tutto** con una riga di errore nel
+log: meglio una tabella che cresce che dati persi senza archivio.
+
+Per ripristinare un file basta `zcat file.sql.gz | mysql emly`. Lo script
+imposta `SET time_zone = '+00:00'` (i valori sono scritti in UTC) e usa
+`INSERT IGNORE` a gruppi di 500 righe: una riga gia' presente, o di una
+macchina nel frattempo cancellata (la FK verso `updater_clients` fallirebbe),
+viene saltata invece di interrompere tutto il file. Ripristinare righe vecchie
+non rifa' i grafici: il rollup non e' mai stato toccato, quindi non c'e'
+niente da ricalcolare.
+
 **Cache come seconda difesa.** `GET /v2/stats/summary` e ora anche
 `GET /v2/stats/events` restano dietro il `ttlCache` (`STATS_CACHE_TTL`,
 default 30s). Con il rollup davanti non e' piu' indispensabile, ma toglie
