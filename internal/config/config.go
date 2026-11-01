@@ -60,6 +60,14 @@ type DownloadQueueConfig struct {
 	Timeout time.Duration
 }
 
+// ClientEventsSnapshotConfig controls the file internal/clienthub saves its
+// per-machine event rings to, so they survive a restart. Empty Path leaves
+// them in memory only.
+type ClientEventsSnapshotConfig struct {
+	Path     string
+	Interval time.Duration
+}
+
 // OIDCConfig is the single sign-on (Keycloak or any OIDC provider) setup. The
 // dashboard runs the browser flow and hands the resulting ID token to
 // POST /v2/admin/auth/oidc; the API only verifies it, so it needs no client
@@ -103,6 +111,7 @@ type Config struct {
 	StatsStreamTickInterval time.Duration
 	StatsCacheTTL           time.Duration
 	EventsRetentionDays     int
+	ClientEventsSnapshot    ClientEventsSnapshotConfig
 	UseS3APIFileStorage     bool
 	UseS3UpdatesStorage     bool
 	RateLimit               RateLimitConfig
@@ -239,6 +248,13 @@ func load() *Config {
 		// 0 keeps everything, the same way LOG_RETENTION_DAYS=0 does - and the
 		// same way this table behaved before pruning existed.
 		EventsRetentionDays: envInt("EVENTS_RETENTION_DAYS", 30),
+		// ClientEventsSnapshot is where the client ws event rings are saved
+		// (gzip'd JSON, rewritten atomically). Interval is how often a
+		// changed hub is written; a final save also runs at shutdown.
+		ClientEventsSnapshot: ClientEventsSnapshotConfig{
+			Path:     strings.TrimSpace(os.Getenv("CLIENT_EVENTS_SNAPSHOT_PATH")),
+			Interval: envDuration("CLIENT_EVENTS_SNAPSHOT_INTERVAL", time.Minute),
+		},
 		UseS3APIFileStorage: strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_API_FILE_STORAGE"))) == "true",
 		UseS3UpdatesStorage: strings.ToLower(strings.TrimSpace(os.Getenv("USE_S3_UPDATES_STORAGE"))) == "true",
 		Otel: OtelConfig{
