@@ -48,13 +48,20 @@ func RegisterAll(r chi.Router, db *sqlx.DB, apiFileS3conn, updatesS3conn *storag
 		}
 	})
 
-	r.Mount("/v1", v1.NewRouter(db, apiFileS3conn))
+	// V1_ENABLED=false unmounts v1 and its root-level alias together: both
+	// are past v1.SunsetDate, and chi answers 404 for anything unmounted.
+	v1Enabled := config.Load().V1Enabled
+	if v1Enabled {
+		r.Mount("/v1", v1.NewRouter(db, apiFileS3conn))
+	}
 	r.Mount("/v2", v2.NewRouter(db, apiFileS3conn, updatesS3conn, configMirror, statsHub, presence, clients, bans, downloadQueue, products))
 	// Redirect /health to /v1/health
 	r.Get("/health", health.Health(db))
 
 	// Legacy compatibility: expose bug-report creation also under /api/bug-reports.
-	r.Post("/api/bug-reports", registerBugReports(r, db, dbName, apiFileS3conn))
+	if v1Enabled {
+		r.Post("/api/bug-reports", registerBugReports(r, db, dbName, apiFileS3conn))
+	}
 
 }
 

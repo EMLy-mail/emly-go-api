@@ -187,6 +187,9 @@ PORT=8080
 DB_DSN=root:secret@tcp(127.0.0.1:3306)/emly?parseTime=true&loc=UTC
 DATABASE_NAME=emly
 
+# API v1 deprecata: false la spegne (/v1 e POST /api/bug-reports -> 404)
+V1_ENABLED=true
+
 # Chiavi di autenticazione
 API_KEY=la-tua-api-key
 ADMIN_KEY=la-tua-admin-key

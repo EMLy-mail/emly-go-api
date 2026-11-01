@@ -114,7 +114,7 @@ risposta `X-Server` e `X-Powered-By`.
 |--------|---------------------|------|---------|
 | `GET`  | `/`                 | `—`  | Ping. Risponde con il testo `emly-api-go`. |
 | `GET`  | `/health`           | `—`  | Stato del servizio. `{"status":"ok","db":"ok"}`; `503` con `"db":"error"` se il ping MySQL (timeout 3s) fallisce. |
-| `POST` | `/api/bug-reports`  | `API` | Alias legacy della creazione bug report v1. Stesso handler di `POST /v1/api/bug-reports/`. Deprecato insieme a v1: emette lo stesso warning, pur essendo montato fuori dal router v1. |
+| `POST` | `/api/bug-reports`  | `API` | Alias legacy della creazione bug report v1. Stesso handler di `POST /v1/api/bug-reports/`. Deprecato insieme a v1: emette lo stesso warning, pur essendo montato fuori dal router v1. Con `V1_ENABLED=false` non viene montato (`404`). |
 
 ---
 
@@ -136,6 +136,11 @@ risposta `X-Server` e `X-Powered-By`.
 > Ogni route v1 ha un equivalente v2. Le uniche differenze sono il prefisso, il
 > plurale in `bug-reports` (in v2 è singolare) e il rate limit sul gruppo di
 > auth admin. La costante è `v1.SunsetDate` in `internal/routes/v1/v1.go`.
+>
+> **Spegnimento: `V1_ENABLED=false`** nel `.env`. All'avvio `/v1` e l'alias
+> root `POST /api/bug-reports` non vengono montati, e chi li chiama riceve un
+> `404` (come una route che non esiste in Express). Il default è `true`, per
+> non rompere nessuno a un semplice riavvio.
 
 ### 4.1 Health
 

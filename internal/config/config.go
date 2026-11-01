@@ -93,6 +93,7 @@ type Config struct {
 	MaxOpenConns           int
 	MaxIdleConns            int
 	ConnMaxLifetime         int
+	V1Enabled               bool
 	UpdatesEnabled          bool
 	UpdatesS3Prefix         string
 	UpdaterS3Prefix         string
@@ -204,6 +205,11 @@ func load() *Config {
 		MaxOpenConns:    maxOpenConns,
 		MaxIdleConns:    maxIdleConns,
 		ConnMaxLifetime: connMaxLifetime,
+		// V1Enabled keeps /v1 (and the legacy POST /api/bug-reports alias)
+		// mounted. v1 is past its sunset date: setting V1_ENABLED=false
+		// unmounts it, so its callers get a 404 instead of a deprecation
+		// warning in the log.
+		V1Enabled:       strings.ToLower(strings.TrimSpace(envString("V1_ENABLED", "true"))) == "true",
 		UpdatesEnabled:  strings.ToLower(strings.TrimSpace(os.Getenv("UPDATES_ENABLED"))) == "true",
 		UpdatesS3Prefix: strings.Trim(os.Getenv("S3_UPDATES_PREFIX"), "/"),
 		UpdaterS3Prefix: strings.Trim(envString("S3_UPDATER_PREFIX", "updater"), "/"),
