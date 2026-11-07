@@ -275,6 +275,14 @@
       ]
     }
     ,{
+      "id": "30_updater_client_ws_events",
+      "sql_file": "30_updater_client_ws_events.sql",
+      "description": "Create updater_client_ws_events (history of the events machines send on GET /v2/client/ws, pruned and optionally archived by internal/eventprune).",
+      "conditions": [
+        { "type": "table_not_exists", "table": "updater_client_ws_events" }
+      ]
+    }
+    ,{
       "id": "21_user_oidc",
       "sql_file": "21_user_oidc.sql",
       "description": "Add the owner role plus auth_provider/external_id columns to user so accounts created by OIDC single sign-on can be told apart from local ones.",

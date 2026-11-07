@@ -120,7 +120,7 @@ emly-api-go/
     ├── presencehub/                 # registro di chi e' online adesso
     ├── clientproto/                 # formato sul filo di GET /v2/client/ws v2 (senza HTTP ne' DB)
     ├── clienthub/                   # stato in memoria del protocollo v2: sessioni, comandi, eventi
-    ├── eventprune/                  # retention delle righe grezze di updater_events
+    ├── eventprune/                  # retention delle righe grezze di updater_events e updater_client_ws_events
     ├── logfile/                     # file di log giornalieri con retention
     ├── storage/                     # client S3 (due bucket indipendenti)
     ├── telemetry/                   # setup OpenTelemetry
@@ -874,6 +874,7 @@ schema: aggiungere un prodotto e' una riga in `products`, non una migration.
 |              | `updater_events`          | `internal/updaterclient`     | `updater_clients` (cascade)      |
 |              | `updater_event_hourly`    | `internal/updaterclient`     | — (mai potata, mai cancellata)   |
 |              | `updater_client_logs`     | `internal/clientlogs`        | — (niente FK apposta: una cascade lascerebbe orfani i file nel bucket) |
+|              | `updater_client_ws_events` | `internal/clientws`         | `updater_clients` (cascade)      |
 | Config       | `remote_config_revisions` | `internal/configapi`         | —                                |
 | Operazioni   | `bans`                    | `internal/bans`              | —                                |
 | Bug report   | `bug_reports`             | `internal/bugreports`        | —                                |
@@ -881,9 +882,31 @@ schema: aggiungere un prodotto e' una riga in `products`, non una migration.
 
 `internal/stats` legge le tabelle della flotta ma non le possiede: l'unica
 scrittura che fa (`DELETE /v2/stats/clients/{id}`) cancella eventi e
-macchina in una transazione. Gli eventi del canale `GET /v2/client/ws` non
-sono qui: stanno in memoria in `internal/clienthub` e, se configurato, in un
-file (`CLIENT_EVENTS_SNAPSHOT_PATH`).
+macchina in una transazione (le righe di `updater_client_ws_events` se ne
+vanno da sole con la cascade). Gli eventi del canale `GET /v2/client/ws`
+vivono in due posti: gli ultimi 50 per macchina in memoria in
+`internal/clienthub` (e, se configurato, in un file,
+`CLIENT_EVENTS_SNAPSHOT_PATH`), e lo storico in `updater_client_ws_events`
+(migration 30).
+
+**Perche' una tabella a parte e non `updater_events`.** `updater_events` e'
+una riga stretta e a colonne fisse per ogni manifest check/download, e ogni
+insert incrementa il rollup `updater_event_hourly` che alimenta i grafici.
+Gli eventi WS sono pochi (qualche riga al giorno per macchina), hanno un
+payload JSON che cambia da evento a evento e sono storia della singola
+macchina, non statistiche di flotta: mescolarli vorrebbe dire una colonna
+JSON vuota nel 90% delle righe e eventi che finiscono nei grafici
+sbagliati. Non tutto viene salvato (`internal/clientws/history.go`): solo i
+nomi noti di §8 del protocollo, **mai `machine.info`** (e' uno stato, gia'
+scritto in `updater_clients`, e da solo peserebbe piu' di tutto il resto) e
+`session.changed` solo con `changed: true` (i lock/unlock dello stesso
+utente sono quasi tutto il traffico e nessuna storia). Un payload oltre i 16
+KiB viene scartato tenendo la riga (`payload_dropped = 1`). `event_id` e'
+l'ULID dell'envelope con un indice `UNIQUE`: un evento rimandato dal buffer
+del client finisce in tabella una volta sola (`INSERT IGNORE`, come un
+`INSERT ... ON CONFLICT DO NOTHING` di Postgres). La pulizia e' quella di
+`internal/eventprune` qui sotto, con la propria retention
+(`CLIENT_WS_EVENTS_RETENTION_DAYS`).
 
 `rate_limit_hwid` stava in `init.sql` ma nessun codice la usava: la toglie la
 migration `29_drop_rate_limit_hwid`.
@@ -1396,7 +1419,14 @@ loop, perche' `statshub.Publish` scarta un evento invece di bloccarsi su un
 buffer pieno. Ecco perche' le query stanno nel ramo del ticker e non in quello
 della ricezione.
 
-**3. Retention — `internal/eventprune`.** Un loop in background (come
+**3. Retention — `internal/eventprune`.** Lo stesso codice gira due volte,
+un loop per tabella (`Options.Table`): `updater_events` con
+`EVENTS_RETENTION_DAYS` e `updater_client_ws_events` con
+`CLIENT_WS_EVENTS_RETENTION_DAYS`. Il nome della tabella finisce dentro la
+query, quindi puo' essere solo una delle due costanti
+(`TableUpdaterEvents`/`TableClientWSEvents`): qualsiasi altro valore viene
+rifiutato prima di toccare il database. Quello che segue vale per entrambe,
+descritto per `updater_events`. Un loop in background (come
 `internal/configmirror`, e con la stessa logica di retention di
 `internal/logfile`) che ogni ora cancella le righe grezze piu' vecchie di
 `EVENTS_RETENTION_DAYS` (default 30, `0` disattiva). Cancella **per chiave
@@ -1415,7 +1445,10 @@ l'archivio attivo, ogni blocco di righe da cancellare viene prima letto e
 scritto come script SQL compresso con gzip su S3, sotto
 `<EVENTS_ARCHIVE_PREFIX>/AAAA/MM/GG/updater_events_<id min>-<id max>.sql.gz`
 (la data e' quella della riga piu' vecchia del blocco; il prefisso di default
-e' `emly-api-files/archive/updater_events`).
+e' `emly-api-files/archive/updater_events`). Le righe di
+`updater_client_ws_events` vanno nello stesso bucket, con lo stesso
+interruttore, sotto `<CLIENT_WS_EVENTS_ARCHIVE_PREFIX>/AAAA/MM/GG/updater_client_ws_events_<id min>-<id max>.sql.gz`
+(default `emly-api-files/archive/updater_client_ws_events`).
 
 Il bucket e' un terzo bucket indipendente (`S3_ARCHIVE_*`), ma ogni variabile
 lasciata vuota eredita il valore corrispondente di `S3_API_FILE_*` — come un

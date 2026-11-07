@@ -61,16 +61,19 @@ type DownloadQueueConfig struct {
 }
 
 // EventsArchiveConfig controls the SQL dump internal/eventprune uploads
-// before deleting expired updater_events rows. S3 is a bucket of its own,
+// before deleting expired updater_events and updater_client_ws_events rows
+// (one switch and one bucket for both, a folder each). S3 is a bucket of its own,
 // but every S3_ARCHIVE_* left empty falls back to the API file bucket's
 // value: setting only S3_ARCHIVE_BUCKET puts the archive in another bucket
 // of the same account, setting nothing puts it in the API file bucket.
 type EventsArchiveConfig struct {
 	Enabled bool
-	// Prefix is the folder inside the bucket, without leading or trailing
-	// slashes.
+	// Prefix is the updater_events folder inside the bucket, without
+	// leading or trailing slashes.
 	Prefix string
-	S3     S3BucketConfig
+	// ClientWSPrefix is the updater_client_ws_events folder, same form.
+	ClientWSPrefix string
+	S3             S3BucketConfig
 }
 
 // ClientEventsSnapshotConfig controls the file internal/clienthub saves its
@@ -111,7 +114,7 @@ type Config struct {
 	DashboardKey            string
 	LogLevel                string
 	LogFile                 LogFileConfig
-	MaxOpenConns           int
+	MaxOpenConns            int
 	MaxIdleConns            int
 	ConnMaxLifetime         int
 	V1Enabled               bool
@@ -124,6 +127,7 @@ type Config struct {
 	StatsStreamTickInterval time.Duration
 	StatsCacheTTL           time.Duration
 	EventsRetentionDays     int
+	ClientWSEventsRetention int
 	EventsArchive           EventsArchiveConfig
 	ClientEventsSnapshot    ClientEventsSnapshotConfig
 	UseS3APIFileStorage     bool
@@ -204,12 +208,12 @@ func load() *Config {
 	}
 
 	return &Config{
-		Port:            port,
-		DSN:             os.Getenv("DB_DSN"),
-		Database:        dbName,
-		APIKey:          apiKey,
-		AdminKey:        adminKey,
-		DashboardKey:    os.Getenv("DASHBOARD_KEY"),
+		Port:         port,
+		DSN:          os.Getenv("DB_DSN"),
+		Database:     dbName,
+		APIKey:       apiKey,
+		AdminKey:     adminKey,
+		DashboardKey: os.Getenv("DASHBOARD_KEY"),
 		OIDC: OIDCConfig{
 			Issuer:          strings.TrimRight(strings.TrimSpace(os.Getenv("OIDC_ISSUER")), "/"),
 			ClientID:        strings.TrimSpace(os.Getenv("OIDC_CLIENT_ID")),
@@ -219,7 +223,7 @@ func load() *Config {
 			UserGroups:      envList("OIDC_USER_GROUPS"),
 			SessionDuration: envDuration("OIDC_SESSION_DURATION", 7*24*time.Hour),
 		},
-		LogLevel:        strings.ToLower(strings.TrimSpace(envString("LOG_LEVEL", "info"))),
+		LogLevel: strings.ToLower(strings.TrimSpace(envString("LOG_LEVEL", "info"))),
 		LogFile: LogFileConfig{
 			Enabled:       strings.ToLower(strings.TrimSpace(envString("LOG_FILE_ENABLED", "true"))) == "true",
 			Dir:           envString("LOG_DIR", "logs"),
@@ -262,6 +266,12 @@ func load() *Config {
 		// 0 keeps everything, the same way LOG_RETENTION_DAYS=0 does - and the
 		// same way this table behaved before pruning existed.
 		EventsRetentionDays: envInt("EVENTS_RETENTION_DAYS", 30),
+		// ClientWSEventsRetention is the same, in days, for
+		// updater_client_ws_events: the stored history of the events machines
+		// send on GET /v2/client/ws. Separate from EVENTS_RETENTION_DAYS
+		// because the two tables differ by an order of magnitude in volume
+		// and in what they are kept for. 0 keeps everything.
+		ClientWSEventsRetention: envInt("CLIENT_WS_EVENTS_RETENTION_DAYS", 30),
 		// ClientEventsSnapshot is where the client ws event rings are saved
 		// (gzip'd JSON, rewritten atomically). Interval is how often a
 		// changed hub is written; a final save also runs at shutdown.
@@ -295,8 +305,9 @@ func load() *Config {
 		// before deleting it. Off by default: with it on and no reachable
 		// bucket, pruning stops rather than drop unarchived rows.
 		EventsArchive: EventsArchiveConfig{
-			Enabled: strings.ToLower(strings.TrimSpace(os.Getenv("EVENTS_ARCHIVE_ENABLED"))) == "true",
-			Prefix:  strings.Trim(envString("EVENTS_ARCHIVE_PREFIX", "emly-api-files/archive/updater_events"), "/"),
+			Enabled:        strings.ToLower(strings.TrimSpace(os.Getenv("EVENTS_ARCHIVE_ENABLED"))) == "true",
+			Prefix:         strings.Trim(envString("EVENTS_ARCHIVE_PREFIX", "emly-api-files/archive/updater_events"), "/"),
+			ClientWSPrefix: strings.Trim(envString("CLIENT_WS_EVENTS_ARCHIVE_PREFIX", "emly-api-files/archive/updater_client_ws_events"), "/"),
 			S3: S3BucketConfig{
 				AccountID:       envString("S3_ARCHIVE_ACCOUNT_ID", os.Getenv("S3_API_FILE_ACCOUNT_ID")),
 				AccessKeyID:     envString("S3_ARCHIVE_ACCESS_KEY_ID", os.Getenv("S3_API_FILE_ACCESS_KEY_ID")),

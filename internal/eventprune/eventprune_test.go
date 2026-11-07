@@ -109,14 +109,39 @@ func TestWriteDumpSplitsInserts(t *testing.T) {
 
 func TestArchiveKey(t *testing.T) {
 	day := time.Date(2026, 10, 2, 23, 0, 0, 0, time.UTC)
-	cases := map[string]string{
-		"":                 DefaultArchivePrefix + "/2026/10/02/updater_events_1-5000.sql.gz",
-		"backups/events":   "backups/events/2026/10/02/updater_events_1-5000.sql.gz",
-		"/backups/events/": "backups/events/2026/10/02/updater_events_1-5000.sql.gz",
+	cases := []struct{ table, prefix, want string }{
+		{TableUpdaterEvents, "", DefaultArchivePrefix + "/2026/10/02/updater_events_1-5000.sql.gz"},
+		{TableUpdaterEvents, "backups/events", "backups/events/2026/10/02/updater_events_1-5000.sql.gz"},
+		{TableUpdaterEvents, "/backups/events/", "backups/events/2026/10/02/updater_events_1-5000.sql.gz"},
+		{TableClientWSEvents, "", "emly-api-files/archive/updater_client_ws_events/2026/10/02/updater_client_ws_events_1-5000.sql.gz"},
+		{TableClientWSEvents, "ws/", "ws/2026/10/02/updater_client_ws_events_1-5000.sql.gz"},
 	}
-	for prefix, want := range cases {
-		if got := archiveKey(prefix, day, 1, 5000); got != want {
-			t.Errorf("archiveKey(%q) = %s, want %s", prefix, got, want)
+	for _, c := range cases {
+		if got := archiveKey(c.table, c.prefix, day, 1, 5000); got != c.want {
+			t.Errorf("archiveKey(%q, %q) = %s, want %s", c.table, c.prefix, got, c.want)
 		}
+	}
+}
+
+// TestStartRefusesUnknownTable pins the guard that keeps the table name,
+// which is interpolated into SQL, to the two constants: anything else must
+// return before reaching the database (nil DB would panic).
+func TestStartRefusesUnknownTable(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Start(context.Background(), nil, Options{Table: "users; DROP TABLE user", Retention: 24 * time.Hour})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not return for an unknown table")
+	}
+}
+
+func TestRunRefusesUnknownTable(t *testing.T) {
+	if _, err := Run(context.Background(), nil, "bug_reports", 24*time.Hour, nil, ""); err == nil {
+		t.Fatal("Run accepted a table outside the allowlist")
 	}
 }

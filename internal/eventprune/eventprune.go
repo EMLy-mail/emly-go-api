@@ -1,4 +1,7 @@
-// Package eventprune keeps updater_events bounded. The table takes one row
+// Package eventprune keeps the event tables bounded: updater_events and
+// updater_client_ws_events (Options.Table), one loop each, same rules.
+//
+// updater_events is the large one. The table takes one row
 // per manifest check per client per cycle, which on a few-hundred-machine
 // fleet is tens of thousands of rows a day and no natural ceiling - it had
 // reached half a million rows with nothing ever deleting from it.
@@ -29,6 +32,7 @@ package eventprune
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -56,6 +60,32 @@ const (
 	batchPause = 200 * time.Millisecond
 )
 
+// The tables a loop may prune. The name is interpolated into the queries, so
+// it can only ever be one of these constants - Start refuses anything else.
+const (
+	TableUpdaterEvents  = "updater_events"
+	TableClientWSEvents = "updater_client_ws_events"
+)
+
+var prunable = map[string]bool{TableUpdaterEvents: true, TableClientWSEvents: true}
+
+// Options configures Start. Archive asks for every deleted row to be dumped
+// to Store first; Archive with a nil Store suspends pruning altogether rather
+// than deleting unarchived rows (the bucket was unconfigured or unreachable at
+// startup, and storage connectors are only built then).
+type Options struct {
+	// Table is the table to prune; empty means TableUpdaterEvents. Both
+	// tables share the shape this needs: an auto-increment id handed out in
+	// insertion order and a created_at.
+	Table     string
+	Retention time.Duration
+	Archive   bool
+	Store     Archiver
+	// Prefix is the folder inside Store; empty means DefaultArchivePrefix
+	// for updater_events, archive/<table> next to it for any other table.
+	Prefix string
+}
+
 // Start runs the prune loop until ctx is done, pruning rows whose created_at
 // is older than retention. A non-positive retention disables pruning
 // entirely and Start returns immediately, the same escape hatch
@@ -64,44 +94,40 @@ const (
 // The first pass runs immediately rather than after the first tick: a restart
 // is the moment an operator has just changed the setting and wants to see it
 // take effect.
-// Options configures Start. Archive asks for every deleted row to be dumped
-// to Store first; Archive with a nil Store suspends pruning altogether rather
-// than deleting unarchived rows (the bucket was unconfigured or unreachable at
-// startup, and storage connectors are only built then).
-type Options struct {
-	Retention time.Duration
-	Archive   bool
-	Store     Archiver
-	// Prefix is the folder inside Store; empty means DefaultArchivePrefix.
-	Prefix string
-}
-
 func Start(ctx context.Context, db *sqlx.DB, opts Options) {
+	table := opts.Table
+	if table == "" {
+		table = TableUpdaterEvents
+	}
+	if !prunable[table] {
+		slog.Error("event prune: refusing unknown table", "table", table)
+		return
+	}
 	retention := opts.Retention
 	if retention <= 0 {
-		slog.Info("event prune: disabled", "retention", retention)
+		slog.Info("event prune: disabled", "table", table, "retention", retention)
 		return
 	}
 	var store Archiver
 	if opts.Archive {
 		if opts.Store == nil {
-			slog.Error("event prune: suspended, EVENTS_ARCHIVE_ENABLED is set but the archive bucket is not configured or unreachable; no rows will be deleted")
+			slog.Error("event prune: suspended, EVENTS_ARCHIVE_ENABLED is set but the archive bucket is not configured or unreachable; no rows will be deleted", "table", table)
 			return
 		}
 		store = opts.Store
 	}
 
-	slog.Info("event prune: started", "retention", retention, "interval", Interval, "archive", store != nil, "archive_prefix", opts.Prefix)
+	slog.Info("event prune: started", "table", table, "retention", retention, "interval", Interval, "archive", store != nil, "archive_prefix", opts.Prefix)
 
 	t := time.NewTicker(Interval)
 	defer t.Stop()
 
 	for {
-		if _, err := Run(ctx, db, retention, store, opts.Prefix); err != nil {
+		if _, err := Run(ctx, db, table, retention, store, opts.Prefix); err != nil {
 			// A failed prune is not an outage: the rows simply stay another
 			// hour. Logged at warn so a persistent failure is visible before
 			// the table grows back.
-			slog.WarnContext(ctx, "event prune: failed", "error", err)
+			slog.WarnContext(ctx, "event prune: failed", "table", table, "error", err)
 		}
 
 		select {
@@ -112,7 +138,8 @@ func Start(ctx context.Context, db *sqlx.DB, opts Options) {
 	}
 }
 
-// Run performs one prune pass and reports how many rows it removed. A
+// Run performs one prune pass over table (one of the Table* constants) and
+// reports how many rows it removed. A
 // non-nil store archives each batch under prefix before deleting it
 // (archiveBatch).
 //
@@ -123,7 +150,10 @@ func Start(ctx context.Context, db *sqlx.DB, opts Options) {
 // Instead one query locates the boundary id and every batch is a primary-key
 // range delete, which is also the cheapest physical order for InnoDB to
 // remove rows in.
-func Run(ctx context.Context, db *sqlx.DB, retention time.Duration, store Archiver, prefix string) (int64, error) {
+func Run(ctx context.Context, db *sqlx.DB, table string, retention time.Duration, store Archiver, prefix string) (int64, error) {
+	if !prunable[table] {
+		return 0, fmt.Errorf("eventprune: unknown table %q", table)
+	}
 	cutoff := time.Now().UTC().Add(-retention)
 
 	// The oldest row still inside the window, found by walking the primary
@@ -137,11 +167,11 @@ func Run(ctx context.Context, db *sqlx.DB, retention time.Duration, store Archiv
 	// dropping one row a few milliseconds either side of a boundary measured
 	// in days. Not worth a stricter query.
 	var firstKeptID int64
-	err := db.GetContext(ctx, &firstKeptID,
+	err := db.GetContext(ctx, &firstKeptID, fmt.Sprintf(
 		`SELECT COALESCE(
-		     (SELECT id FROM updater_events WHERE created_at >= ? ORDER BY id ASC LIMIT 1),
-		     (SELECT COALESCE(MAX(id), 0) + 1 FROM updater_events)
-		 )`, cutoff)
+		     (SELECT id FROM %[1]s WHERE created_at >= ? ORDER BY id ASC LIMIT 1),
+		     (SELECT COALESCE(MAX(id), 0) + 1 FROM %[1]s)
+		 )`, table), cutoff)
 	if err != nil {
 		return 0, err
 	}
@@ -151,7 +181,7 @@ func Run(ctx context.Context, db *sqlx.DB, retention time.Duration, store Archiv
 
 	var total int64
 	for {
-		n, err := deleteBatch(ctx, db, store, prefix, firstKeptID)
+		n, err := deleteBatch(ctx, db, table, store, prefix, firstKeptID)
 		// Whatever earlier batches committed stays deleted; report it
 		// alongside the error so a partial pass is legible in the log.
 		total += n
@@ -171,19 +201,19 @@ func Run(ctx context.Context, db *sqlx.DB, retention time.Duration, store Archiv
 
 	if total > 0 {
 		slog.InfoContext(ctx, "event prune: removed expired events",
-			"rows", total, "older_than", cutoff.Format(time.RFC3339), "retention", retention, "archived", store != nil)
+			"table", table, "rows", total, "older_than", cutoff.Format(time.RFC3339), "retention", retention, "archived", store != nil)
 	}
 	return total, nil
 }
 
 // deleteBatch removes up to batchSize rows below firstKeptID, archiving them
 // first when store is set.
-func deleteBatch(ctx context.Context, db *sqlx.DB, store Archiver, prefix string, firstKeptID int64) (int64, error) {
+func deleteBatch(ctx context.Context, db *sqlx.DB, table string, store Archiver, prefix string, firstKeptID int64) (int64, error) {
 	if store != nil {
-		return archiveBatch(ctx, db, store, prefix, firstKeptID)
+		return archiveBatch(ctx, db, table, store, prefix, firstKeptID)
 	}
 	res, err := db.ExecContext(ctx,
-		`DELETE FROM updater_events WHERE id < ? LIMIT ?`, firstKeptID, batchSize)
+		fmt.Sprintf(`DELETE FROM %s WHERE id < ? LIMIT ?`, table), firstKeptID, batchSize)
 	if err != nil {
 		return 0, err
 	}

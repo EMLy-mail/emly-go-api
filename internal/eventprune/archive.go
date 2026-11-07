@@ -16,9 +16,12 @@ import (
 )
 
 const (
-	// DefaultArchivePrefix is the folder used when Options.Prefix is empty,
-	// next to clientlogs' emly-api-files/client-logs.
-	DefaultArchivePrefix = "emly-api-files/archive/updater_events"
+	// DefaultArchivePrefix is the folder used for updater_events when
+	// Options.Prefix is empty, next to clientlogs' emly-api-files/client-logs.
+	// Other tables default to the sibling folder named after them.
+	DefaultArchivePrefix = archiveRoot + "/" + TableUpdaterEvents
+
+	archiveRoot = "emly-api-files/archive"
 
 	// rowsPerInsert bounds one INSERT statement in a dump, so restoring a
 	// file never trips max_allowed_packet however large the batch.
@@ -35,9 +38,9 @@ type Archiver interface {
 // deletes exactly those rows, returning how many it removed (0 = nothing
 // left). The delete only runs once the upload has succeeded: a bucket that is
 // down leaves the rows where they are, for the next hourly pass.
-func archiveBatch(ctx context.Context, db *sqlx.DB, store Archiver, prefix string, firstKeptID int64) (int64, error) {
+func archiveBatch(ctx context.Context, db *sqlx.DB, table string, store Archiver, prefix string, firstKeptID int64) (int64, error) {
 	rows, err := db.QueryxContext(ctx,
-		`SELECT * FROM updater_events WHERE id < ? ORDER BY id ASC LIMIT ?`, firstKeptID, batchSize)
+		fmt.Sprintf(`SELECT * FROM %s WHERE id < ? ORDER BY id ASC LIMIT ?`, table), firstKeptID, batchSize)
 	if err != nil {
 		return 0, err
 	}
@@ -65,7 +68,7 @@ func archiveBatch(ctx context.Context, db *sqlx.DB, store Archiver, prefix strin
 
 	idCol, createdCol := indexOf(cols, "id"), indexOf(cols, "created_at")
 	if idCol < 0 {
-		return 0, fmt.Errorf("updater_events has no id column")
+		return 0, fmt.Errorf("%s has no id column", table)
 	}
 	minID, err := asInt64(data[0][idCol])
 	if err != nil {
@@ -78,7 +81,7 @@ func archiveBatch(ctx context.Context, db *sqlx.DB, store Archiver, prefix strin
 
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
-	if err := writeDump(gz, "updater_events", cols, data, time.Now().UTC()); err != nil {
+	if err := writeDump(gz, table, cols, data, time.Now().UTC()); err != nil {
 		return 0, err
 	}
 	if err := gz.Close(); err != nil {
@@ -93,7 +96,7 @@ func archiveBatch(ctx context.Context, db *sqlx.DB, store Archiver, prefix strin
 			day = t.UTC()
 		}
 	}
-	key := archiveKey(prefix, day, minID, maxID)
+	key := archiveKey(table, prefix, day, minID, maxID)
 	if _, err := store.UploadFile(ctx, key, &buf, "application/gzip", map[string]string{
 		"rows":   strconv.Itoa(len(data)),
 		"min-id": strconv.FormatInt(minID, 10),
@@ -104,7 +107,7 @@ func archiveBatch(ctx context.Context, db *sqlx.DB, store Archiver, prefix strin
 
 	// The range is exactly the rows just dumped: they were read in id order
 	// below firstKeptID, where nothing new is ever inserted.
-	res, err := db.ExecContext(ctx, `DELETE FROM updater_events WHERE id BETWEEN ? AND ?`, minID, maxID)
+	res, err := db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE id BETWEEN ? AND ?`, table), minID, maxID)
 	if err != nil {
 		return 0, err
 	}
@@ -112,14 +115,14 @@ func archiveBatch(ctx context.Context, db *sqlx.DB, store Archiver, prefix strin
 }
 
 // archiveKey is the object name of one dump: <prefix>/YYYY/MM/DD/
-// updater_events_<min id>-<max id>.sql.gz, with an empty prefix meaning
-// DefaultArchivePrefix.
-func archiveKey(prefix string, day time.Time, minID, maxID int64) string {
+// <table>_<min id>-<max id>.sql.gz, with an empty prefix meaning
+// emly-api-files/archive/<table> (DefaultArchivePrefix for updater_events).
+func archiveKey(table, prefix string, day time.Time, minID, maxID int64) string {
 	prefix = strings.Trim(prefix, "/")
 	if prefix == "" {
-		prefix = DefaultArchivePrefix
+		prefix = archiveRoot + "/" + table
 	}
-	return fmt.Sprintf("%s/%s/updater_events_%d-%d.sql.gz", prefix, day.Format("2006/01/02"), minID, maxID)
+	return fmt.Sprintf("%s/%s/%s_%d-%d.sql.gz", prefix, day.Format("2006/01/02"), table, minID, maxID)
 }
 
 // writeDump writes rows as a restorable SQL script. INSERT IGNORE because a

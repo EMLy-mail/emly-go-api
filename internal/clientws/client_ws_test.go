@@ -589,3 +589,88 @@ func TestClientWSServiceStoppedRecordsLastStopAndPresence(t *testing.T) {
 		t.Fatal("UpdateLastStop never called for last_stop")
 	}
 }
+
+// TestShouldStoreWSEvent pins what reaches updater_client_ws_events: known
+// names only, never machine.info (state, not history), and session.changed
+// only when the logged-on user changed.
+func TestShouldStoreWSEvent(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{clientproto.EvtServiceStopped, `{"reason":"shutdown"}`, true},
+		{clientproto.EvtServiceStarted, `{}`, true},
+		{clientproto.EvtMachinePower, `{"state":"suspend"}`, true},
+		{clientproto.EvtUpdateFailed, `{"target":"emly"}`, true},
+		{clientproto.EvtSessionChanged, `{"changed":true}`, true},
+		{clientproto.EvtSessionChanged, `{"changed":false}`, false},
+		{clientproto.EvtSessionChanged, `not json`, false},
+		{clientproto.EvtMachineInfo, `{"hwid":"x"}`, false},
+		{"made.up", `{}`, false},
+	}
+	for _, c := range cases {
+		if got := shouldStore(c.name, json.RawMessage(c.payload)); got != c.want {
+			t.Errorf("shouldStore(%q, %s) = %v, want %v", c.name, c.payload, got, c.want)
+		}
+	}
+}
+
+func TestBuildWSEventRow(t *testing.T) {
+	id := clientproto.NewID()
+	row := buildWSEventRow(7, clientproto.Envelope{ID: id, TS: "2026-10-17T09:12:40.123+02:00"},
+		clientproto.Event{Name: "service.stopped", Payload: json.RawMessage(`{"reason":"manual"}`)})
+	if row.EventID != id || row.ClientID != 7 || row.Name != "service.stopped" || string(row.Payload) != `{"reason":"manual"}` || row.PayloadDropped {
+		t.Fatalf("row = %+v", row)
+	}
+	if row.ClientTS == nil || !row.ClientTS.Equal(time.Date(2026, 10, 17, 7, 12, 40, 123e6, time.UTC)) {
+		t.Fatalf("client ts = %v", row.ClientTS)
+	}
+
+	// A malformed id is replaced, a missing ts is NULL, an oversized
+	// payload is dropped but the row kept.
+	big := json.RawMessage(`{"x":"` + strings.Repeat("a", maxStoredPayload) + `"}`)
+	row = buildWSEventRow(7, clientproto.Envelope{ID: "short"}, clientproto.Event{Name: "update.failed", Payload: big})
+	if len(row.EventID) != 26 || row.EventID == "short" {
+		t.Errorf("malformed id kept: %q", row.EventID)
+	}
+	if row.ClientTS != nil {
+		t.Errorf("client ts = %v, want nil", row.ClientTS)
+	}
+	if row.Payload != nil || !row.PayloadDropped {
+		t.Errorf("oversized payload: dropped=%v len=%d", row.PayloadDropped, len(row.Payload))
+	}
+}
+
+// TestClientWSEventStored drives an event over a real connection and checks
+// it reaches the table's insert, and that a filtered one does not.
+func TestClientWSEventStored(t *testing.T) {
+	stubUpsert(t, 42)
+	stored := make(chan wsEventRow, 4)
+	prev := insertWSEventFn
+	insertWSEventFn = func(_ context.Context, _ *sqlx.DB, row wsEventRow) error {
+		stored <- row
+		return nil
+	}
+	t.Cleanup(func() { insertWSEventFn = prev })
+
+	srv := httptest.NewServer(ClientWS(nil, presencehub.New(time.Second), clienthub.New(nil)))
+	defer srv.Close()
+	c, _ := dialV2(t, srv.URL, []string{"machine.info", "machine.power"})
+	defer c.CloseNow()
+
+	writeJSON(t, c, map[string]any{"type": "event", "id": clientproto.NewID(), "data": map[string]any{
+		"name": "machine.info", "payload": map[string]any{"hwid": "x"}}})
+	id := clientproto.NewID()
+	writeJSON(t, c, map[string]any{"type": "event", "id": id, "data": map[string]any{
+		"name": "machine.power", "payload": map[string]any{"state": "suspend", "at": "2026-10-17T12:30:02Z"}}})
+
+	select {
+	case row := <-stored:
+		if row.EventID != id || row.Name != "machine.power" || row.ClientID != 42 {
+			t.Fatalf("stored %+v, want the machine.power event (machine.info is not stored)", row)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("machine.power never stored")
+	}
+}

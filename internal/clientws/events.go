@@ -24,6 +24,8 @@ var updateLastStopFn = updaterclient.UpdateLastStop
 
 // handleEvent records an event and then applies its side effects. Unknown
 // names are recorded too: the dashboard can show what it cannot interpret.
+// The durable copy in updater_client_ws_events is narrower (storeWSEvent):
+// known names only, no machine.info, no session.changed without a change.
 // The record is written before the side effect runs (not after) so that a
 // caller synchronized on the side effect - updateLoggedUserFn, in
 // particular, which a test observes through a channel - can rely on
@@ -40,6 +42,7 @@ func handleEvent(ctx context.Context, db *sqlx.DB, hub *clienthub.Hub, presence 
 		ID: env.ID, ClientID: clientID, Name: ev.Name, ReceivedAt: timeNow(),
 		ClientTS: env.TS, Payload: ev.Payload,
 	})
+	storeWSEvent(ctx, db, clientID, env, ev)
 
 	switch ev.Name {
 	case clientproto.EvtSessionChanged:

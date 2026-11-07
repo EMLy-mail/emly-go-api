@@ -287,33 +287,46 @@ func main() {
 		}()
 	}
 
-	// Background loop that keeps updater_events from growing without bound
-	// (see internal/eventprune package doc). It only trims raw rows past
-	// EVENTS_RETENTION_DAYS - the updater_event_hourly rollup the dashboard
-	// aggregates read is never pruned - and does nothing at all when that is
-	// 0. Stopped via backgroundCancel like the loops above.
+	// Background loops that keep updater_events and updater_client_ws_events
+	// from growing without bound (see internal/eventprune package doc), one
+	// per table. They only trim raw rows past EVENTS_RETENTION_DAYS /
+	// CLIENT_WS_EVENTS_RETENTION_DAYS - the updater_event_hourly rollup the
+	// dashboard aggregates read is never pruned - and a loop does nothing at
+	// all when its setting is 0. Stopped via backgroundCancel like the loops
+	// above.
 	// With EVENTS_ARCHIVE_ENABLED each batch is dumped as SQL to the archive
-	// bucket before it is deleted. That bucket is the API file one unless an
-	// S3_ARCHIVE_* var says otherwise, in which case it gets its own
-	// connector, built and pinged here like the two above.
-	pruneOpts := eventprune.Options{
-		Retention: time.Duration(cfg.EventsRetentionDays) * 24 * time.Hour,
-		Archive:   cfg.EventsArchive.Enabled,
-		Prefix:    cfg.EventsArchive.Prefix,
-	}
+	// bucket before it is deleted, both tables to the same bucket under their
+	// own folder. That bucket is the API file one unless an S3_ARCHIVE_* var
+	// says otherwise, in which case it gets its own connector, built and
+	// pinged here like the two above.
+	var archiveStore eventprune.Archiver // never a typed nil in the interface
 	if cfg.EventsArchive.Enabled {
 		if cfg.EventsArchive.S3 == cfg.S3APIFile && apiFileS3conn != nil {
-			pruneOpts.Store = apiFileS3conn // never a typed nil in the interface
+			archiveStore = apiFileS3conn
 		} else if conn, err := storage.NewS3Connector(cfg.EventsArchive.S3); err != nil {
 			slog.Error("events archive S3 connector init failed", "bucket", cfg.EventsArchive.S3.BucketName, "err", err)
 		} else if err := conn.Ping(context.Background()); err != nil {
 			slog.Error("events archive S3 unreachable", "bucket", cfg.EventsArchive.S3.BucketName, "err", err)
 		} else {
-			slog.Info("events archive S3 storage connected", "bucket", cfg.EventsArchive.S3.BucketName, "prefix", cfg.EventsArchive.Prefix)
-			pruneOpts.Store = conn
+			slog.Info("events archive S3 storage connected", "bucket", cfg.EventsArchive.S3.BucketName,
+				"prefix", cfg.EventsArchive.Prefix, "client_ws_prefix", cfg.EventsArchive.ClientWSPrefix)
+			archiveStore = conn
 		}
 	}
-	go eventprune.Start(backgroundCtx, db, pruneOpts)
+	go eventprune.Start(backgroundCtx, db, eventprune.Options{
+		Table:     eventprune.TableUpdaterEvents,
+		Retention: time.Duration(cfg.EventsRetentionDays) * 24 * time.Hour,
+		Archive:   cfg.EventsArchive.Enabled,
+		Store:     archiveStore,
+		Prefix:    cfg.EventsArchive.Prefix,
+	})
+	go eventprune.Start(backgroundCtx, db, eventprune.Options{
+		Table:     eventprune.TableClientWSEvents,
+		Retention: time.Duration(cfg.ClientWSEventsRetention) * 24 * time.Hour,
+		Archive:   cfg.EventsArchive.Enabled,
+		Store:     archiveStore,
+		Prefix:    cfg.EventsArchive.ClientWSPrefix,
+	})
 
 	// What log.send_latest brings back is saved off the hub's in-memory
 	// record (internal/clientlogs): to the API file bucket when there is one,
