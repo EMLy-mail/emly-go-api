@@ -3,12 +3,15 @@ package clientws
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 	"unicode"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jmoiron/sqlx"
 
 	"emly-api-go/internal/clienthub"
 	"emly-api-go/internal/clientproto"
@@ -26,10 +29,11 @@ const (
 // mountAdmin mounts the admin half of the client channel on r (already
 // scoped to /v2/client and behind AdminKeyAuth by RegisterV2). Split out so
 // the handler tests can mount it without auth.
-func mountAdmin(r chi.Router, hub *clienthub.Hub) {
+func mountAdmin(r chi.Router, db *sqlx.DB, hub *clienthub.Hub) {
 	r.Post("/{client_id}/commands", IssueCommand(hub))
 	r.Get("/commands/{command_id}", GetCommand(hub))
 	r.Get("/{client_id}/events", ListEvents(hub))
+	r.Get("/{client_id}/events/history", ListEventHistory(db))
 	r.Post("/notify", SendNotify(hub))
 }
 
@@ -142,6 +146,87 @@ func ListEvents(hub *clienthub.Hub) http.HandlerFunc {
 		}
 		response.OK(w, map[string]any{"events": events})
 	}
+}
+
+// ListEventHistory handles GET /v2/client/{client_id}/events/history: the
+// stored events of updater_client_ws_events, newest first, as opposed to the
+// in-memory ring of ListEvents. Query: name, from, to (RFC 3339, on the
+// server's receive time, from inclusive and to exclusive), before (row id
+// cursor, the next_before of the previous page) and limit (1-500, default
+// 100). An unknown machine is an empty list, never 404, like ListEvents.
+func ListEventHistory(db *sqlx.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		clientID, ok := clientIDParam(r)
+		if !ok {
+			response.Error(w, http.StatusBadRequest, "invalid client_id")
+			return
+		}
+		q, msg := parseHistoryQuery(clientID, r.URL.Query())
+		if msg != "" {
+			response.Error(w, http.StatusBadRequest, msg)
+			return
+		}
+		events, err := listWSEventsFn(r.Context(), db, q)
+		if errors.Is(err, errHistoryUnavailable) {
+			response.Error(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		if err != nil {
+			slog.ErrorContext(r.Context(), "listing client ws event history", "client_id", clientID, "err", err)
+			response.Error(w, http.StatusInternalServerError, "failed to list event history")
+			return
+		}
+		body := map[string]any{"events": events}
+		// A full page may have a next one; a short page is the last.
+		if len(events) == q.Limit && len(events) > 0 {
+			body["next_before"] = events[len(events)-1].ID
+		}
+		response.OK(w, body)
+	}
+}
+
+// parseHistoryQuery validates ListEventHistory's query string, returning a
+// 400 message when it is not acceptable. name must be one of the stored
+// names: anything else could never match, and is more likely a typo the
+// caller should hear about than an empty list.
+func parseHistoryQuery(clientID int64, v url.Values) (historyQuery, string) {
+	q := historyQuery{ClientID: clientID, Limit: defaultHistoryLimit}
+	if name := v.Get("name"); name != "" {
+		if !storedEvents[name] {
+			return q, "name is not a stored event"
+		}
+		q.Name = name
+	}
+	for _, f := range []struct {
+		key string
+		dst *time.Time
+	}{{"from", &q.From}, {"to", &q.To}} {
+		if s := v.Get(f.key); s != "" {
+			t, err := time.Parse(time.RFC3339, s)
+			if err != nil {
+				return q, f.key + " must be an RFC 3339 timestamp"
+			}
+			*f.dst = t.UTC()
+		}
+	}
+	if !q.From.IsZero() && !q.To.IsZero() && !q.From.Before(q.To) {
+		return q, "from must be before to"
+	}
+	if s := v.Get("before"); s != "" {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || n <= 0 {
+			return q, "before must be a positive integer"
+		}
+		q.Before = n
+	}
+	if s := v.Get("limit"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 1 || n > maxHistoryLimit {
+			return q, "limit must be between 1 and " + strconv.Itoa(maxHistoryLimit)
+		}
+		q.Limit = n
+	}
+	return q, ""
 }
 
 type notifyRequest struct {

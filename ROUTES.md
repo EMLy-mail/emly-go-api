@@ -920,6 +920,7 @@ sempre lo stato corrente, non un flusso di eventi.
 | `POST` | `/v2/client/{client_id}/commands`    | `ADMIN` | Invia un comando (§7 di `CLIENT_WS_PROTOCOL.md`) alla macchina connessa con quell'`updater_clients.id`. |
 | `GET`  | `/v2/client/commands/{command_id}`   | `ADMIN` | Legge lo stato/esito di un comando già inviato. |
 | `GET`  | `/v2/client/{client_id}/events`      | `ADMIN` | Ultimi eventi (`event`, §8) ricevuti da quella macchina — un anello in memoria (50 per macchina, 24h), salvato su file e ricaricato al riavvio se `CLIENT_EVENTS_SNAPSHOT_PATH` è impostato. |
+| `GET`  | `/v2/client/{client_id}/events/history` | `ADMIN` | Storico degli eventi salvati in `updater_client_ws_events` (giorni, non 24h), più recenti prima, con filtri e paginazione. |
 | `POST` | `/v2/client/notify`                  | `ADMIN` | Manda un `notify` (§9) a una o più macchine connesse, o a tutte quelle che dichiarano quel `topic`. |
 | `GET`  | `/v2/client/{client_id}/logs`        | `ADMIN` | Log dell'Updater portati da `log.send_latest` per quella macchina, più recenti prima (solo metadati). |
 | `GET`  | `/v2/client/logs/{log_id}`           | `ADMIN` | Metadati di un log. `log_id` è l'id del comando che l'ha portato. |
@@ -1052,6 +1053,50 @@ cronologia vale `payload.at`, non `received_at`, perché un `suspend` non
 passato arriva dal buffer insieme al `resume`). L'anello si svuota dopo 24h:
 l'ultimo arresto resta su `updater_clients.last_stop_*`, vedi
 `GET /v2/stats/clients` (§5.7).
+
+**`GET /v2/client/{client_id}/events/history`**: lo storico durevole, letto
+dalla tabella `updater_client_ws_events` (migration 30) invece che
+dall'anello in memoria, quindi copre `CLIENT_WS_EVENTS_RETENTION_DAYS`
+(default 30 giorni) e sopravvive ai riavvii. Non contiene tutto quello che
+passa dal canale: solo gli eventi noti di §8, **mai `machine.info`** (è uno
+stato, già scritto in `updater_clients`) e `session.changed` solo quando
+l'utente loggato è cambiato (`changed: true`).
+
+Query string, tutti opzionali:
+
+| Parametro | Default | Note |
+|-----------|---------|------|
+| `name`    | tutti   | Uno degli eventi salvati (`service.started`, `service.stopped`, `machine.power`, `session.changed`, `update.available`, `update.started`, `update.applied`, `update.failed`). Un altro valore, `machine.info` compreso, è `400`. |
+| `from`    | —       | RFC 3339, incluso. Sull'ora di **ricezione** del server, non su `client_ts`. |
+| `to`      | —       | RFC 3339, escluso. Deve essere dopo `from`. |
+| `before`  | —       | Cursore: l'`id` di riga da cui proseguire (il `next_before` della pagina precedente). |
+| `limit`   | `100`   | Da `1` a `500`. |
+
+Risposta `200`:
+
+```json
+{
+  "events": [
+    { "id": 1832, "event_id": "01J8ZQ9K2M4X7B1N5C8D3E6F0G", "client_id": 42,
+      "name": "service.stopped",
+      "payload": { "reason": "shutdown", "category": "machine", "at": "2026-10-17T18:02:11Z",
+                   "uptime_seconds": 36012, "updater_version": "1.9.0" },
+      "client_ts": "2026-10-17T18:02:11.204Z", "received_at": "2026-10-17T18:02:11.391Z" }
+  ],
+  "next_before": 1832
+}
+```
+
+`id` è l'id di riga (il cursore), `event_id` l'ULID dell'envelope, lo stesso
+che compare in `GET /v2/client/{client_id}/events`. `payload` manca se era
+oltre 16 KiB: in quel caso compare `payload_dropped: true`. `client_ts` è
+l'orologio della macchina, solo informativo. `next_before` c'è solo quando la
+pagina è piena: per la successiva si rifà la stessa richiesta con
+`?before=<next_before>`. È paginazione a cursore e non `OFFSET` (come un
+`WHERE id < ?` al posto di `->skip()` in Eloquent): la pagina resta stabile
+mentre arrivano eventi nuovi. Una macchina che non esiste è una lista vuota,
+mai `404`. `400` per `client_id` o parametri non validi, `503` se l'API gira
+senza database.
 
 **`POST /v2/client/notify` — corpo JSON**
 

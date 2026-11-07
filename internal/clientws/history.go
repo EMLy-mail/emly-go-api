@@ -3,7 +3,9 @@ package clientws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -139,4 +141,88 @@ func insertWSEvent(ctx context.Context, db *sqlx.DB, row wsEventRow) error {
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		row.EventID, row.ClientID, row.Name, payload, row.PayloadDropped, row.ClientTS)
 	return err
+}
+
+const (
+	defaultHistoryLimit = 100
+	maxHistoryLimit     = 500
+)
+
+// HistoryEvent is one updater_client_ws_events row as GET
+// /v2/client/{client_id}/events/history returns it. ID is the row id, the
+// cursor for ?before=; EventID is the envelope ULID, the same id the
+// in-memory GET /v2/client/{client_id}/events shows.
+type HistoryEvent struct {
+	ID             int64           `db:"id" json:"id"`
+	EventID        string          `db:"event_id" json:"event_id"`
+	ClientID       int64           `db:"client_id" json:"client_id"`
+	Name           string          `db:"name" json:"name"`
+	Payload        json.RawMessage `db:"-" json:"payload,omitempty"`
+	RawPayload     []byte          `db:"payload" json:"-"`
+	PayloadDropped bool            `db:"payload_dropped" json:"payload_dropped,omitempty"`
+	ClientTS       *time.Time      `db:"client_ts" json:"client_ts,omitempty"`
+	ReceivedAt     time.Time       `db:"created_at" json:"received_at"`
+}
+
+// historyQuery is a validated GET .../events/history request.
+type historyQuery struct {
+	ClientID int64
+	Name     string    // "" = every name
+	From, To time.Time // zero = unbounded; From inclusive, To exclusive
+	Before   int64     // 0 = from the newest
+	Limit    int
+}
+
+// errHistoryUnavailable: no database (tests, or a build wired without one).
+// The route answers 503, like clientlogs without its store.
+var errHistoryUnavailable = errors.New("client event history unavailable")
+
+// listWSEventsFn is the seam handler tests replace to run without a
+// database.
+var listWSEventsFn = listWSEvents
+
+// listWSEvents returns one page of a machine's stored events, newest first.
+// Keyset pagination on the row id (id < before) rather than OFFSET: a page
+// stays stable while new events arrive, and it never re-reads skipped rows.
+// Id order is insertion order, which is created_at order to the millisecond.
+func listWSEvents(ctx context.Context, db *sqlx.DB, q historyQuery) ([]HistoryEvent, error) {
+	if db == nil {
+		return nil, errHistoryUnavailable
+	}
+	where := []string{"client_id = ?"}
+	args := []any{q.ClientID}
+	if q.Name != "" {
+		where = append(where, "name = ?")
+		args = append(args, q.Name)
+	}
+	if !q.From.IsZero() {
+		where = append(where, "created_at >= ?")
+		args = append(args, q.From)
+	}
+	if !q.To.IsZero() {
+		where = append(where, "created_at < ?")
+		args = append(args, q.To)
+	}
+	if q.Before > 0 {
+		where = append(where, "id < ?")
+		args = append(args, q.Before)
+	}
+	args = append(args, q.Limit)
+
+	out := []HistoryEvent{}
+	err := db.SelectContext(ctx, &out,
+		`SELECT id, event_id, client_id, name, payload, payload_dropped, client_ts, created_at
+		   FROM updater_client_ws_events
+		  WHERE `+strings.Join(where, " AND ")+`
+		  ORDER BY id DESC
+		  LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if len(out[i].RawPayload) > 0 {
+			out[i].Payload = json.RawMessage(out[i].RawPayload)
+		}
+	}
+	return out, nil
 }
