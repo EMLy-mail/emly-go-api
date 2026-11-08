@@ -939,7 +939,7 @@ Usati in `error.code` di `error`, `ack`, `result` e degli eventi `update.*`.
 | `expired` | `ack` | Ricevuto dopo `expires_at`. |
 | `busy` | `ack` | Stesso comando (stesso `name`) già in esecuzione, o un'installazione (EMLy/self-update) in corso per `service.restart`/`machine.reboot`. **Non** per un `Cycle` concorrente: `emly.manifest.check`/`updater.manifest.check` sono a secco e girano comunque (§7.2, §7.3). |
 | `disabled_by_policy` | `ack` | Il documento remoto non abilita questo comando per questa macchina (§12.3). |
-| `insecure_transport` | `ack` | Comando distruttivo ricevuto su `ws://` (§12.2). |
+| `insecure_transport` | `ack` | Comando distruttivo ricevuto su `ws://`, su un PC che non ha disattivato l'obbligo di `wss://` (§12.2). |
 | `user_active` | `ack` | `machine.reboot` con `when_user_active: "skip"` e un utente attivo. |
 | `winget_module_missing` | `result` | Modulo Microsoft.WinGet.Client assente. |
 | `powershell_not_found` | `result` | `powershell.exe` non nel PATH. |
@@ -1022,9 +1022,27 @@ macchina del sito. Per questo:
   formato (`data.sig`) da progettare prima di abilitare quei comandi fuori da
   `wss://`, non un dettaglio da aggiungere dopo.
 
+**Eccezione locale, per singolo PC** (dalla prima release dell'updater dopo la
+1.8.3). L'interruttore "Riavvio remoto solo su WSS" del tray, dopo un avviso e
+il prompt UAC di un amministratore, fa accettare `service.restart` e
+`machine.reboot` anche su `ws://` a quel PC, finché qualcuno non lo riattiva:
+la scelta resta dopo riavvii, cambi di sessione e aggiornamenti, e viene
+rimossa solo disinstallando l'updater. Di conseguenza:
+
+- un `ack` con `accepted: true` su `ws://` è possibile e non è un errore; su
+  quel PC il rischio di man-in-the-middle descritto sopra torna ad applicarsi;
+- non è una policy del server: il documento remoto non può attivarla né
+  disattivarla, e il server non sa quali PC l'hanno attivata. Resta traccia solo
+  nel log dell'updater e nell'Event Log (707 alla disattivazione e a ogni avvio
+  del servizio finché resta disattivato, 708 alla riattivazione);
+- `clientWs.commands` viene valutato comunque prima (§12.3): l'interruttore non
+  abilita un comando che il documento non elenca;
+- se servisse su un intero sito, la soluzione resta quella dei comandi firmati.
+
 Questo vale anche per ogni comando futuro che modifichi lo stato della
 macchina (`update_now`, `pause`): la regola è "lettura ovunque, scrittura solo
-su canale autenticato".
+su canale autenticato". L'eccezione locale qui sopra copre solo i due comandi
+che nomina: un comando futuro non la eredita.
 
 ### 12.3 Policy per macchina
 
@@ -1371,6 +1389,8 @@ C→S {"type":"event","data":{"name":"session.changed","payload":{"events":["rem
       `service.started`.
 - [x] Vincolo `wss://` per i comandi distruttivi (§12.2) —
       `commandSession.Secure()` in `admitCommand`, `internal/service/clientcmd.go`.
+- [x] Eccezione locale al vincolo `wss://` (§12.2) — `internal/rebootpolicy`,
+      `internal/service/rebootwss.go`, `internal/tray/rebootwss.go`.
 - [x] `AGENTS.md`: convenzione "i `SessionChangeKind` sono contratto sul filo",
       nuovi event ID per comandi ricevuti/eseguiti/rifiutati (924/925/926).
 - [x] `service.stopped` (§8.7), `service.started.last_stop` (§8.6) e
