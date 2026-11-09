@@ -1,8 +1,26 @@
 services:
+  # The API runs as UID 10001 (see Dockerfile). Docker applies the image's
+  # ownership only to a volume that is still empty, so volumes created when the
+  # API ran as root would stay root-owned and the API would lose its log files
+  # and event snapshot with nothing but a warning. This one-shot, the only part
+  # that runs as root, fixes them on every `up`. Keep the UID in sync.
+  volumes-init:
+    image: alpine:latest
+    user: "0:0"
+    restart: "no"
+    network_mode: none
+    command: ["chown", "-R", "10001:10001", "/logs", "/data"]
+    volumes:
+      - logs:/logs
+      - data:/data
+
   api:
     build: .
     restart: unless-stopped
     stop_grace_period: 1m
+    depends_on:
+      volumes-init:
+        condition: service_completed_successfully
     ports:
       - "${PORT:-8080}:8080"
     environment:

@@ -216,6 +216,10 @@ When you add a var to `internal/config/config.go`, update both of these in the s
 1. **`.env.example`** — add it with a sensible default/placeholder and a comment.
 2. **`docker-compose.yml`** — add it under `services.api.environment` using `${VAR_NAME:-default}` syntax.
 
+### Running in Docker
+
+The server runs as UID/GID `10001` (`USER` in the `Dockerfile`) and can write only to `/logs`, `/data` and `/tmp`; `/app` stays root-owned. The one-shot `volumes-init` compose service is the only part running as root: it `chown`s the two volumes before `api` starts, because Docker applies image ownership only to an empty volume, so volumes from before this change would stay root-owned and the API would lose its log files and snapshot with only a warning. `/app/logs` and `/app/data` are symlinks to the volumes, so the relative paths in `.env.example` keep working. The UID is repeated in `Dockerfile` and `docker-compose.yml`: keep them in sync. A new on-disk path must live under a volume, not `/app`.
+
 ## Documentation upkeep
 
 Two documents at the repo root describe the API to humans and must be kept

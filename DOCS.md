@@ -269,6 +269,35 @@ Si disattiva con `LOG_FILE_ENABLED=false`. In Docker l'entrypoint prima faceva
 `tee -a /logs/app.log`, un unico file che cresceva all'infinito: ora avvia
 direttamente il binario e i file giornalieri li scrive l'app.
 
+### Docker: il server non gira come root
+
+Nel container l'API gira con l'utente `emly` (UID/GID `10001`), impostato con
+`USER` nel `Dockerfile`. E' la stessa idea di PHP-FPM che esegue il codice come
+`www-data` o di un `USER node` nell'immagine di un'app Express: se qualcuno
+sfrutta una falla nell'API, si ritrova un processo senza privilegi. Per lo
+stesso motivo `/app` resta di root e il processo non puo' riscrivere il proprio
+binario.
+
+Il server puo' scrivere solo in `/logs` e `/data` (i due volumi), piu' `/tmp`.
+Due dettagli non si vedono dal solo `USER`:
+
+- **`volumes-init` in `docker-compose.yml`** — Docker applica i permessi
+  dell'immagine solo a un volume ancora vuoto. I volumi creati quando l'API
+  girava come root resterebbero di root, e l'API perderebbe i file di log e lo
+  snapshot degli eventi con un semplice warning. Questo servizio parte come
+  root a ogni `up`, fa `chown` sui due volumi e termina; `api` parte solo dopo
+  che ha finito con successo. E' l'unica parte che gira come root. Chi usa
+  l'immagine pubblicata con un altro compose deve fare lo stesso passaggio
+  (una volta basta):
+  `docker run --rm -v <volume>:/v alpine chown -R 10001:10001 /v`.
+- **I link `/app/logs` e `/app/data`** — `.env.example` usa percorsi relativi
+  (`LOG_DIR=logs`), comodi con `air` ma che nel container finirebbero sotto
+  `/app`, dove il processo non puo' scrivere. I link simbolici li portano sui
+  volumi.
+
+Il numero `10001` compare in entrambi i file: se cambia, va cambiato in tutti e
+due.
+
 ---
 
 ## 4. go-chi: il router
