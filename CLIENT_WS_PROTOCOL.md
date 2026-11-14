@@ -452,9 +452,9 @@ campi di `identity` (stessi nomi) più quello che non viaggia negli header.
         "driver_version": "31.0.101.5186", "vram_mb": 2048 }
     ],
     "batteries": [
-      { "name": "DELL 1VX1H", "manufacturer": "SMP", "chemistry": "LiP",
+      { "name": "DELL 1VX1H", "manufacturer": "SMP", "chemistry": "Lithium Polymer",
         "design_capacity_mwh": 54000, "full_charge_capacity_mwh": 47800,
-        "health_percent": 88 }
+        "health_percent": 89 }
     ],
     "power": { "on_ac": true, "charge_percent": 73 }
   },
@@ -479,7 +479,7 @@ campi di `identity` (stessi nomi) più quello che non viaggia negli header.
 | `config` | Revisione del documento remoto in uso; `source`: `remote` \| `cache` \| `legacy`. |
 | `hardware` | Raccolto una volta all'avvio dal servizio (un solo script CIM `Get-CimInstance`, in background, più `machineinfo.Collect()` per cpu/memoria/disco di sistema), tranne `system_drive.free_mb` e `power`, letti a ogni invio (`power` da `GetSystemPowerStatus`; `charge_percent` omesso se sconosciuto o senza batteria). Fonti: `system` = `Win32_ComputerSystem`; `baseboard` = `Win32_BaseBoard`; `bios` = `Win32_BIOS` (`date` in `YYYY-MM-DD`); `chassis.types` = `Win32_SystemEnclosure` (codici SMBIOS tradotti in nomi, sconosciuto → `Unknown(<n>)`); `storage` = `MSFT_PhysicalDisk` (solo dischi fisici; `media_type` `SSD`\|`HDD`\|`SCM`\|`Unknown`); `gpus` = `Win32_VideoController` (`vram_mb` dal registro, adattatori solo software esclusi); `batteries` = `Win32_Battery` + `root\wmi` (`health_percent` = capacità a pieno carica / capacità di progetto, omesso se manca una delle due). I valori segnaposto del firmware ("To Be Filled By O.E.M.", …) si omettono. |
 | `is_vm`, `vm_vendor` | Calcolati una volta dall'inventario confrontando con una tabella di firme i valori di sistema, scheda, BIOS (incluso il seriale), modelli dei dischi e nomi delle GPU; mai da `HypervisorPresent` (falso positivo con Hyper-V/VBS su host fisici). `is_vm` è sempre presente quando l'inventario è disponibile; **assenti se l'inventario non è disponibile** (raccolta fallita, scaduta o non ancora pronta), così "non so" non si confonde con "fisica". `vm_vendor` solo se `is_vm` è `true`. Escono con la sezione `hardware`. |
-| `hardware.is_laptop` | `true` se un tipo di `chassis` è portatile (Portable, Laptop, Notebook, Sub Notebook, Tablet, Convertible, Detachable); se `chassis` manca o è solo Unknown/Other, ripiego su "c'è almeno una batteria". `false` su una VM. Presente (anche `false`) quando `chassis` o `batteries` sono stati raccolti. |
+| `hardware.is_laptop` | `true` se un tipo di `chassis` è portatile (Portable, Laptop, Notebook, Sub Notebook, Tablet, Convertible, Detachable); se `chassis` manca o è solo Unknown/Other, ripiego su "c'è almeno una batteria". `false` su una VM. Presente (anche `false`) ogni volta che l'inventario hardware esiste. |
 | `products` | Mappa per slug, stessi slug del documento remoto: `emly` sempre, più **ogni** prodotto del documento effettivo, abilitato o no. Campi: `installed`, `running`, `version` (omessa se non installato), `install_dir`, `channel`, `language` (solo `emly`), `enabled` (`emly`: sempre `true`; gli altri: dal documento). Sostituisce la vecchia chiave `emly`, che non esiste più. Letto a ogni invio. `install_dir` è un percorso, ma in **uscita** dalla macchina: la regola 2 vieta percorsi nei comandi, non nei report. |
 | `pending_update`, `self_update` | Da `state.json`. |
 
@@ -553,7 +553,9 @@ vincolo lato client descritto in §12.
 `sections` ammessi: `identity`, `logged_user`, `network`, `site`, `config`,
 `hardware`, `products`, `update`. `emly` è accettato come alias di
 `products` (nome della sezione prima che `machine.info` riportasse ogni
-prodotto). Valore sconosciuto → `invalid_args`.
+prodotto). Valore sconosciuto → `invalid_args`. Gli updater precedenti a questa
+release non conoscono `products` e lo rifiutano con `invalid_args`: a loro
+si manda `emly` (o nessuna sezione).
 
 `result.payload` = `MachineInfo` (§6.5), ridotto alle sezioni richieste.
 
