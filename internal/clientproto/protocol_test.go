@@ -50,6 +50,8 @@ func TestValidateArgs(t *testing.T) {
 		{CmdMachineInfo, ``, ""},
 		{CmdMachineInfo, `{}`, ""},
 		{CmdMachineInfo, `{"sections":["network","hardware"]}`, ""},
+		{CmdMachineInfo, `{"sections":["products"]}`, ""},
+		{CmdMachineInfo, `{"sections":["emly"]}`, ""},
 		{CmdMachineInfo, `{"sections":["gpu"]}`, ErrInvalidArgs},
 		{CmdMachineInfo, `{"verbose":true}`, ErrInvalidArgs},
 		{CmdEMLyManifestCheck, `{}`, ""},

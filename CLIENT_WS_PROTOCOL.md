@@ -434,10 +434,38 @@ campi di `identity` (stessi nomi) più quello che non viaggia negli header.
   },
   "site": { "dc": "DC-MI1", "matched_site": "DC-MI1", "server": { "url": "…", "role": "primary" } },
   "config": { "revision": 43, "fetched_at": "2026-09-23T08:00:00Z", "source": "remote" },
-  "hardware": { "cpu": "Intel(R) Core(TM) i5-1345U", "cores": 10, "memory_mb": 16384,
-                "system_drive": { "total_mb": 488000, "free_mb": 201334 } },
-  "emly": { "installed": true, "running": true, "install_dir": "C:\\3gIT\\EMLy",
-            "channel": "stable", "language": "it" },
+  "is_vm": false,
+  "hardware": {
+    "cpu": "Intel(R) Core(TM) i5-1345U", "cores": 10, "memory_mb": 16384,
+    "system_drive": { "total_mb": 475821, "free_mb": 201334 },
+    "system":    { "manufacturer": "Dell Inc.", "model": "Latitude 5540" },
+    "baseboard": { "manufacturer": "Dell Inc.", "product": "0XYZ12" },
+    "bios":      { "manufacturer": "Dell Inc.", "version": "1.14.0", "date": "2025-06-12" },
+    "chassis":   { "types": ["Notebook"] },
+    "is_laptop": true,
+    "storage": [
+      { "manufacturer": "Samsung", "model": "SAMSUNG MZVL2512HCJQ-00BL7",
+        "media_type": "SSD", "bus_type": "NVMe", "size_mb": 488386 }
+    ],
+    "gpus": [
+      { "name": "Intel(R) Iris(R) Xe Graphics", "manufacturer": "Intel Corporation",
+        "driver_version": "31.0.101.5186", "vram_mb": 2048 }
+    ],
+    "batteries": [
+      { "name": "DELL 1VX1H", "manufacturer": "SMP", "chemistry": "LiP",
+        "design_capacity_mwh": 54000, "full_charge_capacity_mwh": 47800,
+        "health_percent": 88 }
+    ],
+    "power": { "on_ac": true, "charge_percent": 73 }
+  },
+  "products": {
+    "emly":  { "installed": true, "running": true, "version": "3.4.1",
+               "install_dir": "C:\\3gIT\\EMLy", "channel": "stable",
+               "language": "it", "enabled": true },
+    "altro": { "installed": false, "running": false,
+               "install_dir": "C:\\Program Files\\Altro", "channel": "stable",
+               "enabled": false }
+  },
   "pending_update": { "version": "3.5.0", "forced": false, "downloaded_at": "…" },
   "self_update": { "version": "1.9.1", "attempts": 1, "gave_up": false }
 }
@@ -449,8 +477,11 @@ campi di `identity` (stessi nomi) più quello che non viaggia negli header.
 | `updater_version` | Presente anche se viaggia nello User-Agent: qui è la versione *dopo* un eventuale self-update avvenuto a connessione aperta, cosa che lo User-Agent dell'upgrade non può riflettere. |
 | `site` | Esito di `beginCycle`: DC trovato, sito corrisposto (omesso se nessuno), server scelto. È l'evento 700 in forma strutturata. |
 | `config` | Revisione del documento remoto in uso; `source`: `remote` \| `cache` \| `legacy`. |
-| `hardware` | Raccolto una volta all'avvio, come `machineinfo.Collect()`, tranne `system_drive.free_mb` (letto al momento). |
-| `emly`, `pending_update`, `self_update` | Da `config.ini` di EMLy e da `state.json`. `install_dir` è un percorso, ma in **uscita** dalla macchina: la regola 2 vieta percorsi nei comandi, non nei report. |
+| `hardware` | Raccolto una volta all'avvio dal servizio (un solo script CIM `Get-CimInstance`, in background, più `machineinfo.Collect()` per cpu/memoria/disco di sistema), tranne `system_drive.free_mb` e `power`, letti a ogni invio (`power` da `GetSystemPowerStatus`; `charge_percent` omesso se sconosciuto o senza batteria). Fonti: `system` = `Win32_ComputerSystem`; `baseboard` = `Win32_BaseBoard`; `bios` = `Win32_BIOS` (`date` in `YYYY-MM-DD`); `chassis.types` = `Win32_SystemEnclosure` (codici SMBIOS tradotti in nomi, sconosciuto → `Unknown(<n>)`); `storage` = `MSFT_PhysicalDisk` (solo dischi fisici; `media_type` `SSD`\|`HDD`\|`SCM`\|`Unknown`); `gpus` = `Win32_VideoController` (`vram_mb` dal registro, adattatori solo software esclusi); `batteries` = `Win32_Battery` + `root\wmi` (`health_percent` = capacità a pieno carica / capacità di progetto, omesso se manca una delle due). I valori segnaposto del firmware ("To Be Filled By O.E.M.", …) si omettono. |
+| `is_vm`, `vm_vendor` | Calcolati una volta dall'inventario confrontando con una tabella di firme i valori di sistema, scheda, BIOS (incluso il seriale), modelli dei dischi e nomi delle GPU; mai da `HypervisorPresent` (falso positivo con Hyper-V/VBS su host fisici). `is_vm` è sempre presente quando l'inventario è disponibile; **assenti se l'inventario non è disponibile** (raccolta fallita, scaduta o non ancora pronta), così "non so" non si confonde con "fisica". `vm_vendor` solo se `is_vm` è `true`. Escono con la sezione `hardware`. |
+| `hardware.is_laptop` | `true` se un tipo di `chassis` è portatile (Portable, Laptop, Notebook, Sub Notebook, Tablet, Convertible, Detachable); se `chassis` manca o è solo Unknown/Other, ripiego su "c'è almeno una batteria". `false` su una VM. Presente (anche `false`) quando `chassis` o `batteries` sono stati raccolti. |
+| `products` | Mappa per slug, stessi slug del documento remoto: `emly` sempre, più **ogni** prodotto del documento effettivo, abilitato o no. Campi: `installed`, `running`, `version` (omessa se non installato), `install_dir`, `channel`, `language` (solo `emly`), `enabled` (`emly`: sempre `true`; gli altri: dal documento). Sostituisce la vecchia chiave `emly`, che non esiste più. Letto a ogni invio. `install_dir` è un percorso, ma in **uscita** dalla macchina: la regola 2 vieta percorsi nei comandi, non nei report. |
+| `pending_update`, `self_update` | Da `state.json`. |
 
 Qualsiasi sezione che il client non riesce a raccogliere si omette; non fa
 fallire il messaggio.
@@ -520,7 +551,9 @@ vincolo lato client descritto in §12.
 ```
 
 `sections` ammessi: `identity`, `logged_user`, `network`, `site`, `config`,
-`hardware`, `emly`, `update`. Valore sconosciuto → `invalid_args`.
+`hardware`, `products`, `update`. `emly` è accettato come alias di
+`products` (nome della sezione prima che `machine.info` riportasse ogni
+prodotto). Valore sconosciuto → `invalid_args`.
 
 `result.payload` = `MachineInfo` (§6.5), ridotto alle sezioni richieste.
 

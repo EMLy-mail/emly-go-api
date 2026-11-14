@@ -17,7 +17,11 @@ const (
 )
 
 // MachineInfoSections are the allowed values of machine.info's "sections".
-var MachineInfoSections = []string{"identity", "logged_user", "network", "site", "config", "hardware", "emly", "update"}
+var MachineInfoSections = []string{"identity", "logged_user", "network", "site", "config", "hardware", "products", "update"}
+
+// MachineInfoSectionAliases are old section names still accepted: "emly" was
+// the section before machine.info reported every product.
+var MachineInfoSectionAliases = map[string]string{"emly": "products"}
 
 type MachineInfoArgs struct {
 	Sections []string `json:"sections,omitempty"`
@@ -79,7 +83,7 @@ func ValidateArgs(name string, raw json.RawMessage) *ErrorBody {
 			return invalid("machine.info: %v", err)
 		}
 		for _, s := range a.Sections {
-			if !contains(MachineInfoSections, s) {
+			if _, alias := MachineInfoSectionAliases[s]; !alias && !contains(MachineInfoSections, s) {
 				return invalid("machine.info: unknown section %q", s)
 			}
 		}
