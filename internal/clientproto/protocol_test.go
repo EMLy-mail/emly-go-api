@@ -67,6 +67,15 @@ func TestValidateArgs(t *testing.T) {
 		{CmdLogSendLatest, ``, ""},
 		{CmdLogSendLatest, `{}`, ""},
 		{CmdLogSendLatest, `{"lines":100}`, ErrInvalidArgs},
+		{CmdProductManifestCheck, `{"product":"rocketchat"}`, ""},
+		{CmdProductManifestCheck, `{"product":"emly"}`, ""},
+		{CmdProductManifestCheck, ``, ErrInvalidArgs},
+		{CmdProductManifestCheck, `{}`, ErrInvalidArgs},
+		{CmdProductManifestCheck, `{"product":"../x"}`, ErrInvalidArgs},
+		{CmdProductManifestCheck, `{"product":"a","channel":"beta"}`, ErrInvalidArgs},
+		{CmdConfigRefresh, ``, ""},
+		{CmdConfigRefresh, `{}`, ""},
+		{CmdConfigRefresh, `{"force":true}`, ErrInvalidArgs},
 		{"machine.format_disk", `{}`, ErrUnsupportedCommand},
 		{CmdMachineInfo, `[1]`, ErrInvalidArgs},
 	}
@@ -105,7 +114,8 @@ func TestIntersectKeepsOfferedOrderAndDropsUnknown(t *testing.T) {
 
 func TestEveryCommandHasASpec(t *testing.T) {
 	for _, name := range []string{CmdMachineInfo, CmdEMLyManifestCheck, CmdUpdaterManifestCheck,
-		CmdAppsListUpgradable, CmdServiceRestart, CmdMachineReboot, CmdLogSendLatest} {
+		CmdAppsListUpgradable, CmdServiceRestart, CmdMachineReboot, CmdLogSendLatest,
+		CmdProductManifestCheck, CmdConfigRefresh} {
 		if _, ok := Commands[name]; !ok {
 			t.Errorf("no CommandSpec for %s", name)
 		}

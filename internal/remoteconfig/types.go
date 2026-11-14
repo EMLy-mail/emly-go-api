@@ -211,6 +211,7 @@ type ClientWS struct {
 var KnownClientWSCommands = []string{
 	"machine.info", "emly.manifest.check", "updater.manifest.check",
 	"apps.list_upgradable", "service.restart", "machine.reboot", "log.send_latest",
+	"product.manifest.check", "config.refresh",
 }
 
 // ProductSettings is one entry of the products section.

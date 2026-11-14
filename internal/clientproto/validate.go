@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"time"
 )
 
@@ -21,6 +22,15 @@ var MachineInfoSections = []string{"identity", "logged_user", "network", "site",
 type MachineInfoArgs struct {
 	Sections []string `json:"sections,omitempty"`
 }
+
+// ProductManifestCheckArgs are product.manifest.check's arguments (§7.8).
+type ProductManifestCheckArgs struct {
+	Product string `json:"product"`
+}
+
+// productSlugPattern is the product registry's slug rule
+// (internal/productreg), repeated here so clientproto stays import-free.
+var productSlugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,19}$`)
 
 type RebootArgs struct {
 	DelaySeconds   *int   `json:"delay_seconds,omitempty"`
@@ -86,7 +96,17 @@ func ValidateArgs(name string, raw json.RawMessage) *ErrorBody {
 			return invalid("machine.reboot: when_user_active must be %q or %q", WhenUserActiveWarn, WhenUserActiveSkip)
 		}
 		return nil
-	case CmdEMLyManifestCheck, CmdUpdaterManifestCheck, CmdAppsListUpgradable, CmdServiceRestart, CmdLogSendLatest:
+	case CmdProductManifestCheck:
+		var a ProductManifestCheckArgs
+		if err := decodeStrict(raw, &a); err != nil {
+			return invalid("product.manifest.check: %v", err)
+		}
+		if !productSlugPattern.MatchString(a.Product) {
+			return invalid("product.manifest.check: product must be a product slug, got %q", a.Product)
+		}
+		return nil
+	case CmdEMLyManifestCheck, CmdUpdaterManifestCheck, CmdAppsListUpgradable, CmdServiceRestart, CmdLogSendLatest,
+		CmdConfigRefresh:
 		var none struct{}
 		if err := decodeStrict(raw, &none); err != nil {
 			return invalid("%s takes no arguments: %v", name, err)

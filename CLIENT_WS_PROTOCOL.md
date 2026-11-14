@@ -505,6 +505,8 @@ riceve `ack` con `busy`.
 | `service.restart` | — | `event` `service.started` | 120s | **distruttivo** |
 | `machine.reboot` | `delay_seconds`, `when_user_active` | `event` `service.started` | `delay_seconds` + 15 min | **distruttivo** |
 | `log.send_latest` | — | `result` `LogFile` | 30s | lettura (**opt-in**, §12.3) |
+| `product.manifest.check` | `product` | `result` `ManifestCheck` | 60s | lettura |
+| `config.refresh` | — | `result` `{revision…}` | 60s | lettura |
 
 "Distruttivo" significa: autorizzazione rafforzata lato server (admin key +
 conferma in dashboard, come `service_restart` nella spec agent-channel) **e**
@@ -656,6 +658,56 @@ Lato API, un `result` `ok` viene salvato da `internal/clientlogs` (via
 (encoding, base64, gzip, al massimo 4 MiB decompressi) e conservato come
 `.log.gz` nel bucket dei file API, o nella riga stessa senza bucket. Resta
 consultabile dalle route di §13 dopo che il `CommandRecord` è uscito dal hub.
+
+### 7.8 `product.manifest.check`
+
+Come §7.2, per un qualsiasi prodotto. `args` obbligatorio:
+
+```jsonc
+{ "product": "rocketchat" }   // slug, ^[a-z0-9][a-z0-9-]{0,19}$
+```
+
+Qualsiasi altro campo, o uno slug malformato, è `invalid_args`. Con
+`product: "emly"` il client esegue lo stesso check di §7.2. Per gli altri
+prodotti usa la definizione della sezione `products` del documento effettivo
+(override applicati), anche se il prodotto vi è `enabled: false`: il check è
+di sola lettura, e sapere cosa troverebbe serve proprio prima di abilitarlo.
+Lo slug viene interrogato sulla stessa catena di server del ciclo, sulla route
+del prodotto (`/v2/updates/manifest/<slug>`).
+
+`result.payload` = `ManifestCheck` con `target` = lo slug. `decision` è
+`up_to_date`, `install_next_cycle`, `forced`, `paused`, oppure:
+`not_configured` (il documento non conosce il prodotto: nessun manifest viene
+chiesto), `disabled` (prodotto `enabled: false`), `not_installed` (assente e
+`installWhenAbsent: false`), `unknown_version` (versione installata non
+leggibile: il ciclo lascerebbe stare il prodotto; nessun manifest chiesto).
+
+### 7.9 `config.refresh`
+
+Scarica subito il documento di configurazione remota, senza aspettare
+`refresh.interval` e senza il jitter di `config.published` (§9.2): lo stesso
+fetch condizionale (`If-None-Match`) del ciclo, con la stessa validazione
+tutto-o-niente. `args` assente o `{}`.
+
+Il documento accettato diventa la policy corrente; i valori letti dal ciclo
+(server, kill switch, prodotti) valgono dal ciclo successivo, che il client
+sveglia subito se la revisione è cambiata.
+
+```jsonc
+// result.payload
+{
+  "previous_revision": 41,
+  "revision": 42,
+  "changed": true,
+  "source": "remote",            // remote | cache | default
+  "fetched_from": "main",        // omesso se nessun server ha risposto
+  "fetched_at": "2026-11-14T10:00:00Z",
+  "unreachable": false           // true: nessun server raggiungibile
+}
+```
+
+Con `[remote_config] enabled=false` in `config.ini` il comando risponde
+`disabled_by_policy`.
 
 ## 8. Catalogo eventi (client → server)
 

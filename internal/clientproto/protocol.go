@@ -37,6 +37,8 @@ const (
 	CmdServiceRestart       = "service.restart"
 	CmdMachineReboot        = "machine.reboot"
 	CmdLogSendLatest        = "log.send_latest"
+	CmdProductManifestCheck = "product.manifest.check"
+	CmdConfigRefresh        = "config.refresh"
 )
 
 // Event names (§8).
@@ -333,6 +335,8 @@ var Commands = map[string]CommandSpec{
 	CmdServiceRestart:       {ResultTimeout: 120 * time.Second, Destructive: true, ResultViaEvent: true},
 	CmdMachineReboot:        {ResultTimeout: 15 * time.Minute, Destructive: true, ResultViaEvent: true},
 	CmdLogSendLatest:        {ResultTimeout: 30 * time.Second},
+	CmdProductManifestCheck: {ResultTimeout: 60 * time.Second},
+	CmdConfigRefresh:        {ResultTimeout: 60 * time.Second},
 }
 
 // ServerCapabilities is every command, event and topic this server
@@ -341,6 +345,7 @@ var Commands = map[string]CommandSpec{
 var ServerCapabilities = []string{
 	CmdMachineInfo, CmdEMLyManifestCheck, CmdUpdaterManifestCheck,
 	CmdAppsListUpgradable, CmdServiceRestart, CmdMachineReboot, CmdLogSendLatest,
+	CmdProductManifestCheck, CmdConfigRefresh,
 	EvtMachineInfo, EvtSessionChanged, EvtUpdateAvailable, EvtUpdateStarted,
 	EvtUpdateApplied, EvtUpdateFailed, EvtServiceStarted, EvtServiceStopped,
 	EvtMachinePower,
